@@ -501,7 +501,6 @@ pub(in crate::workspace) enum SettingsWorkspaceEvent {
     ResetNativeUpdateOverlay,
     ShowNativeUpdateNotification,
     ShowNativeUpdateToast(SettingsWorkspaceToast),
-    RequestAutomaticNativeUpdateCheck,
     RequestQuitAfterNativeUpdate,
     DataDirectoryConfirmOpened,
     DataDirectoryOperationReady,

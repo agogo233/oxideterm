@@ -1,14 +1,6 @@
 use super::*;
 use gpui::Task;
 
-const AUTOMATIC_NATIVE_UPDATE_DELAY: Duration = Duration::from_secs(8);
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum NativeUpdateCheckKind {
-    Manual,
-    Automatic,
-}
-
 #[derive(Debug)]
 pub(in crate::workspace) enum NativeUpdateUiState {
     Idle,
@@ -64,13 +56,11 @@ pub(super) struct NativeUpdateRuntime {
     package: Option<oxideterm_update::NativeUpdatePackage>,
     check_task: Option<Task<()>>,
     operation_task: Option<Task<()>>,
-    automatic_check_task: Option<Task<()>>,
     _delivery_task: Task<()>,
     error_fallback: String,
 }
 
 struct NativeUpdateCheckRequest {
-    kind: NativeUpdateCheckKind,
     channel: UpdateChannel,
     current_version: String,
     install_flavor: Result<oxideterm_update::InstallFlavor, String>,
@@ -117,7 +107,6 @@ impl NativeUpdateRuntime {
             package: None,
             check_task: None,
             operation_task: None,
-            automatic_check_task: None,
             _delivery_task: delivery_task,
             error_fallback: String::new(),
         }
@@ -200,26 +189,6 @@ impl SettingsWorkspaceEntity {
         }
     }
 
-    pub(in crate::workspace) fn schedule_automatic_native_update_check(
-        &mut self,
-        cx: &mut Context<Self>,
-    ) {
-        if self.native_update.automatic_check_task.is_some() {
-            return;
-        }
-
-        // Delay manifest traffic until session restoration and the first frame settle.
-        self.native_update.automatic_check_task = Some(cx.spawn(async move |settings, cx| {
-            Timer::after(AUTOMATIC_NATIVE_UPDATE_DELAY).await;
-            let _ = settings.update(cx, |settings, cx| {
-                settings.native_update.automatic_check_task = None;
-                if matches!(settings.native_update.state, NativeUpdateUiState::Idle) {
-                    cx.emit(SettingsWorkspaceEvent::RequestAutomaticNativeUpdateCheck);
-                }
-            });
-        }));
-    }
-
     fn start_native_update_check(
         &mut self,
         request: NativeUpdateCheckRequest,
@@ -244,11 +213,7 @@ impl SettingsWorkspaceEntity {
         let install_flavor = match request.install_flavor {
             Ok(install_flavor) => install_flavor,
             Err(error) => {
-                self.native_update.state = if request.kind == NativeUpdateCheckKind::Automatic {
-                    NativeUpdateUiState::Idle
-                } else {
-                    NativeUpdateUiState::Error(error)
-                };
+                self.native_update.state = NativeUpdateUiState::Error(error);
                 cx.notify();
                 return true;
             }
@@ -276,11 +241,6 @@ impl SettingsWorkspaceEntity {
             let _ = settings.update(cx, |settings, cx| {
                 settings.native_update.check_task = None;
                 settings.native_update.state = match result {
-                    Ok(oxideterm_update::NativeUpdateStatus::UpToDate)
-                        if request.kind == NativeUpdateCheckKind::Automatic =>
-                    {
-                        NativeUpdateUiState::Idle
-                    }
                     Ok(oxideterm_update::NativeUpdateStatus::UpToDate) => {
                         NativeUpdateUiState::UpToDate
                     }
@@ -288,9 +248,6 @@ impl SettingsWorkspaceEntity {
                         settings.native_update.package = Some(package.clone());
                         cx.emit(SettingsWorkspaceEvent::ShowNativeUpdateNotification);
                         NativeUpdateUiState::Available(package)
-                    }
-                    Err(_error) if request.kind == NativeUpdateCheckKind::Automatic => {
-                        NativeUpdateUiState::Idle
                     }
                     Err(error) => NativeUpdateUiState::Error(error),
                 };
@@ -598,9 +555,6 @@ impl WorkspaceApp {
                 };
                 self.push_ai_settings_toast(message, variant, cx);
             }
-            SettingsWorkspaceEvent::RequestAutomaticNativeUpdateCheck => {
-                self.check_native_update_with_kind(NativeUpdateCheckKind::Automatic, cx);
-            }
             SettingsWorkspaceEvent::RequestQuitAfterNativeUpdate => {
                 self.schedule_native_update_quit(cx);
             }
@@ -873,30 +827,12 @@ impl WorkspaceApp {
     }
 
     pub(in crate::workspace) fn check_native_update(&mut self, cx: &mut Context<Self>) {
-        self.check_native_update_with_kind(NativeUpdateCheckKind::Manual, cx);
-    }
-
-    pub(in crate::workspace) fn schedule_automatic_native_update_check(
-        &mut self,
-        cx: &mut Context<Self>,
-    ) {
-        self.settings_workspace.update(cx, |settings, cx| {
-            settings.schedule_automatic_native_update_check(cx);
-        });
-    }
-
-    fn check_native_update_with_kind(
-        &mut self,
-        check_kind: NativeUpdateCheckKind,
-        cx: &mut Context<Self>,
-    ) {
         let channel = self.settings_store.settings().general.update_channel;
         let install_flavor =
             oxideterm_update::NativeInstallContext::current(self.native_update_is_portable(cx))
                 .map(|context| context.install_flavor)
                 .map_err(|error| error.to_string());
         let request = NativeUpdateCheckRequest {
-            kind: check_kind,
             channel,
             current_version: env!("CARGO_PKG_VERSION").to_string(),
             install_flavor,

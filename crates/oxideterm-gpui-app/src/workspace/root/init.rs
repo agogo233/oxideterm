@@ -882,7 +882,6 @@ impl WorkspaceApp {
         workspace.sync_active_terminal_recording_elapsed_tick(cx);
         workspace.sync_active_privilege_prompt_inline_hint(cx);
         workspace.refresh_terminal_trigger_runtime(cx);
-        workspace.schedule_automatic_native_update_check(cx);
         cx.on_release(|workspace, cx| {
             workspace.flush_main_window_state(cx);
             workspace.shutdown_terminal_trigger_runtime();
