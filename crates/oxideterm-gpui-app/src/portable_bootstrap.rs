@@ -538,6 +538,10 @@ impl Render for PortableBootstrapWindow {
         div()
             .id("portable-bootstrap-window")
             .track_focus(&self.focus_handle)
+            // The bootstrap window must join the Workspace key context so the
+            // Paste binding (keybindings.rs CONTEXT) can dispatch the action
+            // to this on_action handler.
+            .key_context("Workspace")
             .on_key_down(cx.listener(Self::handle_key_down))
             .on_action(cx.listener(|_this, _: &crate::Copy, _window, cx| {
                 cx.stop_propagation();
