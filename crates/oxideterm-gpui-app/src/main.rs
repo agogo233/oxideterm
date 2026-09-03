@@ -15,9 +15,10 @@ mod single_instance;
 mod window_placement;
 mod workspace;
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 
-use gpui::{App, AppContext, actions};
+use gpui::{App, AppContext, RESTART_WAIT_ARGUMENT, actions};
 use oxideterm_i18n::I18n;
 use oxideterm_settings::{SettingsStore, WindowUiState};
 use zeroize::Zeroizing;
@@ -96,6 +97,15 @@ actions!(
 );
 
 fn main() {
+    // The Windows restart path relaunches this executable with a wait marker
+    // ahead of the original arguments. The waiter must not touch stores, the
+    // single-instance guard, or any other startup state before the old process
+    // has exited, so this check runs before everything else.
+    if let Some((wait_pid, launch_args)) = extract_restart_wait(std::env::args_os().collect()) {
+        wait_for_process_exit(wait_pid);
+        relaunch_after_restart_wait(&launch_args);
+        return;
+    }
     oxideterm_acp_adapter::run_from_env_if_requested();
     let native_launch_args = native_launch_args().unwrap_or_else(|error| {
         eprintln!("failed to read native connection launch argument: {error}");
@@ -428,6 +438,58 @@ fn looks_like_connection_uri(value: &str) -> bool {
         })
 }
 
+/// Recognizes the gpui restart-wait marker in argv and returns the pid to wait
+/// for plus the cleaned argument vector. A malformed marker (missing or
+/// non-numeric pid) is left in place so normal argument parsing ignores it.
+fn extract_restart_wait(mut args: Vec<OsString>) -> Option<(u32, Vec<OsString>)> {
+    let index = args.iter().position(|arg| arg == RESTART_WAIT_ARGUMENT)?;
+    let pid = args.get(index + 1)?.to_string_lossy().parse::<u32>().ok()?;
+    args.drain(index..index + 2);
+    Some((pid, args))
+}
+
+/// Blocks until the previous instance exits so the single-instance lock is
+/// free before the relaunched process acquires it.
+#[cfg(target_os = "windows")]
+fn wait_for_process_exit(pid: u32) {
+    use windows::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject};
+
+    // Cap the wait so a wedged old instance cannot strand the waiter forever;
+    // on timeout the relaunch still happens and the single-instance guard
+    // forwards to the surviving instance instead of starting a second one.
+    const RESTART_WAIT_TIMEOUT_MS: u32 = 60_000;
+    unsafe {
+        // An already-exited or invalid pid fails to open: nothing to wait for.
+        if let Ok(handle) = OpenProcess(PROCESS_SYNCHRONIZE, false, pid) {
+            if WaitForSingleObject(handle, RESTART_WAIT_TIMEOUT_MS) == WAIT_TIMEOUT {
+                eprintln!("restart wait timed out; relaunching anyway");
+            }
+            let _ = CloseHandle(handle);
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn wait_for_process_exit(_pid: u32) {}
+
+fn relaunch_after_restart_wait(args: &[OsString]) {
+    let exe = std::env::current_exe().unwrap_or_else(|error| {
+        eprintln!("failed to resolve executable for restart: {error}");
+        std::process::exit(2);
+    });
+    let mut command = std::process::Command::new(exe);
+    // args[0] is the waiter's own program path; the child supplies its own.
+    command.args(args.iter().skip(1));
+    match command.spawn() {
+        Ok(_) => std::process::exit(0),
+        Err(error) => {
+            eprintln!("failed to relaunch after restart wait: {error}");
+            std::process::exit(2);
+        }
+    }
+}
+
 fn quit(_: &Quit, cx: &mut App) {
     oxideterm_desktop_presence::request_quit();
     cx.quit();
@@ -449,4 +511,41 @@ fn desktop_presence_menu_from_settings() -> oxideterm_desktop_presence::DesktopP
         .map(|store| store.settings().clone())
         .unwrap_or_default();
     desktop_presence_menu(&I18n::new(locale_from_settings(settings.general.language)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_restart_wait;
+    use std::ffi::OsString;
+
+    #[test]
+    fn restart_wait_marker_yields_pid_and_cleaned_args() {
+        let args = vec![
+            OsString::from("oxideterm-native.exe"),
+            OsString::from(super::RESTART_WAIT_ARGUMENT),
+            OsString::from("4242"),
+            OsString::from("--connection-launch-file"),
+            OsString::from("handoff.json"),
+        ];
+        let (pid, cleaned) = extract_restart_wait(args).expect("marker should be recognized");
+        assert_eq!(pid, 4242);
+        assert_eq!(
+            cleaned,
+            vec![
+                OsString::from("oxideterm-native.exe"),
+                OsString::from("--connection-launch-file"),
+                OsString::from("handoff.json"),
+            ]
+        );
+    }
+
+    #[test]
+    fn restart_wait_marker_without_numeric_pid_is_ignored() {
+        let args = vec![
+            OsString::from("oxideterm-native.exe"),
+            OsString::from(super::RESTART_WAIT_ARGUMENT),
+            OsString::from("not-a-pid"),
+        ];
+        assert!(extract_restart_wait(args).is_none());
+    }
 }

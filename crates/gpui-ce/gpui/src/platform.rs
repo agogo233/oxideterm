@@ -135,6 +135,13 @@ pub enum MacActivationPolicy {
     Prohibited,
 }
 
+/// Command-line marker used by the Windows restart implementation. The
+/// relaunched instance carries `<marker> <old pid>` before the original
+/// arguments, waits for the old process to exit, then starts a clean copy of
+/// itself. This replaces a hidden PowerShell relay that behavioral antivirus
+/// engines flag as trojan-like process spawning.
+pub const RESTART_WAIT_ARGUMENT: &str = "--gpui-restart-wait-pid";
+
 #[expect(missing_docs)]
 pub trait Platform: 'static {
     fn background_executor(&self) -> BackgroundExecutor;

@@ -4235,7 +4235,6 @@ version = "0.2.2"
 dependencies = [
  "anyhow",
  "log",
- "which",
 ]
 
 [[package]]
@@ -8297,6 +8296,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
+ "windows 0.61.3",
  "zeroize",
 ]
 
