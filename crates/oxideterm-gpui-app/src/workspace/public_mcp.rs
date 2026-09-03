@@ -320,43 +320,13 @@ impl PublicMcpWorkspaceBridge {
             artifacts: Arc::default(),
             broker,
         });
-        let endpoint_state = read_endpoint_state(&endpoint_state_path);
-        let preferred_port = endpoint_state
-            .as_ref()
+        let preferred_port = read_endpoint_state(&endpoint_state_path)
             .map(|state| state.preferred_port)
             .unwrap_or(0);
-        let initial_port = if preferred_port == 0 {
-            endpoint_state.as_ref().map(|state| state.port).unwrap_or(0)
-        } else {
-            preferred_port
-        };
-        let (server, endpoint_url, server_error) = if client_registry_ready {
-            let started =
-                start_http_server(runtime, state.clone(), initial_port).or_else(|first_error| {
-                    // Only automatic mode may move away from the previous discovery port.
-                    if preferred_port != 0 || initial_port == 0 {
-                        Err(first_error)
-                    } else {
-                        start_http_server(runtime, state.clone(), 0)
-                    }
-                });
-            match started {
-                Ok(server) => {
-                    let endpoint_url = Some(server.endpoint_url());
-                    // A persistence failure must not hide a healthy live endpoint.
-                    let _ =
-                        persist_endpoint_state(&endpoint_state_path, server.port(), preferred_port);
-                    (Some(server), endpoint_url, None)
-                }
-                Err(error) => (None, None, Some(error.to_string())),
-            }
-        } else {
-            (None, None, None)
-        };
-        Self {
-            endpoint_url,
-            startup_error: registry_error.or(server_error),
-            server,
+        let mut bridge = Self {
+            endpoint_url: None,
+            startup_error: registry_error,
+            server: None,
             port_draft: preferred_port.to_string(),
             client_registry_ready,
             state,
@@ -377,11 +347,75 @@ impl PublicMcpWorkspaceBridge {
             recordings: HashMap::new(),
             desktops: HashMap::new(),
             runtime_handles: Arc::default(),
+        };
+        // The endpoint only listens while at least one enabled client can use
+        // it; with no registered clients the workspace starts without a
+        // loopback listener at all.
+        if client_registry_ready && bridge.has_enabled_clients() {
+            if let Err(error) = bridge.start_listener(runtime) {
+                bridge.startup_error = bridge.startup_error.or(Some(error.to_string()));
+            }
         }
+        bridge
     }
 
     pub(in crate::workspace) fn endpoint_url(&self) -> Option<&str> {
         self.endpoint_url.as_deref()
+    }
+
+    fn has_enabled_clients(&self) -> bool {
+        self.state.clients.list().iter().any(|client| client.enabled)
+    }
+
+    /// Binds the loopback endpoint when it is not running yet. The preferred
+    /// port comes from the endpoint state file; automatic mode falls back to an
+    /// ephemeral port when the previous discovery port is still unavailable.
+    fn start_listener(&mut self, runtime: &tokio::runtime::Handle) -> std::io::Result<()> {
+        if self.server.is_some() || !self.client_registry_ready {
+            return Ok(());
+        }
+        let endpoint_state_path = public_mcp_endpoint_state_path(&self.settings_path);
+        let endpoint_state = read_endpoint_state(&endpoint_state_path);
+        let preferred_port = endpoint_state
+            .as_ref()
+            .map(|state| state.preferred_port)
+            .unwrap_or(0);
+        let initial_port = if preferred_port == 0 {
+            endpoint_state.as_ref().map(|state| state.port).unwrap_or(0)
+        } else {
+            preferred_port
+        };
+        let started =
+            start_http_server(runtime, self.state.clone(), initial_port).or_else(|first_error| {
+                // Only automatic mode may move away from the previous discovery port.
+                if preferred_port != 0 || initial_port == 0 {
+                    Err(first_error)
+                } else {
+                    start_http_server(runtime, self.state.clone(), 0)
+                }
+            })?;
+        let endpoint_url = started.endpoint_url();
+        // A persistence failure must not hide a healthy live endpoint.
+        let _ = persist_endpoint_state(&endpoint_state_path, started.port(), preferred_port);
+        self.endpoint_url = Some(endpoint_url);
+        self.server = Some(started);
+        self.startup_error = None;
+        Ok(())
+    }
+
+    /// Stops the loopback endpoint once no enabled client can reach it, and
+    /// clears the discovery port while keeping the user's preferred port.
+    fn stop_listener_if_idle(&mut self) {
+        if self.server.is_none() || self.has_enabled_clients() {
+            return;
+        }
+        let endpoint_state_path = public_mcp_endpoint_state_path(&self.settings_path);
+        let preferred_port = read_endpoint_state(&endpoint_state_path)
+            .map(|state| state.preferred_port)
+            .unwrap_or(0);
+        let _ = persist_endpoint_state(&endpoint_state_path, 0, preferred_port);
+        self.server.take();
+        self.endpoint_url = None;
     }
 
     pub(in crate::workspace) fn startup_error(&self) -> Option<&str> {
@@ -406,8 +440,16 @@ impl PublicMcpWorkspaceBridge {
                 "The Public MCP client registry is unavailable",
             ));
         }
-        let current_port = self.server.as_ref().map(PublicMcpHttpServer::port);
         let endpoint_state_path = public_mcp_endpoint_state_path(&self.settings_path);
+        if !self.has_enabled_clients() {
+            // Without enabled clients nothing listens, so only the requested
+            // port is recorded for the next listener startup.
+            persist_endpoint_state(&endpoint_state_path, 0, preferred_port)?;
+            self.port_draft = preferred_port.to_string();
+            self.startup_error = None;
+            return Ok(());
+        }
+        let current_port = self.server.as_ref().map(PublicMcpHttpServer::port);
 
         if preferred_port == 0 && current_port.is_some() {
             // Automatic mode can keep the healthy listener and choose again on a later startup.
@@ -453,6 +495,7 @@ impl PublicMcpWorkspaceBridge {
 
     pub(in crate::workspace) fn create_client(
         &mut self,
+        runtime: &tokio::runtime::Handle,
         label: String,
         approval_mode: ClientApprovalMode,
     ) -> Result<(), String> {
@@ -463,6 +506,11 @@ impl PublicMcpWorkspaceBridge {
             .map_err(|error| error.to_string())?;
         self.revealed_credential = Some(registered.credential);
         self.startup_error = None;
+        // A registration failure keeps the endpoint offline; a listener failure
+        // only surfaces as startup_error while the client stays registered.
+        if let Err(error) = self.start_listener(runtime) {
+            self.startup_error = Some(error.to_string());
+        }
         Ok(())
     }
 
@@ -471,14 +519,23 @@ impl PublicMcpWorkspaceBridge {
     }
 
     pub(in crate::workspace) fn set_client_enabled(
-        &self,
+        &mut self,
+        runtime: &tokio::runtime::Handle,
         client_ref: &ClientRef,
         enabled: bool,
     ) -> Result<(), String> {
         self.state
             .clients
             .set_enabled(client_ref, enabled)
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        if enabled {
+            if let Err(error) = self.start_listener(runtime) {
+                self.startup_error = Some(error.to_string());
+            }
+        } else {
+            self.stop_listener_if_idle();
+        }
+        Ok(())
     }
 
     pub(in crate::workspace) fn set_client_approval_mode(
@@ -524,11 +581,16 @@ impl PublicMcpWorkspaceBridge {
             .map_err(|error| error.to_string())
     }
 
-    pub(in crate::workspace) fn remove_client(&self, client_ref: &ClientRef) -> Result<(), String> {
+    pub(in crate::workspace) fn remove_client(
+        &mut self,
+        client_ref: &ClientRef,
+    ) -> Result<(), String> {
         self.state
             .clients
             .remove(client_ref)
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        self.stop_listener_if_idle();
+        Ok(())
     }
 
     pub(in crate::workspace) fn set_approval_status(
@@ -973,7 +1035,8 @@ impl WorkspaceApp {
         enabled: bool,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
-        self.public_mcp.set_client_enabled(client_ref, enabled)?;
+        let runtime = self.forwarding_runtime.handle().clone();
+        self.public_mcp.set_client_enabled(&runtime, client_ref, enabled)?;
         if !enabled {
             self.revoke_public_mcp_client_runtime(client_ref, cx);
             self.public_mcp.remove_client_connection_refs(client_ref);
@@ -2806,7 +2869,9 @@ fn public_command_error(error: SshTransportError) -> String {
 fn read_endpoint_state(path: &Path) -> Option<PublicMcpEndpointState> {
     let bytes = std::fs::read(path).ok()?;
     let state: PublicMcpEndpointState = serde_json::from_slice(&bytes).ok()?;
-    (state.version == 1 && state.port != 0).then_some(state)
+    // A stopped listener persists port 0 but must keep the user's preferred
+    // port for the next listener startup.
+    (state.version == 1 && (state.port != 0 || state.preferred_port != 0)).then_some(state)
 }
 
 fn public_mcp_endpoint_state_path(settings_path: &Path) -> PathBuf {

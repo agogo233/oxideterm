@@ -798,7 +798,9 @@ impl WorkspaceApp {
                             this.i18n.t("settings_view.network.external_client_name"),
                             next_client_number
                         );
+                        let runtime = this.forwarding_runtime.handle().clone();
                         if let Err(error) = this.public_mcp.create_client(
+                            &runtime,
                             label,
                             oxideterm_public_mcp::ClientApprovalMode::Standard,
                         ) {
@@ -818,7 +820,9 @@ impl WorkspaceApp {
                             this.i18n.t("settings_view.network.external_client_name"),
                             next_client_number
                         );
+                        let runtime = this.forwarding_runtime.handle().clone();
                         if let Err(error) = this.public_mcp.create_client(
+                            &runtime,
                             label,
                             oxideterm_public_mcp::ClientApprovalMode::Unattended,
                         ) {
