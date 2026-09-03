@@ -123,9 +123,6 @@ pub(in crate::workspace) enum ActiveWindowModalOwner {
     LegalNotice {
         phase: oxideterm_gpui_ui::motion::ExitPhase,
     },
-    NativeUpdateReleaseNotes {
-        phase: oxideterm_gpui_ui::motion::ExitPhase,
-    },
     Shortcuts,
     AppLockDialog,
     MermaidZoom,
@@ -179,10 +176,9 @@ impl ActiveWindowModalOwner {
             Self::VersionMigration => 40,
             Self::Onboarding => 41,
             Self::LegalNotice { .. } => 42,
-            Self::NativeUpdateReleaseNotes { .. } => 43,
-            Self::Shortcuts => 44,
-            Self::AppLockDialog => 45,
-            Self::MermaidZoom => 46,
+            Self::Shortcuts => 43,
+            Self::AppLockDialog => 44,
+            Self::MermaidZoom => 45,
         }
     }
 
@@ -211,8 +207,7 @@ impl ActiveWindowModalOwner {
             | Self::SettingsSshConfigImport { phase }
             | Self::OxideImport { phase }
             | Self::OxideExport { phase }
-            | Self::LegalNotice { phase }
-            | Self::NativeUpdateReleaseNotes { phase } => phase,
+            | Self::LegalNotice { phase } => phase,
             Self::NewConnection
             | Self::LocalShellLauncher
             | Self::JumpServer
@@ -338,7 +333,6 @@ pub(in crate::workspace) struct ActiveWindowModalProjection {
     pub(in crate::workspace) shortcuts_open: bool,
     pub(in crate::workspace) app_lock_dialog_open: bool,
     pub(in crate::workspace) mermaid_zoom_open: bool,
-    pub(in crate::workspace) native_update_toast_visible: bool,
 }
 
 impl ActiveWindowModalProjection {
@@ -391,11 +385,6 @@ impl ActiveWindowModalProjection {
             }
             overlay::WorkspaceOverlayConfirmOwnerKind::LegalNotice => {
                 ActiveWindowModalOwner::LegalNotice {
-                    phase: snapshot.phase,
-                }
-            }
-            overlay::WorkspaceOverlayConfirmOwnerKind::NativeUpdateReleaseNotes => {
-                ActiveWindowModalOwner::NativeUpdateReleaseNotes {
                     phase: snapshot.phase,
                 }
             }
@@ -507,7 +496,6 @@ impl ActiveWindowModalProjection {
         // handoffs, the broadcast menu, and AI floating controls are excluded.
         // They are transient nonblocking layers and keep their own focused
         // input or Escape handling instead of consuming every window key.
-        let _native_update_toast_visible = self.native_update_toast_visible;
         [
             new_connection_owner,
             local_shell_owner,
@@ -698,7 +686,6 @@ impl WorkspaceApp {
             shortcuts_open: self.shortcuts_modal.open,
             app_lock_dialog_open: self.app_lock.dialog.is_some(),
             mermaid_zoom_open: self.mermaid_zoom.is_some(),
-            native_update_toast_visible: self.native_update_notification_open,
         }
         .top_owner()
     }
@@ -1052,9 +1039,6 @@ impl WorkspaceApp {
             }
             ActiveWindowModalOwner::LegalNotice { .. } => {
                 let _ = self.handle_help_legal_notice_key(event, cx);
-            }
-            ActiveWindowModalOwner::NativeUpdateReleaseNotes { .. } => {
-                let _ = self.handle_native_update_release_notes_key(event, cx);
             }
             ActiveWindowModalOwner::Shortcuts => {
                 self.handle_shortcuts_modal_key(event, cx);

@@ -179,7 +179,6 @@ flowchart LR
         AiProviders["AI Providers"]
         McpServers["MCP Servers"]
         SyncBackend["Cloud Sync Backend"]
-        UpdateServer["Update Channel"]
     end
 
     App --> Config
@@ -195,7 +194,6 @@ flowchart LR
     App --> AiProviders
     App --> McpServers
     App --> SyncBackend
-    App --> UpdateServer
 ```
 
 ### User-Facing Summary
@@ -860,7 +858,7 @@ Settings are durable application state. The desktop Settings surface is the prim
 - Cloud sync.
 - Portable runtime.
 - Keybindings.
-- Help and update channel.
+- Help.
 
 ### Persistence Rule
 
@@ -1139,7 +1137,7 @@ flowchart TB
 | `workspace/runtime_entity.rs` | Own long-lived node subscriptions, reconnect workers, runtime shutdown, and terminal-consumer bookkeeping | Closing a terminal consumer does not accidentally close a shared node or transport |
 | `workspace/ide.rs` and IDE crates | Open folders, route file operations, and manage editor state | Remote editing is presented as a workspace, not as raw SFTP operations |
 | `workspace/forwards/*` | Render forwarding forms, rules, state, and actions | Port forwarding is visible and recoverable from the desktop app |
-| `workspace/settings/*` | Render settings pages for terminal, appearance, AI, SFTP, IDE, privilege credentials, portable runtime, updates, and keybindings | Configuration is app-first and persists through the shared settings model |
+| `workspace/settings/*` | Render settings pages for terminal, appearance, AI, SFTP, IDE, privilege credentials, portable runtime, and keybindings | Configuration is app-first and persists through the shared settings model |
 | `workspace/cloud_sync/*` | Render sync status, confirmations, and backup actions | Cloud sync and backup operations are explicit and reversible where possible |
 | `workspace/plugin_entity.rs`, `plugin_manager.rs`, `plugin_lifecycle/*`, `plugin_ui.rs` | Coordinate plugin discovery, lifecycle, host API snapshots, settings, secrets, and UI host calls | Plugins can extend app surfaces without owning core runtime state |
 | `workspace/sidebar/ai/*` | Render AI conversations, model selection, streaming, context, Agent Skills, tool events, and transcript state | OxideSens appears as an integrated workspace assistant with explicit tool boundaries |
@@ -1862,7 +1860,7 @@ Staleness means "the app cannot prove this state is current." It does not automa
 | ACP agent sessions and host tools | `oxideterm-acp-adapter`, `oxideterm-acp-host-tools`, `workspace/acp_workspace.rs` |
 | Plugins | `oxideterm-plugin-manifest`, `oxideterm-plugin-registry`, `oxideterm-plugin-host-api`, `oxideterm-plugin-wasm-runtime`, app plugin entities |
 | Cloud sync and portable runtime | `oxideterm-cloud-sync`, `oxideterm-gpui-cloud-sync`, `oxideterm-portable-runtime` |
-| Notifications and update | `oxideterm-notification-center`, `oxideterm-update` |
+| Notifications | `oxideterm-notification-center` |
 | CLI companion | `oxideterm-cli` |
 
 ---

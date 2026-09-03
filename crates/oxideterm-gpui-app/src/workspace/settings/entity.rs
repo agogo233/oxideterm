@@ -22,7 +22,6 @@ use zeroize::Zeroizing;
 
 use crate::workspace::browser_behavior;
 
-use super::update::NativeUpdateRuntime;
 use super::{
     CliCompanionStatus, PortableSettingsAction, PortableSettingsDialog, SettingsManagedKeyDialog,
 };
@@ -472,7 +471,6 @@ pub(in crate::workspace) struct SettingsWorkspaceEntity {
     launch_at_login_error: Option<LaunchAtLoginError>,
     launch_at_login_generation: u64,
     launch_at_login_task: Option<Task<()>>,
-    pub(super) native_update: NativeUpdateRuntime,
 }
 
 #[derive(Clone, Copy)]
@@ -489,19 +487,8 @@ pub(in crate::workspace) enum KeybindingResetConfirmKeyAction {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(in crate::workspace) enum SettingsWorkspaceToast {
-    Success,
-    Warning,
-    Error,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::workspace) enum SettingsWorkspaceEvent {
     ExternalStoresChanged,
-    ResetNativeUpdateOverlay,
-    ShowNativeUpdateNotification,
-    ShowNativeUpdateToast(SettingsWorkspaceToast),
-    RequestQuitAfterNativeUpdate,
     DataDirectoryConfirmOpened,
     DataDirectoryOperationReady,
     BackgroundBlurCommitReady(i64),
@@ -620,7 +607,6 @@ impl SettingsWorkspaceEntity {
             launch_at_login_error: None,
             launch_at_login_generation: 0,
             launch_at_login_task: None,
-            native_update: NativeUpdateRuntime::new(cx),
         }
     }
 
@@ -1955,12 +1941,6 @@ impl SettingsWorkspaceEntity {
             exportable_secret_count: self.portable_exportable_secret_count,
             refresh_pending: self.portable_refresh_pending,
         }
-    }
-
-    pub(in crate::workspace) fn portable_mode(&self) -> Option<bool> {
-        self.portable_status
-            .as_ref()
-            .map(|status| status.is_portable)
     }
 
     pub(in crate::workspace) fn start_portable_status_refresh(

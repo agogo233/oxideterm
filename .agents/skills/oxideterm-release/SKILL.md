@@ -168,10 +168,10 @@ git remote -v
 git remote get-url origin
 ```
 
-For an official `AnalyseDeCircuit/oxideterm` release, keep the official links, updater endpoints, and About attribution. For a fork release, all three checks below are blocking:
+For an official `AnalyseDeCircuit/oxideterm` release, keep the official links and About attribution. For a fork release, all three checks below are blocking:
 
 1. **Release-note ownership and provenance.** The notes must clearly state that the build is a community fork. In both language blocks, they must separately identify changes inherited from official upstream and changes implemented by the fork, following the provenance rules in the changelog-writing section. Compare the release range with official upstream history rather than inferring ownership from author names or commit-message wording. Support, documentation, issue, download, and changelog links must resolve to resources owned by the fork, not `AnalyseDeCircuit/oxideterm/issues`, the upstream changelog, upstream release downloads, or `oxideterm.app` documentation. The stable download composer currently derives upstream asset URLs from `.github/scripts/compose_release_notes.py`; a fork must redirect that source as well as the visible base-note links.
-2. **In-app updater ownership.** Every update channel exposed by the forked application must resolve to a fork-owned signed manifest and fork-owned release assets. The compiled endpoints currently live in `crates/oxideterm-update/src/channel.rs`; they must not contain `github.com/AnalyseDeCircuit/oxideterm/releases`. A fork may instead disable an update channel, but then the application must not offer or contact that channel. Never ship a fork that can update itself to an official OxideTerm build.
+2. **No in-app updater.** The application does not ship an in-app updater; releases are distributed only as manual downloads from the release page. A fork must not reintroduce a self-update path that resolves to official endpoints: `rg -n 'releases/(latest|download)' crates/` must not show application code fetching updates, and no update-channel crate may return to the workspace.
 3. **Help & About attribution.** Keep the existing `Copyright © <year> AnalyseDeCircuit` attribution; a fork must not replace or remove it. Add an adjacent small, localized line that clearly identifies the application as a fork and names the fork maintainer or project. Render it in the Help & About legal footer and add the corresponding key to all 11 locale catalogs.
 
 Why this rule exists: users cannot tell an official release from a fork build when the fork reuses the same name, version numbers, and release notes. Unmarked fork releases route bug reports and support traffic into the upstream repository, confuse downloads, and misattribute defects to the upstream maintainers. A short fork-attribution line and fork-owned support links prevent that confusion at no cost to the fork, and they are the standard expectation for any GPL redistribution.
@@ -180,14 +180,14 @@ Why this rule exists: users cannot tell an official release from a fork build wh
 gh release list --repo <fork-owner>/oxideterm --limit 3
 rg -n 'AnalyseDeCircuit/oxideterm|oxideterm\.app' \
   <composed-release-notes> <base-notes> .github/scripts/compose_release_notes.py
-rg -n 'github\.com/AnalyseDeCircuit/oxideterm/releases' crates/oxideterm-update/src
+rg -n 'releases/(latest|download)' crates/ --glob '!vendor/**'
 rg -n 'settings_view\.help\.copyright|AnalyseDeCircuit|fork' \
   crates/oxideterm-gpui-app/src/workspace/settings/pages/help.rs \
   crates/oxideterm-i18n/locales/*/settings_view.json
 cargo test -p oxideterm-i18n locale_catalogs_have_the_same_complete_key_set
 ```
 
-The `rg` commands are discovery checks: review each match rather than blindly requiring zero results, because the preserved copyright attribution must still name `AnalyseDeCircuit`. If a fork release fails any of the three ownership checks, treat publishing as blocked. Do not commit, push, or tag until the fork owns its release links and updater source and the About footer both preserves the upstream copyright and identifies the fork in all supported locales.
+The `rg` commands are discovery checks: review each match rather than blindly requiring zero results, because the preserved copyright attribution must still name `AnalyseDeCircuit`. If a fork release fails any of the three ownership checks, treat publishing as blocked. Do not commit, push, or tag until the fork owns its release links and the About footer both preserves the upstream copyright and identifies the fork in all supported locales.
 
 ### 6. Review, commit, push, tag, and dispatch
 
@@ -248,7 +248,7 @@ The first release dispatched after this migration seeds the main-scoped cache fo
 
 ## Recover a canceled release dispatch
 
-Use this procedure only when the maintainer explicitly requests republishing the same version. The earlier main-scoped Native Package dispatch must have been canceled before it created a published GitHub Release. If `gh release view <tag>` finds a published release or updater assets may already have reached users, keep the tag immutable and publish the next patch version instead.
+Use this procedure only when the maintainer explicitly requests republishing the same version. The earlier main-scoped Native Package dispatch must have been canceled before it created a published GitHub Release. If `gh release view <tag>` finds a published release or release assets may already have reached users, keep the tag immutable and publish the next patch version instead.
 
 1. Fetch and record both the remote annotated tag object and its peeled commit before changing anything:
 

@@ -91,7 +91,7 @@ fn build_sectioned_app_settings_sections(
         match section_id.as_str() {
             "general" => add_preview_fields(
                 settings.get("general").and_then(Value::as_object),
-                &["language", "updateChannel"],
+                &["language"],
                 None,
                 &mut field_values,
             ),

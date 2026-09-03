@@ -1,7 +1,6 @@
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct GeneralSettings {
     pub language: Language,
-    pub update_channel: UpdateChannel,
     #[serde(
         rename = "minimizeToTrayOnClose",
         default = "default_minimize_to_tray_on_close"
@@ -12,8 +11,6 @@ pub struct GeneralSettings {
         default = "default_external_connection_uris_enabled"
     )]
     pub external_connection_uris_enabled: bool,
-    #[serde(default)]
-    pub update_proxy: UpdateProxySettings,
     #[serde(flatten)]
     pub extra: ExtraFields,
 }
@@ -22,10 +19,8 @@ impl Default for GeneralSettings {
     fn default() -> Self {
         Self {
             language: Language::ZhCn,
-            update_channel: UpdateChannel::default(),
             minimize_to_tray_on_close: default_minimize_to_tray_on_close(),
             external_connection_uris_enabled: default_external_connection_uris_enabled(),
-            update_proxy: UpdateProxySettings::default(),
             extra: ExtraFields::new(),
         }
     }

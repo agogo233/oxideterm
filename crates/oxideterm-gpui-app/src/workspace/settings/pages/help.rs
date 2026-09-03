@@ -25,10 +25,6 @@ pub(in crate::workspace) const HELP_TECH_BADGES: [(&str, u32); 9] = [
     ("IronRDP", 0x6366f1),
 ];
 
-pub(in crate::workspace) const HELP_UPDATE_CHANNEL_SELECT_WIDTH: f32 = 140.0;
-pub(in crate::workspace) const HELP_UPDATE_FOOTER_BORDER_ALPHA: f32 = 0.50;
-pub(in crate::workspace) const HELP_PORTABLE_NOTICE_BG_ALPHA: f32 = 0.70;
-pub(in crate::workspace) const HELP_PORTABLE_NOTICE_BORDER_ALPHA: f32 = 0.60;
 pub(in crate::workspace) const HELP_LEGAL_NOTICE_WIDTH: f32 = 760.0;
 pub(in crate::workspace) const HELP_LEGAL_NOTICE_HEIGHT: f32 = 720.0;
 
@@ -50,11 +46,6 @@ impl WorkspaceApp {
     }
 
     pub(in crate::workspace) fn help_version_card(&self, cx: &mut Context<Self>) -> AnyElement {
-        let is_portable = self.resolved_help_portable_mode(cx);
-        let channel_label = update_channel_label(
-            self.settings_store.settings().general.update_channel,
-            &self.i18n,
-        );
         let version_rows = div()
             .flex()
             .flex_col()
@@ -70,11 +61,8 @@ impl WorkspaceApp {
                 env!("CARGO_PKG_VERSION").to_string(),
                 true,
                 cx,
-            ))
-            .child(self.help_portable_or_channel_row(is_portable, channel_label, cx));
+            ));
 
-        // Tauri HelpAboutSection keeps the version rows and update controls inside one
-        // card, with only the update block separated by `border-t pt-4`.
         let card = div()
             .w_full()
             .min_w(px(0.0))
@@ -96,8 +84,7 @@ impl WorkspaceApp {
                             .to_uppercase(),
                     ),
             )
-            .child(version_rows)
-            .child(self.help_update_footer(is_portable, cx));
+            .child(version_rows);
 
         self.settings_card_surface(card, self.tokens.ui.bg_card)
             .into_any_element()
@@ -263,313 +250,6 @@ impl WorkspaceApp {
             .into_any_element()
     }
 
-    pub(in crate::workspace) fn help_portable_or_channel_row(
-        &self,
-        is_portable: bool,
-        channel_label: String,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        if is_portable {
-            return self.setting_row(
-                "settings_view.help.portable_mode",
-                "settings_view.help.portable_mode_hint",
-                self.help_pill_badge(
-                    self.i18n.t("settings_view.help.portable_updates"),
-                    self.tokens.ui.text,
-                ),
-                cx,
-            );
-        }
-
-        self.setting_row(
-            "settings_view.help.update_channel",
-            "settings_view.help.update_channel_hint",
-            self.settings_select_control(
-                SettingsSelect::UpdateChannel,
-                channel_label,
-                false,
-                Some(HELP_UPDATE_CHANNEL_SELECT_WIDTH),
-                cx,
-            ),
-            cx,
-        )
-    }
-
-    pub(in crate::workspace) fn help_update_footer(
-        &self,
-        is_portable: bool,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        div()
-            .mt(px(16.0))
-            .pt(px(16.0))
-            .border_t_1()
-            .border_color(rgba(
-                (self.tokens.ui.border << 8) | alpha_byte(HELP_UPDATE_FOOTER_BORDER_ALPHA),
-            ))
-            .flex()
-            .flex_col()
-            .gap(px(12.0))
-            .child(if is_portable {
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(12.0))
-                    .child(self.help_portable_update_notice())
-                    .child(self.help_update_status_area(cx))
-                    .into_any_element()
-            } else {
-                self.help_update_status_area(cx)
-            })
-            .into_any_element()
-    }
-
-    pub(in crate::workspace) fn help_portable_update_notice(&self) -> AnyElement {
-        div()
-            .rounded(px(self.tokens.radii.md))
-            .border_1()
-            .border_color(rgba(
-                (self.tokens.ui.border << 8) | alpha_byte(HELP_PORTABLE_NOTICE_BORDER_ALPHA),
-            ))
-            .bg(rgba(
-                (self.tokens.ui.bg_elevated << 8) | alpha_byte(HELP_PORTABLE_NOTICE_BG_ALPHA),
-            ))
-            .p(px(16.0))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .text_size(px(self.tokens.metrics.ui_text_sm))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(rgb(self.tokens.ui.text))
-                    .child(Self::render_lucide_icon(
-                        LucideIcon::Shield,
-                        16.0,
-                        rgb(self.tokens.ui.warning),
-                    ))
-                    .child(self.i18n.t("settings_view.help.portable_updates")),
-            )
-            .child(
-                div()
-                    .mt(px(8.0))
-                    .text_size(px(self.tokens.metrics.ui_text_sm))
-                    .text_color(rgb(self.tokens.ui.text_muted))
-                    .child(self.i18n.t("settings_view.help.portable_updates_hint")),
-            )
-            .into_any_element()
-    }
-
-    pub(in crate::workspace) fn help_update_status_area(
-        &self,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let update_state = self
-            .settings_workspace
-            .read(cx)
-            .native_update_render_state();
-        let button_icon = if matches!(update_state, NativeUpdateRenderState::Checking) {
-            LucideIcon::LoaderCircle
-        } else {
-            LucideIcon::RefreshCw
-        };
-        let disabled = matches!(
-            update_state,
-            NativeUpdateRenderState::Checking
-                | NativeUpdateRenderState::Downloading(_)
-                | NativeUpdateRenderState::Verifying(_)
-                | NativeUpdateRenderState::Installing(_)
-        );
-
-        let mut area = div().flex().flex_col().gap(px(12.0)).child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(12.0))
-                .child(self.help_outline_button_with_disabled(
-                    self.i18n.t("settings_view.help.check_update"),
-                    button_icon,
-                    disabled,
-                    |this, _event, _window, cx| {
-                        this.check_native_update(cx);
-                    },
-                    cx,
-                ))
-                .children(self.help_update_status_inline(&update_state)),
-        );
-
-        if let Some(detail) = self.help_update_detail(&update_state, cx) {
-            area = area.child(detail);
-        }
-
-        area.into_any_element()
-    }
-
-    pub(in crate::workspace) fn help_update_status_inline(
-        &self,
-        update_state: &NativeUpdateRenderState,
-    ) -> Option<AnyElement> {
-        let (label, icon, color) = match update_state {
-            NativeUpdateRenderState::Checking => (
-                self.i18n.t("settings_view.help.checking"),
-                None,
-                self.tokens.ui.text_muted,
-            ),
-            NativeUpdateRenderState::UpToDate => (
-                self.i18n.t("settings_view.help.up_to_date"),
-                Some(LucideIcon::CheckCircle),
-                self.tokens.ui.success,
-            ),
-            NativeUpdateRenderState::Verifying(_) => (
-                self.i18n.t("settings_view.help.verifying"),
-                None,
-                self.tokens.ui.text_muted,
-            ),
-            NativeUpdateRenderState::Installing(summary) => (
-                summary
-                    .clone()
-                    .unwrap_or_else(|| self.i18n.t("settings_view.help.installing")),
-                None,
-                self.tokens.ui.text_muted,
-            ),
-            NativeUpdateRenderState::Downloaded => (
-                self.i18n.t("settings_view.help.update_downloaded"),
-                Some(LucideIcon::CheckCircle),
-                self.tokens.ui.success,
-            ),
-            NativeUpdateRenderState::InstallFinished { status, .. } => {
-                let label_key = match status {
-                    oxideterm_update::NativeInstallStatus::ManualActionRequired => {
-                        "settings_view.help.update_downloaded"
-                    }
-                    oxideterm_update::NativeInstallStatus::InstallerLaunched => {
-                        "settings_view.help.installer_launched"
-                    }
-                    oxideterm_update::NativeInstallStatus::ReplacementScheduled => {
-                        "settings_view.help.replacement_scheduled"
-                    }
-                };
-                (
-                    self.i18n.t(label_key),
-                    Some(LucideIcon::CheckCircle),
-                    self.tokens.ui.success,
-                )
-            }
-            NativeUpdateRenderState::Error(error) => (
-                if error.is_empty() {
-                    self.i18n.t("settings_view.help.update_error")
-                } else {
-                    error.clone()
-                },
-                Some(LucideIcon::AlertCircle),
-                self.tokens.ui.error,
-            ),
-            NativeUpdateRenderState::Idle
-            | NativeUpdateRenderState::Available { .. }
-            | NativeUpdateRenderState::Downloading(_) => return None,
-        };
-
-        let mut row = div()
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .text_size(px(self.tokens.metrics.ui_text_sm))
-            .text_color(rgb(color));
-        if let Some(icon) = icon {
-            row = row.child(Self::render_lucide_icon(icon, 14.0, rgb(color)));
-        }
-        Some(row.child(label).into_any_element())
-    }
-
-    pub(in crate::workspace) fn help_update_detail(
-        &self,
-        update_state: &NativeUpdateRenderState,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        match update_state {
-            NativeUpdateRenderState::Available {
-                version,
-                has_release_notes,
-            } => {
-                let mut actions = div()
-                    .flex()
-                    .flex_wrap()
-                    .justify_end()
-                    .gap(px(self.tokens.spacing.two));
-                if *has_release_notes {
-                    actions = actions.child(self.help_outline_button(
-                        self.i18n.t("settings_view.help.release_notes"),
-                        LucideIcon::BookOpen,
-                        |this, _event, _window, cx| {
-                            this.open_native_update_release_notes(cx);
-                        },
-                        cx,
-                    ));
-                }
-                actions = actions.child(self.help_outline_button(
-                    self.i18n.t("settings_view.help.download_update"),
-                    LucideIcon::Download,
-                    |this, _event, _window, cx| {
-                        this.download_native_update(cx);
-                    },
-                    cx,
-                ));
-
-                Some(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(12.0))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(8.0))
-                                .text_size(px(self.tokens.metrics.ui_text_sm))
-                                .text_color(rgb(self.tokens.ui.text))
-                                .child(self.i18n.t("settings_view.help.update_available"))
-                                .child(
-                                    div()
-                                        .text_color(rgb(self.tokens.ui.accent))
-                                        .font_weight(gpui::FontWeight::MEDIUM)
-                                        .child(format!("v{version}")),
-                                ),
-                        )
-                        .child(actions)
-                        .into_any_element(),
-                )
-            }
-            NativeUpdateRenderState::Downloading(status) => {
-                Some(self.help_transfer_progress(status.as_ref(), false, cx))
-            }
-            NativeUpdateRenderState::Verifying(status) => {
-                Some(self.help_transfer_progress(status.as_ref(), true, cx))
-            }
-            NativeUpdateRenderState::Downloaded => Some(
-                div()
-                    .flex()
-                    .justify_end()
-                    .child(self.help_outline_button(
-                        self.i18n.t("settings_view.help.install_update"),
-                        LucideIcon::Download,
-                        |this, _event, _window, cx| {
-                            this.install_native_update(cx);
-                        },
-                        cx,
-                    ))
-                    .into_any_element(),
-            ),
-            _ => None,
-        }
-    }
-
-    pub(in crate::workspace) fn resolved_help_portable_mode(&self, cx: &App) -> bool {
-        self.settings_workspace
-            .read(cx)
-            .portable_mode()
-            .unwrap_or_else(|| oxideterm_portable_runtime::is_portable_mode().unwrap_or(false))
-    }
-
     pub(in crate::workspace) fn help_key_value_row(
         &self,
         label_key: &str,
@@ -634,11 +314,7 @@ impl WorkspaceApp {
     ) -> AnyElement {
         self.workspace_toolbar_action_button(
             label,
-            Some(if matches!(icon, LucideIcon::LoaderCircle) {
-                self.render_loading_icon("help-update-checking", 14.0, rgb(self.tokens.ui.text))
-            } else {
-                Self::render_lucide_icon(icon, 14.0, rgb(self.tokens.ui.text))
-            }),
+            Some(Self::render_lucide_icon(icon, 14.0, rgb(self.tokens.ui.text))),
             ToolbarButtonOptions {
                 button: ButtonOptions {
                     variant: ButtonVariant::Outline,
@@ -655,117 +331,6 @@ impl WorkspaceApp {
             }),
         )
         .into_any_element()
-    }
-
-    pub(in crate::workspace) fn help_outline_button_with_disabled(
-        &self,
-        label: String,
-        icon: LucideIcon,
-        disabled: bool,
-        listener: impl Fn(&mut Self, &MouseDownEvent, &mut Window, &mut Context<Self>) + 'static,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        self.workspace_toolbar_action_button(
-            label,
-            Some(Self::render_lucide_icon(icon, 14.0, rgb(self.tokens.ui.text)).into_any_element()),
-            ToolbarButtonOptions {
-                button: ButtonOptions {
-                    variant: ButtonVariant::Outline,
-                    size: ButtonSize::Sm,
-                    radius: ButtonRadius::Md,
-                    disabled,
-                },
-                icon_position: ToolbarButtonIconPosition::Leading,
-                ..ToolbarButtonOptions::default()
-            },
-            cx.listener(move |this, event, window, cx| {
-                if !disabled {
-                    listener(this, event, window, cx);
-                }
-                cx.stop_propagation();
-            }),
-        )
-        .into_any_element()
-    }
-
-    pub(in crate::workspace) fn help_pill_badge(&self, label: String, color: u32) -> AnyElement {
-        div()
-            .rounded_full()
-            .border_1()
-            .border_color(rgb(self.tokens.ui.border))
-            .bg(rgb(self.tokens.ui.bg_elevated))
-            .px(px(12.0))
-            .py(px(4.0))
-            .text_size(px(self.tokens.metrics.ui_text_xs))
-            .font_weight(gpui::FontWeight::MEDIUM)
-            .text_color(rgb(color))
-            .child(label)
-            .into_any_element()
-    }
-
-    pub(in crate::workspace) fn help_transfer_progress(
-        &self,
-        status: Option<&oxideterm_update::ResumableUpdateStatus>,
-        verifying: bool,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let progress_ratio = if verifying {
-            1.0
-        } else {
-            status.and_then(native_update_progress_ratio).unwrap_or(0.0)
-        };
-        let fallback_key = if verifying {
-            "settings_view.help.verifying"
-        } else {
-            "settings_view.help.downloading"
-        };
-
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(self.tokens.spacing.two))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(12.0))
-                    .child(
-                        div()
-                            .min_w(px(0.0))
-                            .text_size(px(self.tokens.metrics.ui_text_sm))
-                            .text_color(rgb(self.tokens.ui.text_muted))
-                            .child(
-                                status
-                                    .map(native_update_progress_hint)
-                                    .unwrap_or_else(|| self.i18n.t(fallback_key)),
-                            ),
-                    )
-                    .child(self.help_outline_button(
-                        self.i18n.t("settings_view.help.cancel"),
-                        LucideIcon::X,
-                        |this, _event, _window, cx| {
-                            this.cancel_native_update(cx);
-                        },
-                        cx,
-                    )),
-            )
-            .child(
-                div()
-                    .h(px(self.tokens.spacing.one))
-                    .w_full()
-                    .overflow_hidden()
-                    .rounded_full()
-                    .bg(rgba((self.tokens.ui.border << 8) | 0x80))
-                    .child(
-                        div()
-                            .h_full()
-                            .rounded_full()
-                            .bg(rgb(self.tokens.ui.accent))
-                            .w(relative(progress_ratio)),
-                    ),
-            )
-            .into_any_element()
     }
 
     pub(in crate::workspace) fn help_resource_link(

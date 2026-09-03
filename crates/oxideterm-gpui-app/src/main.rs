@@ -273,14 +273,14 @@ fn main() {
         let desktop_presence_menu = desktop_presence_menu(&I18n::new(locale_from_settings(
             startup_settings.general.language,
         )));
-        let workspace_opened = match open_primary_window(
+        match open_primary_window(
             cx,
             native_connection_launch,
             desktop_presence_menu,
             Some(single_instance_rx),
             startup_settings.clone(),
         ) {
-            Ok(workspace_opened) => workspace_opened,
+            Ok(_) => {}
             Err(err) => {
                 eprintln!(
                     "OxideTerm could not open a native GPUI window: {err:#}\n\
@@ -292,34 +292,7 @@ fn main() {
                 return;
             }
         };
-
-        if workspace_opened && let Err(error) = confirm_update_after_initial_workspace() {
-            eprintln!("failed to confirm the applied update: {error}");
-        }
     });
-}
-
-fn confirm_update_after_initial_workspace() -> std::io::Result<()> {
-    // Reaching this point confirms window and workspace construction. The old
-    // files are recovery artifacts only and can now be removed without rollback.
-    if let Ok(info) = oxideterm_portable_runtime::portable_info()
-        && info.is_portable
-    {
-        oxideterm_update::confirm_applied_portable_update(&info.host_dir)?;
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        let current_exe = std::env::current_exe()?;
-        let install_dir = current_exe.parent().ok_or_else(|| {
-            std::io::Error::other(format!(
-                "current executable has no install directory: {}",
-                current_exe.display()
-            ))
-        })?;
-        oxideterm_update::confirm_applied_windows_update(install_dir)?;
-    }
-    Ok(())
 }
 
 fn open_main_workspace_window(
@@ -467,7 +440,6 @@ fn desktop_presence_menu(i18n: &I18n) -> oxideterm_desktop_presence::DesktopPres
         hide_main_window: i18n.t("menu.hide_main_window"),
         new_connection: i18n.t("layout.empty.new_connection"),
         settings: i18n.t("menu.settings"),
-        check_for_updates: i18n.t("settings_view.help.check_update"),
         quit: i18n.t("menu.quit"),
     }
 }

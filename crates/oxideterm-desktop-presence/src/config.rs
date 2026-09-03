@@ -5,7 +5,6 @@ pub struct DesktopPresenceMenu {
     pub hide_main_window: String,
     pub new_connection: String,
     pub settings: String,
-    pub check_for_updates: String,
     pub quit: String,
 }
 
@@ -17,7 +16,6 @@ impl DesktopPresenceMenu {
             hide_main_window: "Hide Main Window".to_string(),
             new_connection: "New Connection".to_string(),
             settings: "Settings".to_string(),
-            check_for_updates: "Check for Updates".to_string(),
             quit: "Quit OxideTerm".to_string(),
         }
     }

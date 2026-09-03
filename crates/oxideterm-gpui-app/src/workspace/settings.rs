@@ -9,7 +9,7 @@ use oxideterm_settings::{
     MAX_HIGHLIGHT_RULE_SETS, MAX_HIGHLIGHT_RULES, PersistedSettings,
     RECOMMENDED_FOCUS_HANDOFF_COMMANDS, RemoteShellIntegrationMode, SettingsApplicationProxyMode,
     SettingsUpstreamProxyAuth, SettingsUpstreamProxyConfig, SettingsUpstreamProxyProtocol,
-    TerminalSemanticScheme, UpdateChannel, UpdateProxyMode, UpdateProxyProtocol,
+    TerminalSemanticScheme,
     create_default_highlight_rule, reindex_highlight_rules, sanitize_highlight_rule_sets,
 };
 use oxideterm_settings_model::{
@@ -210,8 +210,9 @@ pub(in crate::workspace) use entity::{
     NetworkProxyPasswordSnapshot, NetworkProxyTestSnapshot, PortablePasswordDialogSnapshot,
     PortableStatusRefresh, PrivilegeCredentialDraft, PrivilegeCredentialSnapshot,
     SettingsNavigationDraftAction, SettingsWorkspaceEntity, SettingsWorkspaceEvent,
-    SettingsWorkspaceToast, SshConfigImportSnapshot, ThemeEditorOperationResult, ThemeImportResult,
+    SshConfigImportSnapshot, ThemeEditorOperationResult, ThemeImportResult,
 };
+mod events;
 mod general_terminal_pages;
 pub(in crate::workspace) use general_terminal_pages::SETTINGS_TERMINAL_CUSTOM_FONT_INPUT_WIDTH;
 mod highlight;
@@ -231,8 +232,6 @@ mod terminal_controls;
 mod terminal_display;
 mod terminal_triggers;
 pub(in crate::workspace) use terminal_triggers::TerminalTriggersSettingsState;
-mod update;
-mod update_ui;
 
 pub(in crate::workspace) use ai_page::AiTextEditorDialog;
 use ai_page::{AI_CONTEXT_MAX_CHAR_OPTIONS, AI_CONTEXT_VISIBLE_LINE_OPTIONS, AI_PROVIDER_SELECT_W};
@@ -253,9 +252,6 @@ pub(in crate::workspace) use remote_shell_integration::{
     RemoteShellIntegrationConfirmSnapshot, RemoteShellIntegrationConfirmSource,
     RemoteShellIntegrationGateOutcome, RemoteShellIntegrationNotice,
     RemoteShellIntegrationRuntimeState,
-};
-pub(in crate::workspace) use update::{
-    NativeUpdateRenderState, native_update_progress_hint, native_update_progress_ratio,
 };
 
 fn settings_tab_lucide(icon: SettingsTabIcon) -> LucideIcon {

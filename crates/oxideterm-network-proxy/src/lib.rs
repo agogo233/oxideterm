@@ -19,8 +19,7 @@ pub use runtime::{
     configure_application_http_client_builder, set_application_proxy_policy,
 };
 pub use settings::{
-    application_proxy_policy_from_settings, configure_update_http_client_builder,
-    install_application_proxy_policy_from_settings,
+    application_proxy_policy_from_settings, install_application_proxy_policy_from_settings,
 };
 
 #[cfg(test)]

@@ -50,7 +50,6 @@ fn readonly_value_trigger_spec() -> SelectTriggerChromeSpec {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum SelectAnchorId {
     SettingsLanguage,
-    SettingsUpdateChannel,
     SettingsAppearanceTheme,
     SettingsAppearanceDensity,
     SettingsAppearanceUiFontSizeSlider,
@@ -65,8 +64,6 @@ pub enum SelectAnchorId {
     SettingsAppearanceBackgroundBlurSlider,
     SettingsAppearanceBackgroundFit,
     SettingsCustomThemeDuplicate,
-    SettingsUpdateProxyMode,
-    SettingsUpdateProxyProtocol,
     SettingsTerminalFontFamily,
     SettingsTerminalCjkFontFamily,
     SettingsTerminalFontSizeSlider,
@@ -178,9 +175,6 @@ impl SelectAnchorId {
         matches!(
             self,
             Self::SettingsLanguage
-                | Self::SettingsUpdateChannel
-                | Self::SettingsUpdateProxyMode
-                | Self::SettingsUpdateProxyProtocol
                 | Self::SettingsAppearanceTheme
                 | Self::SettingsAppearanceDensity
                 | Self::SettingsAppearanceAnimation

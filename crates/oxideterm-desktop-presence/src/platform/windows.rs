@@ -47,7 +47,6 @@ const TRAY_MENU_SHOW: u32 = 1001;
 const TRAY_MENU_HIDE: u32 = 1002;
 const TRAY_MENU_NEW_CONNECTION: u32 = 1003;
 const TRAY_MENU_SETTINGS: u32 = 1004;
-const TRAY_MENU_CHECK_UPDATES: u32 = 1005;
 const TRAY_MENU_QUIT: u32 = 1006;
 
 static MAIN_HWND: AtomicIsize = AtomicIsize::new(0);
@@ -445,7 +444,6 @@ fn show_tray_menu(hwnd: HWND) {
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         append_menu_item(menu, TRAY_MENU_NEW_CONNECTION, &labels.new_connection);
         append_menu_item(menu, TRAY_MENU_SETTINGS, &labels.settings);
-        append_menu_item(menu, TRAY_MENU_CHECK_UPDATES, &labels.check_for_updates);
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         append_menu_item(menu, TRAY_MENU_QUIT, &labels.quit);
 
@@ -468,7 +466,6 @@ fn show_tray_menu(hwnd: HWND) {
                 TRAY_MENU_HIDE => send_event(DesktopPresenceEvent::HideMainWindow),
                 TRAY_MENU_NEW_CONNECTION => send_event(DesktopPresenceEvent::NewConnection),
                 TRAY_MENU_SETTINGS => send_event(DesktopPresenceEvent::OpenSettings),
-                TRAY_MENU_CHECK_UPDATES => send_event(DesktopPresenceEvent::CheckForUpdates),
                 TRAY_MENU_QUIT => send_event(DesktopPresenceEvent::Quit),
                 _ => {}
             }

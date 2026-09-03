@@ -28,8 +28,6 @@ LINUX_RPM_GRAPHICS_RECOMMENDS = {"libglvnd-egl", "vulkan-loader"}
 LINUX_GLIBC_MAX_VERSION = (2, 35)
 PACKAGE_VERSION_FILENAME = "VERSION"
 PORTABLE_PLUGINS_DIR = "data/plugins"
-PORTABLE_UPDATE_MANIFEST_FILENAME = "portable-update.json"
-PORTABLE_UPDATE_MANIFEST_FORMAT = 1
 
 
 def normalized_version(raw: str) -> str:
@@ -132,11 +130,6 @@ def verify_embedded_version(path: Path, suffix: str, expected_version: str) -> N
 
 def verify_portable_archive(path: Path, target: str, expected_version: str) -> None:
     executable = "oxideterm-native.exe" if "windows" in target else "oxideterm-native"
-    update_helper = (
-        "tools/oxideterm-update-helper.exe"
-        if "windows" in target
-        else "tools/oxideterm-update-helper"
-    )
     require_archive_suffixes(
         archive_names(path),
         REQUIRED_DOCUMENTS
@@ -144,37 +137,11 @@ def verify_portable_archive(path: Path, target: str, expected_version: str) -> N
             PACKAGE_VERSION_FILENAME,
             PORTABLE_PLUGINS_DIR,
             "portable",
-            PORTABLE_UPDATE_MANIFEST_FILENAME,
-            update_helper,
             executable,
         },
         path,
     )
     verify_embedded_version(path, PACKAGE_VERSION_FILENAME, expected_version)
-    manifest = json.loads(
-        archive_entry_bytes(path, PORTABLE_UPDATE_MANIFEST_FILENAME).decode("utf-8")
-    )
-    if manifest.get("formatVersion") != PORTABLE_UPDATE_MANIFEST_FORMAT:
-        raise RuntimeError(f"{path.name} has an unsupported portable update manifest")
-    if manifest.get("appExecutable") != executable:
-        raise RuntimeError(f"{path.name} portable update manifest has the wrong executable")
-    if manifest.get("updateHelper") != update_helper:
-        raise RuntimeError(f"{path.name} portable update manifest has the wrong helper")
-    managed_entries = manifest.get("managedEntries")
-    required_managed_entries = {
-        executable,
-        "resources",
-        "tools",
-        "portable",
-        PACKAGE_VERSION_FILENAME,
-        PORTABLE_UPDATE_MANIFEST_FILENAME,
-    }
-    if not isinstance(managed_entries, list) or not required_managed_entries.issubset(
-        managed_entries
-    ):
-        raise RuntimeError(f"{path.name} portable update manifest is incomplete")
-    if {"data", "portable.json"} & set(managed_entries):
-        raise RuntimeError(f"{path.name} portable update manifest includes user data")
 
 
 def verify_macos_app_zip(path: Path, expected_version: str) -> None:
@@ -194,7 +161,7 @@ def verify_macos_app_zip(path: Path, expected_version: str) -> None:
 
 
 def verify_macos_tauri_archive(path: Path, expected_version: str) -> None:
-    """Validate the legacy Tauri updater archive using the app bundle contract."""
+    """Validate the macOS tar.gz archive using the app bundle contract."""
     verify_macos_app_zip(path, expected_version)
 
 
@@ -378,7 +345,6 @@ def verify_windows_installer(path: Path, expected_version: str) -> None:
     for name in REQUIRED_DOCUMENTS | {
         PACKAGE_VERSION_FILENAME,
         "oxideterm-native.exe",
-        "oxideterm-update-helper.exe",
     }:
         if name not in listing:
             raise RuntimeError(f"{path.name} does not contain {name}")

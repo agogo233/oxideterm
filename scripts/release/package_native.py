@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import base64
-import json
 import os
 import plistlib
 import shutil
@@ -43,20 +42,13 @@ APP_BIN = "oxideterm-native"
 CLI_BIN = "oxideterm"
 CONNECTION_URI_SCHEMES = ("ssh", "telnet", "mosh", "rdp", "vnc")
 HELPER_BINS = ("oxideterm-rdp-helper", "oxideterm-vnc-helper")
-UPDATE_HELPER_PACKAGE = "oxideterm-update"
-UPDATE_HELPER_BIN = "oxideterm-update-helper"
 AGENT_RESOURCE_DIR = "agents"
 AGENT_BINARY_PREFIX = "oxideterm-agent-"
 ENCODED_AGENT_SUFFIX = ".b64"
 HELPER_RESOURCE_DIR = "helpers"
-UPDATE_HELPER_DIR = "tools"
-WINDOWS_UPDATE_STAGING_DIR = "install"
-WINDOWS_UPDATE_FLAG = "OXIDETERM_UPDATE"
 PORTABLE_MARKER_FILENAME = "portable"
 PORTABLE_DATA_DIR = "data"
 PORTABLE_PLUGINS_DIR = "plugins"
-PORTABLE_UPDATE_MANIFEST_FILENAME = "portable-update.json"
-PORTABLE_UPDATE_MANIFEST_FORMAT = 1
 PACKAGE_VERSION_FILENAME = "VERSION"
 LINUX_PACKAGE_KIND_FILENAME = "PACKAGE_KIND"
 THIRD_PARTY_LICENSE_DIR = ROOT_DIR / "licenses" / "third-party"
@@ -492,26 +484,6 @@ def build_remote_desktop_helpers(target: str, target_was_explicit: bool) -> None
         build_helper(package, target, target_was_explicit)
 
 
-def build_update_helper(target: str, target_was_explicit: bool) -> Path:
-    args = [
-        "cargo",
-        "build",
-        "-p",
-        UPDATE_HELPER_PACKAGE,
-        "--bin",
-        UPDATE_HELPER_BIN,
-        "--release",
-    ]
-    if target_was_explicit:
-        args.extend(["--target", target])
-    run(args, env=native_cargo_build_env(target))
-
-    source = release_binary(target, target_was_explicit, UPDATE_HELPER_BIN)
-    if not source.exists():
-        raise FileNotFoundError(f"update helper binary not found: {source}")
-    return source
-
-
 def build_app(target: str, target_was_explicit: bool) -> Path:
     args = [
         "cargo",
@@ -931,41 +903,15 @@ def zip_macos_app_bundle(app_dir: Path, dest: Path) -> None:
 
 
 def archive_macos_tauri_bundle(app_dir: Path, dest: Path) -> None:
-    """Create the app.tar.gz shape consumed by the OxideTerm 1.x updater."""
+    """Create the app.tar.gz archive used for manual macOS installs."""
     if dest.exists():
         dest.unlink()
     with tarfile.open(dest, "w:gz", format=tarfile.PAX_FORMAT) as archive:
         archive.add(app_dir, arcname=app_dir.name)
 
 
-def write_portable_update_manifest(
-    package_root: Path, binary: Path, update_helper: Path
-) -> None:
-    """Declare exactly which package-owned entries may be replaced in place."""
-    managed_entries = [
-        binary.name,
-        "resources",
-        *(destination_name for _source, destination_name in RELEASE_DOCUMENTS),
-        PACKAGE_VERSION_FILENAME,
-        PORTABLE_MARKER_FILENAME,
-        UPDATE_HELPER_DIR,
-        PORTABLE_UPDATE_MANIFEST_FILENAME,
-    ]
-    manifest = {
-        "formatVersion": PORTABLE_UPDATE_MANIFEST_FORMAT,
-        "appExecutable": binary.name,
-        "updateHelper": f"{UPDATE_HELPER_DIR}/{update_helper.name}",
-        "managedEntries": managed_entries,
-    }
-    (package_root / PORTABLE_UPDATE_MANIFEST_FILENAME).write_text(
-        json.dumps(manifest, indent=2) + "\n",
-        encoding="utf-8",
-    )
-
-
 def create_portable_package(
     binary: Path,
-    update_helper: Path,
     target: str,
     version: str,
     label: str,
@@ -978,15 +924,10 @@ def create_portable_package(
     binary_dest = package_root / binary.name
     shutil.copy2(binary, binary_dest)
     make_executable(binary_dest)
-    helper_dest = package_root / UPDATE_HELPER_DIR / update_helper.name
-    helper_dest.parent.mkdir(parents=True)
-    shutil.copy2(update_helper, helper_dest)
-    make_executable(helper_dest)
     copy_runtime_resources(package_root / "resources", target)
     copy_release_documents(package_root)
     write_package_version(package_root, version)
     (package_root / PORTABLE_MARKER_FILENAME).touch()
-    write_portable_update_manifest(package_root, binary, update_helper)
     # Ship the documented manual-install location and keep first launch
     # predictable even before the runtime plugin registry initializes it.
     (package_root / PORTABLE_DATA_DIR / PORTABLE_PLUGINS_DIR).mkdir(parents=True)
@@ -1010,16 +951,14 @@ def create_portable_package(
 
 
 def stage_windows_installer_root(
-    binary: Path, target: str, version: str, label: str, update_helper: Path
+    binary: Path, target: str, version: str, label: str
 ) -> Path:
     installer_root = DIST_DIR / f"nsis-{label}"
     if installer_root.exists():
         shutil.rmtree(installer_root)
     (installer_root / "resources").mkdir(parents=True)
-    (installer_root / UPDATE_HELPER_DIR).mkdir(parents=True)
 
     shutil.copy2(binary, installer_root / binary.name)
-    shutil.copy2(update_helper, installer_root / UPDATE_HELPER_DIR / update_helper.name)
     copy_runtime_resources(installer_root / "resources", target)
     copy_release_documents(installer_root)
     write_package_version(installer_root, version)
@@ -1028,7 +967,6 @@ def stage_windows_installer_root(
 
 def create_windows_installer(
     binary: Path,
-    update_helper: Path,
     target: str,
     version: str,
     label: str,
@@ -1038,7 +976,7 @@ def create_windows_installer(
     if not makensis:
         raise RuntimeError("makensis not found; install NSIS before packaging Windows installers")
 
-    installer_root = stage_windows_installer_root(binary, target, version, label, update_helper)
+    installer_root = stage_windows_installer_root(binary, target, version, label)
     installer_path = DIST_DIR / f"OxideTerm_{version}_{label}-setup.exe"
     script_path = DIST_DIR / f"OxideTerm_{version}_{label}.nsi"
     icon_path = RESOURCE_DIR / "icons" / "icon.ico"
@@ -1107,16 +1045,11 @@ def windows_installer_script(
 ) -> str:
     # The NSIS package mirrors Tauri's current-user install mode while keeping
     # each native release channel isolated in its own registry/install scope.
-    # Automatic updates stage payloads first; the helper performs the final
-    # replacement after the running app has exited.
     legacy_upgrade_init = ""
     if identity.channel == "stable":
         legacy_upgrade_init = rf"""
-  ${{If}} $IsOxideUpdate == "0"
-  ${{AndIf}} ${{FileExists}} "$LOCALAPPDATA\OxideTerm\oxideterm.exe"
+  ${{If}} ${{FileExists}} "$LOCALAPPDATA\OxideTerm\oxideterm.exe"
     StrCpy $INSTDIR "$LOCALAPPDATA\OxideTerm"
-    StrCpy $IsOxideUpdate "1"
-    StrCpy $IsLegacyUpgrade "1"
     SetSilent silent
   ${{EndIf}}"""
 
@@ -1161,27 +1094,13 @@ VIAddVersionKey /LANG=1033 "ProductVersion" "{nsis_string(version)}"
 !insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_LANGUAGE "English"
 
-Var IsOxideUpdate
-Var IsLegacyUpgrade
-
 Function .onInit
-  StrCpy $IsLegacyUpgrade "0"
-  ${{GetOptions}} "$CMDLINE" "/{WINDOWS_UPDATE_FLAG}=1" $IsOxideUpdate
-  IfErrors check_legacy_install oxide_update_mode
-check_legacy_install:
-  StrCpy $IsOxideUpdate "0"
 {legacy_upgrade_init}
   Return
-oxide_update_mode:
-  StrCpy $IsOxideUpdate "1"
-  SetSilent silent
 FunctionEnd
 
 Section "Application Files"
   SectionIn RO
-  StrCmp $IsOxideUpdate "1" update_install normal_install
-
-normal_install:
   SetOutPath "$INSTDIR"
   SetOverwrite on
   File /r "{nsis_path(installer_root)}\\*"
@@ -1192,45 +1111,16 @@ normal_install:
   WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{identity.windows_uninstall_key}" "Publisher" "AnalyseDeCircuit"
   {display_icon_registry_entry}
   WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{identity.windows_uninstall_key}" "UninstallString" "$\\"$INSTDIR\\Uninstall.exe$\\""
-  Goto install_done
-
-update_install:
-  RMDir /r "$INSTDIR\\{WINDOWS_UPDATE_STAGING_DIR}"
-  CreateDirectory "$INSTDIR\\{UPDATE_HELPER_DIR}"
-  SetOutPath "$INSTDIR\\{UPDATE_HELPER_DIR}"
-  SetOverwrite on
-  File "{nsis_path(installer_root / UPDATE_HELPER_DIR / (UPDATE_HELPER_BIN + '.exe'))}"
-  SetOutPath "$INSTDIR\\{WINDOWS_UPDATE_STAGING_DIR}"
-  File /r "{nsis_path(installer_root)}\\*"
-  WriteRegStr HKCU "Software\\{identity.windows_registry_key}" "InstallDir" "$INSTDIR"
-  WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{identity.windows_uninstall_key}" "DisplayName" "{identity.app_name}"
-  WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{identity.windows_uninstall_key}" "DisplayVersion" "{nsis_string(version)}"
-  WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{identity.windows_uninstall_key}" "Publisher" "AnalyseDeCircuit"
-  {display_icon_registry_entry}
-  WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{identity.windows_uninstall_key}" "UninstallString" "$\\"$INSTDIR\\Uninstall.exe$\\""
-  StrCmp $IsLegacyUpgrade "1" 0 legacy_shortcuts_done
-  CreateDirectory "$SMPROGRAMS\\{identity.app_name}"
-  CreateShortcut "$SMPROGRAMS\\{identity.app_name}\\{identity.app_name}.lnk" "$INSTDIR\\{binary.name}" "" "$INSTDIR\\resources\\icons\\icon.ico"
-  IfFileExists "$DESKTOP\\{identity.app_name}.lnk" 0 legacy_shortcuts_done
-  CreateShortcut "$DESKTOP\\{identity.app_name}.lnk" "$INSTDIR\\{binary.name}" "" "$INSTDIR\\resources\\icons\\icon.ico"
-legacy_shortcuts_done:
-  Exec '"$INSTDIR\\{UPDATE_HELPER_DIR}\\{UPDATE_HELPER_BIN}.exe" --install-dir "$INSTDIR" --app-exe "$INSTDIR\\{binary.name}" --launch'
-
-install_done:
 {protocol_registration}
 SectionEnd
 
 Section "Start Menu Shortcut"
-  StrCmp $IsOxideUpdate "1" start_menu_shortcut_done
   CreateDirectory "$SMPROGRAMS\\{identity.app_name}"
   CreateShortcut "$SMPROGRAMS\\{identity.app_name}\\{identity.app_name}.lnk" "$INSTDIR\\{binary.name}" "" "$INSTDIR\\resources\\icons\\icon.ico"
-start_menu_shortcut_done:
 SectionEnd
 
 Section /o "Desktop Shortcut"
-  StrCmp $IsOxideUpdate "1" desktop_shortcut_done
   CreateShortcut "$DESKTOP\\{identity.app_name}.lnk" "$INSTDIR\\{binary.name}" "" "$INSTDIR\\resources\\icons\\icon.ico"
-desktop_shortcut_done:
 SectionEnd
 
 Section "Uninstall"
@@ -1714,16 +1604,14 @@ def main() -> None:
     build_cli(target, target_was_explicit)
     build_remote_desktop_helpers(target, target_was_explicit)
     app_binary = build_app(target, target_was_explicit)
-    update_helper = build_update_helper(target, target_was_explicit)
     if "windows" in target:
         sign_windows_file(app_binary)
-        sign_windows_file(update_helper)
-        create_windows_installer(app_binary, update_helper, target, version, label, identity)
+        create_windows_installer(app_binary, target, version, label, identity)
     if "apple-darwin" in target:
         sign_macos_path(app_binary)
     # Every target should publish a self-contained portable artifact; Windows
     # additionally ships an NSIS installer for users who prefer installation.
-    create_portable_package(app_binary, update_helper, target, version, label)
+    create_portable_package(app_binary, target, version, label)
     if "apple-darwin" in target:
         create_macos_app(app_binary, target, version, label, identity)
     if "linux" in target:

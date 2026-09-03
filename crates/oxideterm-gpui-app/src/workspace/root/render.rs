@@ -239,7 +239,6 @@ impl WorkspaceApp {
         let window_background_layer =
             self.render_workspace_window_background(window_background, window, cx);
         let has_window_background = window_background_layer.is_some();
-        let native_update_notification = self.render_native_update_notification(cx);
         let show_connection_cards = !self
             .connection_flow
             .read(cx)
@@ -258,7 +257,6 @@ impl WorkspaceApp {
                     &tokens,
                     i18n,
                     mono_font_family,
-                    native_update_notification,
                     show_connection_cards,
                     cx,
                 )
@@ -1189,15 +1187,6 @@ impl WorkspaceApp {
                     matches!(&snapshot.kind, WorkspaceOverlayConfirmKind::LegalNotice)
                 }),
                 |root| root.child(self.render_help_legal_notice_dialog(cx)),
-            )
-            .when(
-                overlay_confirm_snapshot.as_ref().is_some_and(|snapshot| {
-                    matches!(
-                        &snapshot.kind,
-                        WorkspaceOverlayConfirmKind::NativeUpdateReleaseNotes
-                    )
-                }),
-                |root| root.child(self.render_native_update_release_notes_dialog(cx)),
             )
             .when(self.shortcuts_modal.open, |root| {
                 root.child(self.render_shortcuts_modal(cx))

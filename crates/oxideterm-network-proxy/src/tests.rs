@@ -3,8 +3,7 @@
 
 use oxideterm_settings::{
     PersistedSettings, SettingsApplicationProxyMode, SettingsUpstreamProxyAuth,
-    SettingsUpstreamProxyConfig, SettingsUpstreamProxyProtocol, UpdateProxyMode,
-    UpdateProxyProtocol, UpdateProxySettings,
+    SettingsUpstreamProxyConfig, SettingsUpstreamProxyProtocol,
 };
 use zeroize::Zeroizing;
 
@@ -85,14 +84,6 @@ fn custom_proxy_adapters_reject_an_empty_host() {
     });
 
     assert!(configure_http_client_builder(reqwest::Client::builder(), &policy).is_err());
-
-    let settings = UpdateProxySettings {
-        mode: UpdateProxyMode::Custom,
-        host: "  ".to_string(),
-        ..UpdateProxySettings::default()
-    };
-
-    assert!(configure_update_http_client_builder(reqwest::Client::builder(), &settings).is_err());
 }
 
 #[test]
@@ -161,17 +152,4 @@ fn application_proxy_modes_select_system_or_direct_policy() {
         application_proxy_policy_from_settings(&settings, &TestCredentials { password: None }),
         ApplicationProxyPolicy::Direct
     );
-}
-
-#[test]
-fn custom_update_proxy_is_configured_by_the_shared_adapter() {
-    let settings = UpdateProxySettings {
-        mode: UpdateProxyMode::Custom,
-        protocol: UpdateProxyProtocol::Socks5,
-        host: "127.0.0.1".to_string(),
-        port: 7890,
-        ..UpdateProxySettings::default()
-    };
-
-    assert!(configure_update_http_client_builder(reqwest::Client::builder(), &settings).is_ok());
 }

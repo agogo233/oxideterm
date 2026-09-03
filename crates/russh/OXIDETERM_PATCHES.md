@@ -328,5 +328,5 @@ When updating russh:
 9. Audit every new authentication or packet-buffer variant for redaction and
    zeroization before connecting it to application or platform providers.
 10. Regenerate this exact diff inventory and run the full verification set
-   before publishing an installer or
-   updater manifest that contains the rebased SSH stack.
+   before publishing an installer or release artifact that contains the
+   rebased SSH stack.

@@ -57,7 +57,6 @@ pub(in crate::workspace) enum WorkspaceOverlayIntent {
 pub(in crate::workspace) enum WorkspaceOverlayConfirmKind {
     SettingsReset,
     LegalNotice,
-    NativeUpdateReleaseNotes,
     NodeDisconnect {
         node_id: NodeId,
         display_name: Arc<str>,
@@ -88,7 +87,6 @@ pub(in crate::workspace) enum WorkspaceOverlayConfirmKeyAction {
 pub(in crate::workspace) enum WorkspaceOverlayConfirmOwnerKind {
     SettingsReset,
     LegalNotice,
-    NativeUpdateReleaseNotes,
     NodeDisconnect,
 }
 
@@ -334,9 +332,6 @@ impl WorkspaceOverlayEntity {
                     WorkspaceOverlayConfirmKind::LegalNotice => {
                         WorkspaceOverlayConfirmOwnerKind::LegalNotice
                     }
-                    WorkspaceOverlayConfirmKind::NativeUpdateReleaseNotes => {
-                        WorkspaceOverlayConfirmOwnerKind::NativeUpdateReleaseNotes
-                    }
                     WorkspaceOverlayConfirmKind::NodeDisconnect { .. } => {
                         WorkspaceOverlayConfirmOwnerKind::NodeDisconnect
                     }
@@ -420,8 +415,7 @@ impl WorkspaceOverlayEntity {
                         node_id: node_id.clone(),
                     })
                 }
-                WorkspaceOverlayConfirmKind::LegalNotice
-                | WorkspaceOverlayConfirmKind::NativeUpdateReleaseNotes => None,
+                WorkspaceOverlayConfirmKind::LegalNotice => None,
             }
         } else {
             None
@@ -938,7 +932,6 @@ impl WorkspaceOverlayEntity {
         tokens: &ThemeTokens,
         i18n: &I18n,
         mono_font_family: SharedString,
-        native_update: Option<ToastView>,
         show_connection_cards: bool,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
@@ -952,7 +945,7 @@ impl WorkspaceOverlayEntity {
         {
             layers.push(render_zen_hint(tokens, i18n));
         }
-        if let Some(toasts) = self.render_toasts(tokens, native_update, cx) {
+        if let Some(toasts) = self.render_toasts(tokens, cx) {
             layers.push(toasts);
         }
         // Connection cards use a deferred layer and must yield while the MFA dialog owns input.
@@ -974,13 +967,9 @@ impl WorkspaceOverlayEntity {
     fn render_toasts(
         &self,
         tokens: &ThemeTokens,
-        native_update: Option<ToastView>,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if self.standard_toasts.is_empty()
-            && self.plugin_progress_toasts.is_empty()
-            && native_update.is_none()
-        {
+        if self.standard_toasts.is_empty() && self.plugin_progress_toasts.is_empty() {
             return None;
         }
         let overlay = cx.entity();
@@ -1038,7 +1027,7 @@ impl WorkspaceOverlayEntity {
                 ),
             }
         });
-        Some(toaster(tokens, standard.chain(plugin).chain(native_update)).into_any_element())
+        Some(toaster(tokens, standard.chain(plugin)).into_any_element())
     }
 
     fn render_connection_cards(
@@ -1910,12 +1899,12 @@ mod tests {
             );
             assert!(overlay.confirm_exit_task.is_some());
 
-            overlay.open_confirm(WorkspaceOverlayConfirmKind::NativeUpdateReleaseNotes, cx);
+            overlay.open_confirm(WorkspaceOverlayConfirmKind::SettingsReset, cx);
             assert!(overlay.confirm_exit_task.is_none());
             assert_eq!(
                 overlay.confirm_snapshot(),
                 Some(WorkspaceOverlayConfirmSnapshot {
-                    kind: WorkspaceOverlayConfirmKind::NativeUpdateReleaseNotes,
+                    kind: WorkspaceOverlayConfirmKind::SettingsReset,
                     phase: oxideterm_gpui_ui::motion::ExitPhase::Visible,
                     focused_action: None,
                 })

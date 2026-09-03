@@ -179,7 +179,6 @@ flowchart LR
         AiProviders["AI 供应商"]
         McpServers["MCP 服务器"]
         SyncBackend["云同步后端"]
-        UpdateServer["更新通道"]
     end
 
     App --> Config
@@ -195,7 +194,6 @@ flowchart LR
     App --> AiProviders
     App --> McpServers
     App --> SyncBackend
-    App --> UpdateServer
 ```
 
 ### 用户侧摘要
@@ -853,7 +851,7 @@ AI 和插件能力句柄不是直接重连阶段。它们通过运行时边界�
 - 云同步。
 - 便携运行时。
 - 快捷键。
-- 帮助和更新通道。
+- 帮助。
 
 ### 持久化规则
 
@@ -1124,7 +1122,7 @@ flowchart TB
 | `workspace/runtime_entity.rs` | 持有长期节点订阅、重连 worker、运行时关闭和终端消费者登记 | 关闭终端消费者不会意外关闭共享节点或传输 |
 | `workspace/ide.rs` 与 IDE crate | 打开文件夹、路由文件操作、管理编辑器状态 | 远端编辑体现为工作区，而不是裸 SFTP 操作 |
 | `workspace/forwards/*` | 渲染转发表单、规则、状态和动作 | 端口转发可见、可恢复、可从桌面应用管理 |
-| `workspace/settings/*` | 渲染终端、外观、AI、SFTP、IDE、提权凭据、便携运行时、更新和快捷键设置页 | 配置以应用为主入口，并通过共享设置模型持久化 |
+| `workspace/settings/*` | 渲染终端、外观、AI、SFTP、IDE、提权凭据、便携运行时和快捷键设置页 | 配置以应用为主入口，并通过共享设置模型持久化 |
 | `workspace/cloud_sync/*` | 渲染同步状态、确认流程和备份动作 | 云同步与备份操作显式展示，尽量可预演和可恢复 |
 | `workspace/plugin_entity.rs`、`plugin_manager.rs`、`plugin_lifecycle/*`、`plugin_ui.rs` | 协调插件发现、生命周期、宿主 API 快照、设置、凭据和界面调用 | 插件可以扩展应用页面，但不拥有核心运行时状态 |
 | `workspace/sidebar/ai/*` | 渲染 AI 对话、模型选择、流式输出、上下文、Agent Skills、工具事件和对话记录状态 | OxideSens 是集成在工作区内的助手，并有明确工具边界 |
@@ -1845,7 +1843,7 @@ flowchart LR
 | ACP agent session 和主机工具 | `oxideterm-acp-adapter`, `oxideterm-acp-host-tools`, `workspace/acp_workspace.rs` |
 | 插件 | `oxideterm-plugin-manifest`, `oxideterm-plugin-registry`, `oxideterm-plugin-host-api`, `oxideterm-plugin-wasm-runtime`, 应用插件 Entity |
 | 云同步和便携运行时 | `oxideterm-cloud-sync`, `oxideterm-gpui-cloud-sync`, `oxideterm-portable-runtime` |
-| 通知与更新 | `oxideterm-notification-center`, `oxideterm-update` |
+| 通知 | `oxideterm-notification-center` |
 | CLI 伴侣工具 | `oxideterm-cli` |
 
 ---

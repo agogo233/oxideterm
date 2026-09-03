@@ -323,7 +323,6 @@ pub(super) fn oxide_settings_field_label(field: &str, i18n: &oxideterm_i18n::I18
     // These mappings mirror Tauri's OxideImportModal field formatter.
     match field {
         "language" => i18n.t("settings_view.general.language"),
-        "updateChannel" => i18n.t("settings_view.general.update_channel"),
         "theme" => i18n.t("settings_view.appearance.theme"),
         "fontFamily" => i18n.t("settings_view.terminal.font_family"),
         "customFontFamily" => i18n.t("settings_view.terminal.custom_font_stack"),

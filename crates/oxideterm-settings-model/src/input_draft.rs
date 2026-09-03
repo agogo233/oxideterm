@@ -17,7 +17,7 @@ use oxideterm_settings::{
     MAX_AI_TOOL_MAX_CALLS_PER_ROUND, MAX_AI_TOOL_MAX_ROUNDS, MAX_TERMINAL_FONT_WEIGHT,
     MIN_AI_TOOL_MAX_CALLS_PER_ROUND, MIN_AI_TOOL_MAX_ROUNDS, MIN_TERMINAL_FONT_WEIGHT,
     PersistedSettings, RECOMMENDED_FOCUS_HANDOFF_COMMANDS, SettingsUpstreamProxyAuth,
-    UpdateProxyMode, parse_terminal_session_log_content_template,
+    parse_terminal_session_log_content_template,
     parse_terminal_session_log_directory_template, parse_terminal_session_log_file_name_template,
     reindex_highlight_rules,
 };
@@ -105,9 +105,6 @@ pub fn persisted_settings_input_value(
         SettingsInput::NetworkProxyTestHost
         | SettingsInput::NetworkProxyTestPort
         | SettingsInput::PublicMcpPort => return None,
-        SettingsInput::UpdateProxyHost => settings.general.update_proxy.host.clone(),
-        SettingsInput::UpdateProxyPort => settings.general.update_proxy.port.to_string(),
-        SettingsInput::UpdateProxyNoProxy => settings.general.update_proxy.no_proxy.clone(),
         SettingsInput::SftpSpeedLimitKbps => settings.sftp.speed_limit_kbps.to_string(),
         SettingsInput::InBandTransferMaxChunkBytes => settings
             .terminal
@@ -428,20 +425,6 @@ pub fn apply_persisted_settings_input_draft(
         SettingsInput::NetworkProxyTestHost
         | SettingsInput::NetworkProxyTestPort
         | SettingsInput::PublicMcpPort => SettingsInputDraftApply::Unhandled,
-        SettingsInput::UpdateProxyHost => {
-            settings.general.update_proxy.host = draft.trim().to_string();
-            SettingsInputDraftApply::Applied
-        }
-        SettingsInput::UpdateProxyPort => parse_i64(draft)
-            .map(|value| {
-                settings.general.update_proxy.port = value.clamp(1, 65_535) as u16;
-                settings.general.update_proxy.mode = UpdateProxyMode::Custom;
-            })
-            .into(),
-        SettingsInput::UpdateProxyNoProxy => {
-            settings.general.update_proxy.no_proxy = draft.trim().to_string();
-            SettingsInputDraftApply::Applied
-        }
         SettingsInput::SftpSpeedLimitKbps => parse_i64(draft)
             .map(|value| settings.sftp.speed_limit_kbps = value.max(0))
             .into(),

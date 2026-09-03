@@ -6,7 +6,7 @@ use oxideterm_settings::{
     AiThinkingStyle, AnimationSpeed, BackgroundFit, ConflictAction,
     CursorStyle as SettingsCursorStyle, FontFamily, IdeAgentMode, Language, PersistedSettings,
     TerminalBackspaceSequence, TerminalDeleteSequence, TerminalEncoding,
-    TerminalSessionLogFileMode, UiDensity, UpdateChannel, UpdateProxyMode, UpdateProxyProtocol,
+    TerminalSessionLogFileMode, UiDensity,
 };
 pub use oxideterm_settings_model::theme_display_name;
 use oxideterm_theme::BUILT_IN_THEMES;
@@ -617,30 +617,6 @@ pub fn cycle_ai_thinking(settings: &mut PersistedSettings) {
         AiThinkingStyle::Detailed => AiThinkingStyle::Compact,
         AiThinkingStyle::Compact => AiThinkingStyle::Detailed,
     };
-}
-
-pub fn update_channel_label(channel: UpdateChannel, i18n: &I18n) -> String {
-    match channel {
-        UpdateChannel::Stable => i18n.t("settings_view.help.channel_stable"),
-        UpdateChannel::Beta => i18n.t("settings_view.help.channel_beta"),
-    }
-}
-
-pub fn update_proxy_mode_label(mode: UpdateProxyMode, i18n: &I18n) -> String {
-    match mode {
-        UpdateProxyMode::Direct => i18n.t("settings_view.help.update_proxy_mode_direct"),
-        UpdateProxyMode::Application => i18n.t("settings_view.help.update_proxy_mode_application"),
-        UpdateProxyMode::System => i18n.t("settings_view.help.update_proxy_mode_system"),
-        UpdateProxyMode::Custom => i18n.t("settings_view.help.update_proxy_mode_custom"),
-    }
-}
-
-pub fn update_proxy_protocol_label(protocol: UpdateProxyProtocol, i18n: &I18n) -> String {
-    match protocol {
-        UpdateProxyProtocol::Http => i18n.t("settings_view.help.update_proxy_protocol_http"),
-        UpdateProxyProtocol::Https => i18n.t("settings_view.help.update_proxy_protocol_https"),
-        UpdateProxyProtocol::Socks5 => i18n.t("settings_view.help.update_proxy_protocol_socks5"),
-    }
 }
 
 pub fn terminal_encoding_label(encoding: TerminalEncoding) -> String {

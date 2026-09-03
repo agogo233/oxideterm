@@ -53,7 +53,7 @@ Do not manually create a GitHub Release. The workflow checks out the tagged comm
 - If a tag exists unexpectedly, compare its annotated object and peeled commit with the intended release commit, then stop.
 - If a packaging dispatch was canceled before a GitHub Release exists and the tag still points at the intended commit, leave the tag unchanged and dispatch a new `Native Package` run with the same tag.
 - Moving an existing tag requires explicit authorization and a force-with-lease update against the recorded annotated tag object. Never delete the remote tag as a shortcut.
-- If a GitHub Release already exists or updater assets may have reached users, keep the tag immutable and publish the next patch version.
+- If a GitHub Release already exists or release assets may have reached users, keep the tag immutable and publish the next patch version.
 - If a completed packaging run produced artifacts but uploaded them incompletely, use the repair workflow with its original run identifier. It can republish existing artifacts; it cannot build a platform that never produced one.
 
 ## Verify And Recover

@@ -488,8 +488,6 @@ impl WorkspaceApp {
                     .upstream_proxy_disclaimer_accepted
                     .hash(&mut hasher);
                 settings.network.application_proxy_mode.hash(&mut hasher);
-                settings.general.update_proxy.mode.hash(&mut hasher);
-                settings.general.update_proxy.protocol.hash(&mut hasher);
                 self.settings_workspace
                     .read(cx)
                     .network_proxy_layout_flags()
@@ -512,9 +510,6 @@ impl WorkspaceApp {
                     .is_some()
                     .hash(&mut hasher);
                 self.public_mcp.startup_error().is_some().hash(&mut hasher);
-            }
-            SettingsTab::Help => {
-                settings.general.update_channel.hash(&mut hasher);
             }
             SettingsTab::Connections => {
                 self.connection_store.connections().len().hash(&mut hasher);

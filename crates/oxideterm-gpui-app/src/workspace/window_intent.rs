@@ -23,7 +23,6 @@ pub(in crate::workspace) enum WindowIntentAction {
     HideMainWindow,
     NewConnection,
     OpenSettings,
-    CheckForUpdates,
     Quit,
     OpenNativeConnection(NativeConnectionLaunch),
     OpenExternalConnectionUri(NativeConnectionLaunch),
@@ -325,9 +324,6 @@ impl WorkspaceWindowIntentEntity {
                 oxideterm_desktop_presence::DesktopPresenceEvent::OpenSettings => {
                     WindowIntentAction::OpenSettings
                 }
-                oxideterm_desktop_presence::DesktopPresenceEvent::CheckForUpdates => {
-                    WindowIntentAction::CheckForUpdates
-                }
                 oxideterm_desktop_presence::DesktopPresenceEvent::Quit => WindowIntentAction::Quit,
             };
             cx.emit(WindowIntent::new(action));
@@ -429,11 +425,6 @@ impl WorkspaceApp {
             WindowIntentAction::OpenSettings => {
                 oxideterm_desktop_presence::show_main_window();
                 cx.dispatch_action(&crate::OpenSettings);
-            }
-            WindowIntentAction::CheckForUpdates => {
-                oxideterm_desktop_presence::show_main_window();
-                cx.dispatch_action(&crate::OpenSettings);
-                self.check_native_update(cx);
             }
             WindowIntentAction::Quit => {
                 oxideterm_desktop_presence::request_quit();

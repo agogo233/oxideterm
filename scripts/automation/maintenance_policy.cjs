@@ -33,7 +33,6 @@ const HUMAN_REVIEW_PATH_PREFIXES = Object.freeze([
   'crates/oxideterm-cloud-sync/',
   'crates/oxideterm-gpui-cloud-sync/',
   'crates/oxideterm-secret-store/',
-  'crates/oxideterm-update/',
   'crates/oxideterm-plugin-host-api/src/capabilities',
   'crates/oxideterm-plugin-host-api/src/secrets',
   'crates/oxideterm-connections/src/secret',

@@ -72,7 +72,6 @@ oxideterm-terminal-triggers = { path = "../oxideterm-terminal-triggers" }
 oxideterm-terminal-recording = { path = "../oxideterm-terminal-recording" }
 oxideterm-theme = { path = "../oxideterm-theme" }
 oxideterm-topology = { path = "../oxideterm-topology" }
-oxideterm-update = { path = "../oxideterm-update" }
 oxideterm-workspace = { path = "../oxideterm-workspace" }
 oxideterm-wsl-graphics = { path = "../oxideterm-wsl-graphics" }
 parking_lot.workspace = true

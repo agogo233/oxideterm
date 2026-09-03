@@ -4,6 +4,5 @@ pub enum DesktopPresenceEvent {
     HideMainWindow,
     NewConnection,
     OpenSettings,
-    CheckForUpdates,
     Quit,
 }

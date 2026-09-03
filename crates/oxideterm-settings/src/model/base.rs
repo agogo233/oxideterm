@@ -72,14 +72,6 @@ pub fn is_prerelease_version(version: &str) -> bool {
     version_contains_prerelease_tag(version, &["alpha", "beta", "rc", "pre", "preview"])
 }
 
-pub fn default_update_channel_for_version(version: &str) -> UpdateChannel {
-    if is_prerelease_version(version) {
-        UpdateChannel::Beta
-    } else {
-        UpdateChannel::Stable
-    }
-}
-
 fn version_contains_prerelease_tag(version: &str, tags: &[&str]) -> bool {
     let Some((_, prerelease)) = version.split_once('-') else {
         return false;
@@ -91,64 +83,6 @@ fn version_contains_prerelease_tag(version: &str, tags: &[&str]) -> bool {
                 .strip_prefix(tag)
                 .is_some_and(|suffix| suffix.starts_with('.') || suffix.starts_with('-'))
     })
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum UpdateChannel {
-    Stable,
-    Beta,
-}
-
-impl Default for UpdateChannel {
-    fn default() -> Self {
-        // Stable builds follow Stable while all prerelease builds follow Beta.
-        default_update_channel_for_version(env!("CARGO_PKG_VERSION"))
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum UpdateProxyMode {
-    #[default]
-    Direct,
-    Application,
-    System,
-    Custom,
-}
-
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum UpdateProxyProtocol {
-    #[default]
-    Http,
-    Https,
-    Socks5,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UpdateProxySettings {
-    pub mode: UpdateProxyMode,
-    pub protocol: UpdateProxyProtocol,
-    pub host: String,
-    pub port: u16,
-    pub no_proxy: String,
-    #[serde(flatten)]
-    pub extra: ExtraFields,
-}
-
-impl Default for UpdateProxySettings {
-    fn default() -> Self {
-        Self {
-            mode: UpdateProxyMode::Direct,
-            protocol: UpdateProxyProtocol::Http,
-            host: "127.0.0.1".to_string(),
-            port: 7890,
-            no_proxy: String::new(),
-            extra: ExtraFields::new(),
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

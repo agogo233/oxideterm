@@ -3,15 +3,12 @@
 
 use oxideterm_settings::{
     PersistedSettings, SettingsApplicationProxyMode, SettingsUpstreamProxyAuth,
-    SettingsUpstreamProxyProtocol, UpdateProxyMode, UpdateProxyProtocol, UpdateProxySettings,
+    SettingsUpstreamProxyProtocol,
 };
-use reqwest::ClientBuilder;
 
 use crate::{
-    ApplicationProxyAuth, ApplicationProxyCredentialProvider, ApplicationProxyError,
-    ApplicationProxyPolicy, ApplicationProxyProtocol, CustomApplicationProxy,
-    http::configure_http_client_builder, runtime::configure_application_http_client_builder,
-    set_application_proxy_policy,
+    ApplicationProxyAuth, ApplicationProxyCredentialProvider, ApplicationProxyPolicy,
+    ApplicationProxyProtocol, CustomApplicationProxy, set_application_proxy_policy,
 };
 
 pub fn application_proxy_policy_from_settings(
@@ -77,35 +74,4 @@ pub fn install_application_proxy_policy_from_settings(
         settings,
         credentials,
     ));
-}
-
-pub fn configure_update_http_client_builder(
-    builder: ClientBuilder,
-    settings: &UpdateProxySettings,
-) -> Result<ClientBuilder, ApplicationProxyError> {
-    match settings.mode {
-        UpdateProxyMode::Application => configure_application_http_client_builder(builder),
-        UpdateProxyMode::Direct => {
-            configure_http_client_builder(builder, &ApplicationProxyPolicy::Direct)
-        }
-        UpdateProxyMode::System => {
-            configure_http_client_builder(builder, &ApplicationProxyPolicy::System)
-        }
-        UpdateProxyMode::Custom => {
-            let protocol = match settings.protocol {
-                UpdateProxyProtocol::Http => ApplicationProxyProtocol::HttpConnect,
-                UpdateProxyProtocol::Https => ApplicationProxyProtocol::HttpsConnect,
-                UpdateProxyProtocol::Socks5 => ApplicationProxyProtocol::Socks5,
-            };
-            let policy = ApplicationProxyPolicy::Custom(CustomApplicationProxy {
-                protocol,
-                host: settings.host.clone(),
-                port: settings.port,
-                auth: ApplicationProxyAuth::None,
-                remote_dns: true,
-                no_proxy: settings.no_proxy.clone(),
-            });
-            configure_http_client_builder(builder, &policy)
-        }
-    }
 }

@@ -1318,10 +1318,9 @@ impl WorkspaceApp {
 
     fn settings_network_routing_section(&self, cx: &mut Context<Self>) -> AnyElement {
         // Routing policy is distinct from the reusable proxy definition above.
-        // SSH remains connection-owned while app and updater routes are global.
+        // SSH remains connection-owned while the app route is global.
         let settings = self.settings_store.settings();
         let application_mode = settings.network.application_proxy_mode;
-        let update_proxy = &settings.general.update_proxy;
         let mut content = div()
             .w_full()
             .min_w(px(0.0))
@@ -1340,19 +1339,7 @@ impl WorkspaceApp {
                 SettingsSelect::NetworkApplicationProxyMode,
                 network_application_proxy_mode_label(application_mode, &self.i18n),
                 cx,
-            ))
-            .child(self.card_separator())
-            .child(self.network_route_select_row(
-                "settings_view.network.update_route",
-                "settings_view.network.update_route_hint",
-                SettingsSelect::UpdateProxyMode,
-                update_proxy_mode_label(update_proxy.mode, &self.i18n),
-                cx,
             ));
-
-        if update_proxy.mode == UpdateProxyMode::Custom {
-            content = content.child(self.settings_network_custom_update_proxy(cx));
-        }
 
         content = content.child(
             div()
@@ -1366,72 +1353,6 @@ impl WorkspaceApp {
             "settings_view.network.routing_hint",
             vec![content.into_any_element()],
         )
-    }
-
-    fn settings_network_custom_update_proxy(&self, cx: &mut Context<Self>) -> AnyElement {
-        let proxy = &self.settings_store.settings().general.update_proxy;
-        div()
-            .w_full()
-            .min_w(px(0.0))
-            .pt(px(self.tokens.metrics.settings_row_gap))
-            .flex()
-            .flex_col()
-            .gap(px(self.tokens.metrics.settings_row_gap))
-            .child(self.network_subsection_heading(
-                "settings_view.network.custom_update_proxy",
-                "settings_view.network.custom_update_proxy_hint",
-            ))
-            .child(
-                div()
-                    .w_full()
-                    .min_w(px(0.0))
-                    .flex()
-                    .flex_wrap()
-                    .items_start()
-                    .gap(px(32.0))
-                    .child(self.network_responsive_field(
-                        SETTINGS_NETWORK_FIELD_WIDTH,
-                        self.network_select_field(
-                            "settings_view.network.update_protocol",
-                            "settings_view.network.update_protocol_hint",
-                            SettingsSelect::UpdateProxyProtocol,
-                            update_proxy_protocol_label(proxy.protocol, &self.i18n),
-                            true,
-                            cx,
-                        ),
-                    ))
-                    .child(self.network_compact_field(
-                        SETTINGS_NETWORK_PORT_FIELD_WIDTH,
-                        self.network_input_field(
-                            "settings_view.network.update_port",
-                            "settings_view.network.update_port_hint",
-                            SettingsInput::UpdateProxyPort,
-                            self.current_settings_input_value(SettingsInput::UpdateProxyPort, cx),
-                            "7890".to_string(),
-                            true,
-                            cx,
-                        ),
-                    )),
-            )
-            .child(self.network_full_width_input(
-                "settings_view.network.update_host",
-                "settings_view.network.update_host_hint",
-                SettingsInput::UpdateProxyHost,
-                self.current_settings_input_value(SettingsInput::UpdateProxyHost, cx),
-                "127.0.0.1".to_string(),
-                true,
-                cx,
-            ))
-            .child(self.network_full_width_input(
-                "settings_view.network.update_no_proxy",
-                "settings_view.network.update_no_proxy_hint",
-                SettingsInput::UpdateProxyNoProxy,
-                self.current_settings_input_value(SettingsInput::UpdateProxyNoProxy, cx),
-                "localhost,127.0.0.1".to_string(),
-                true,
-                cx,
-            ))
-            .into_any_element()
     }
 
     fn network_subsection_heading(&self, label_key: &str, hint_key: &str) -> AnyElement {

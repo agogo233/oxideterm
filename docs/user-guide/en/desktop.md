@@ -142,4 +142,4 @@ For context-sensitive helpers such as privilege prompts or modem transfers, make
 
 ## Updates
 
-Use Settings → Help & About to check the active version and update channel. Stable and beta builds use separate update channels, so choose the channel that matches the build you installed.
+OxideTerm does not update itself. Check the GitHub Releases page for new versions and install a release package manually. Stable and beta builds are published as separate release channels, so pick the package that matches the build you installed.

@@ -51,7 +51,7 @@ class WindowsInstallerScriptTests(unittest.TestCase):
         self.assertIn('"FileDescription" "OxideTerm GPUI Preview Installer"', script)
         self.assertIn('"LegalCopyright" "Copyright (C) 2026 AnalyseDeCircuit"', script)
         self.assertIn('"ProductVersion" "1.2.0-gpui-preview.2"', script)
-        self.assertIn("normal_install:", script)
+        self.assertIn('SetOutPath "$INSTDIR"', script)
         self.assertIn("!insertmacro MUI_PAGE_COMPONENTS", script)
         self.assertIn('Section "Application Files"', script)
         self.assertIn("SectionIn RO", script)
@@ -60,29 +60,6 @@ class WindowsInstallerScriptTests(unittest.TestCase):
         self.assertNotIn("already installed", script)
         self.assertNotIn("uninstall_existing", script)
         self.assertNotIn("ExecWait", script)
-
-    def test_update_mode_stages_files_and_installs_helper_directly(self) -> None:
-        script = package_native.windows_installer_script(
-            binary=Path("oxideterm-native.exe"),
-            version="1.2.0-gpui-preview.2",
-            identity=self.identity(),
-            installer_root=Path(r"C:\dist\nsis-windows_x64"),
-            installer_path=Path(r"C:\dist\OxideTerm_setup.exe"),
-            icon_path=Path(r"C:\icons\icon.ico"),
-        )
-
-        self.assertIn('/OXIDETERM_UPDATE=1', script)
-        self.assertIn('SetSilent silent', script)
-        self.assertIn('RMDir /r "$INSTDIR\\install"', script)
-        self.assertIn('SetOutPath "$INSTDIR\\tools"', script)
-        self.assertIn('tools/oxideterm-update-helper.exe"', script)
-        self.assertIn('SetOutPath "$INSTDIR\\install"', script)
-        self.assertIn('Exec \'"$INSTDIR\\tools\\oxideterm-update-helper.exe"', script)
-        self.assertIn('--install-dir "$INSTDIR"', script)
-        self.assertIn('--app-exe "$INSTDIR\\oxideterm-native.exe" --launch', script)
-        self.assertIn('StrCmp $IsOxideUpdate "1" start_menu_shortcut_done', script)
-        self.assertIn('StrCmp $IsOxideUpdate "1" desktop_shortcut_done', script)
-        self.assertNotIn('$LOCALAPPDATA\\OxideTerm\\oxideterm.exe', script)
 
     def test_all_install_modes_register_the_application_icon(self) -> None:
         script = package_native.windows_installer_script(
@@ -97,7 +74,7 @@ class WindowsInstallerScriptTests(unittest.TestCase):
             r'"DisplayIcon" "$\"$INSTDIR\oxideterm-native.exe$\",0"'
         )
 
-        self.assertEqual(script.count(display_icon_entry), 2)
+        self.assertEqual(script.count(display_icon_entry), 1)
 
     def test_modern_ui_uses_the_application_icon(self) -> None:
         icon_path = Path(r"C:\icons\icon.ico")
@@ -132,15 +109,12 @@ class WindowsInstallerScriptTests(unittest.TestCase):
 
         self.assertIn('$LOCALAPPDATA\\OxideTerm\\oxideterm.exe', script)
         self.assertIn('StrCpy $INSTDIR "$LOCALAPPDATA\\OxideTerm"', script)
-        self.assertIn('StrCpy $IsOxideUpdate "1"', script)
-        self.assertIn('StrCpy $IsLegacyUpgrade "1"', script)
         self.assertIn('SetSilent silent', script)
         self.assertIn(
             'CreateShortcut "$SMPROGRAMS\\OxideTerm\\OxideTerm.lnk" '
             '"$INSTDIR\\oxideterm-native.exe"',
             script,
         )
-        self.assertIn('IfFileExists "$DESKTOP\\OxideTerm.lnk"', script)
 
     def test_installer_registers_connection_uri_capabilities_without_embedding_credentials(self) -> None:
         identity = self.identity()
@@ -426,29 +400,6 @@ class ReleaseDocumentTests(unittest.TestCase):
                 (destination / "AGENT_THIRD_PARTY_NOTICES.md").stat().st_size,
                 0,
             )
-
-    def test_portable_update_manifest_owns_only_release_entries(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            package_root = Path(directory)
-            binary = package_root / "oxideterm-native"
-            update_helper = package_root / "oxideterm-update-helper"
-
-            package_native.write_portable_update_manifest(
-                package_root, binary, update_helper
-            )
-
-            manifest = package_native.json.loads(
-                (package_root / "portable-update.json").read_text(encoding="utf-8")
-            )
-            self.assertEqual(manifest["appExecutable"], binary.name)
-            self.assertEqual(
-                manifest["updateHelper"],
-                f"tools/{update_helper.name}",
-            )
-            self.assertIn("resources", manifest["managedEntries"])
-            self.assertIn("tools", manifest["managedEntries"])
-            self.assertNotIn("data", manifest["managedEntries"])
-            self.assertNotIn("portable.json", manifest["managedEntries"])
 
 
 class ReleaseVersionTests(unittest.TestCase):
