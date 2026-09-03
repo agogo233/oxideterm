@@ -19,5 +19,8 @@ serde_json.workspace = true
 thiserror.workspace = true
 zeroize.workspace = true
 
+[target.'cfg(target_os = "windows")'.dependencies]
+windows.workspace = true
+
 [dev-dependencies]
 tempfile = "3.23"

@@ -3,6 +3,7 @@
 
 //! Portable runtime detection and process-wide state.
 
+mod autounlock_store;
 mod detection;
 pub mod keystore;
 mod lock;
