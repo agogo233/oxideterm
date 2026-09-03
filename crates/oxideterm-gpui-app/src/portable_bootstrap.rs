@@ -298,10 +298,6 @@ impl PortableBootstrapWindow {
                 launch.window_ui,
             ) {
                 Ok(()) => {
-                    #[cfg(target_os = "windows")]
-                    if let Err(error) = crate::confirm_update_after_initial_workspace() {
-                        eprintln!("failed to confirm the applied Windows update: {error}");
-                    }
                     window.remove_window();
                 }
                 Err(error) => {

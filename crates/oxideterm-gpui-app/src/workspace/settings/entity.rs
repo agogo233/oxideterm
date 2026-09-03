@@ -508,7 +508,7 @@ pub(in crate::workspace) enum SettingsWorkspaceEvent {
 impl EventEmitter<SettingsWorkspaceEvent> for SettingsWorkspaceEntity {}
 
 impl SettingsWorkspaceEntity {
-    pub(in crate::workspace) fn new(cx: &mut Context<Self>) -> Self {
+    pub(in crate::workspace) fn new(_cx: &mut Context<Self>) -> Self {
         Self {
             route: SettingsRouteState::default(),
             external_store_watch: None,
