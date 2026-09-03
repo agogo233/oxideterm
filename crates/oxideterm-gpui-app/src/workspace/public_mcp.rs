@@ -353,7 +353,10 @@ impl PublicMcpWorkspaceBridge {
         // loopback listener at all.
         if client_registry_ready && bridge.has_enabled_clients() {
             if let Err(error) = bridge.start_listener(runtime) {
-                bridge.startup_error = bridge.startup_error.or(Some(error.to_string()));
+                // A registry failure takes precedence over a listener failure.
+                if bridge.startup_error.is_none() {
+                    bridge.startup_error = Some(error.to_string());
+                }
             }
         }
         bridge
