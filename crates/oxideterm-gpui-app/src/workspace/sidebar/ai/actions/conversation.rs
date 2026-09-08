@@ -1,4 +1,4 @@
-use crate::workspace::ai_state::AiStandardConfirmKind;
+use crate::workspace::ai_state::{AiQueuedChatTurn, AiStandardConfirmKind};
 
 impl AiWorkspaceEntity {
     fn create_chat_conversation(
@@ -7,6 +7,7 @@ impl AiWorkspaceEntity {
         title: Option<String>,
         now_ms: i64,
     ) -> String {
+        self.stash_active_chat_draft();
         let id = self
             .conversation_state_mut()
             .create_conversation(id, title, now_ms, None);
@@ -16,9 +17,7 @@ impl AiWorkspaceEntity {
 
     fn begin_sidebar_user_turn(
         &mut self,
-        candidate_id: String,
-        title: String,
-        now_ms: i64,
+        conversation_id: String,
         message: AiChatMessage,
         stream_config: &AiChatStreamConfig,
         active_participant: Option<String>,
@@ -26,12 +25,6 @@ impl AiWorkspaceEntity {
         let message_id = message.id.clone();
         let backend = ai_message_backend_for_stream(stream_config);
         let first_user_message = message.content.clone();
-        let conversation_id = self.conversation_state_mut().ensure_conversation(
-            candidate_id,
-            Some(title),
-            now_ms,
-            None,
-        );
         self.conversation_state_mut()
             .add_message(&conversation_id, message);
         if let Some(conversation) = self
@@ -369,6 +362,32 @@ impl WorkspaceApp {
         id
     }
 
+    pub(in crate::workspace) fn steer_ai_chat_draft(&mut self, cx: &mut Context<Self>) {
+        let content = self.ai_entity.read(cx).chat_ui().draft.trim().to_string();
+        if content.is_empty() {
+            return;
+        }
+        if self.ai_entity.read(cx).can_supplement_agent() {
+            let sent = self.ai_entity.update(cx, |ai, _cx| {
+                if ai.supplement_agent(&content).is_err() { return false; }
+                if let Some(id) = ai.conversation_state().active_conversation_id.clone() {
+                    ai.conversation_state_mut().add_message(&id, agent_chat_message(AiChatRole::User, content.clone()));
+                }
+                ai.set_chat_draft(String::new());
+                ai.persist_chat_state();
+                true
+            });
+            if !sent { self.push_ai_settings_toast(self.i18n.t("ai.agents.message_not_sent"), TerminalNoticeVariant::Warning, cx); }
+            cx.notify();
+            return;
+        }
+        self.push_ai_settings_toast(
+            self.i18n.t("ai.queue.steer_unavailable"),
+            TerminalNoticeVariant::Warning,
+            cx,
+        );
+    }
+
     pub(in crate::workspace) fn send_ai_chat_draft(&mut self, cx: &mut Context<Self>) {
         self.ensure_ai_chat_initialized(cx);
         let content = self.ai_entity.read(cx).chat_ui().draft.trim().to_string();
@@ -418,6 +437,14 @@ impl WorkspaceApp {
             None
         };
         if let Some(command) = slash_command.filter(|command| command.client_only) {
+            if self.ai_entity.read(cx).chat_is_loading() {
+                self.push_ai_settings_toast(
+                    self.i18n.t("ai.queue.client_command_busy"),
+                    TerminalNoticeVariant::Warning,
+                    cx,
+                );
+                return;
+            }
             match command.name {
                 "clear" => {
                     self.create_ai_sidebar_conversation(None, cx);
@@ -447,7 +474,6 @@ impl WorkspaceApp {
                 return;
             }
         };
-        self.record_ai_memory_usage(&stream_config.memory_entry_ids, cx);
         let now = ai_now_ms();
         let title = generate_chat_title(&content);
         let id = self.next_ai_chat_id(now, cx);
@@ -505,31 +531,209 @@ impl WorkspaceApp {
             (!request_text.is_empty()).then_some(request_text)
         };
         let conversation_id = self.ai_entity.update(cx, |ai, _cx| {
-            ai.begin_sidebar_user_turn(
-                id,
-                title,
-                now,
-                message,
-                &stream_config,
-                active_participant,
-            )
+            ai.conversation_state_mut()
+                .ensure_conversation(id, Some(title), now, None)
         });
-        if let Some((skill_id, content_hash, _instructions)) = explicit_skill {
-            self.record_ai_loaded_skill(&conversation_id, &skill_id, &content_hash, cx);
+        let turn = AiQueuedChatTurn {
+            id: message.id,
+            content: zeroize::Zeroizing::new(message.content),
+            context: message.context.map(zeroize::Zeroizing::new),
+            config: stream_config,
+            request_content: request_content.map(zeroize::Zeroizing::new),
+            task_system_prompt: task_system_prompt.map(zeroize::Zeroizing::new),
+            participant: active_participant,
+            skill: explicit_skill.map(|(id, hash, _)| (id, hash)),
+        };
+        let busy = self.ai_entity.read(cx).chat_is_loading();
+        self.ai_entity.update(cx, |ai, _| {
+            ai.queued_chat_turns
+                .entry(conversation_id.clone())
+                .or_default()
+                .push_back(turn)
+        });
+        self.reset_ai_chat_input_after_submit(cx);
+        if !busy {
+            self.send_next_queued_ai_message(&conversation_id, cx);
         }
-        // Sending a new turn is an explicit request to resume following the
-        // conversation tail; manual upward scrolling can pause it again.
-        self.ai_entity.read(cx).chat_ui().message_list_state
-            .set_follow_mode(FollowMode::Tail);
+        cx.notify();
+    }
+
+    pub(in crate::workspace) fn send_next_queued_ai_message(
+        &mut self,
+        conversation_id: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.settings_store.settings().ai.enabled {
+            return false;
+        }
+        let turn = self
+            .ai_entity
+            .update(cx, |ai, _| ai.take_queued_chat_turn(conversation_id));
+        let Some(turn) = turn else {
+            return false;
+        };
+        self.record_ai_memory_usage(&turn.config.memory_entry_ids, cx);
+        let mut message = agent_chat_message(AiChatRole::User, turn.content.to_string());
+        message.id = turn.id.clone();
+        message.context = turn.context.as_deref().map(|value| value.to_string());
+        message.model = Some(turn.config.model.clone());
+        self.ai_entity.update(cx, |ai, _| {
+            ai.begin_sidebar_user_turn(
+                conversation_id.to_owned(),
+                message,
+                &turn.config,
+                turn.participant,
+            );
+            ai.set_conversation_loading(conversation_id, true);
+        });
+        if let Some((id, hash)) = turn.skill {
+            self.record_ai_loaded_skill(conversation_id, &id, &hash, cx);
+        }
+        if self
+            .ai_entity
+            .read(cx)
+            .conversation_state()
+            .active_conversation_id
+            .as_deref()
+            == Some(conversation_id)
+        {
+            self.ai_entity
+                .read(cx)
+                .chat_ui()
+                .message_list_state
+                .set_follow_mode(FollowMode::Tail);
+        }
         self.start_ai_chat_stream_after_api_key_lookup(
-            conversation_id,
-            stream_config,
-            request_content,
-            task_system_prompt,
+            conversation_id.to_owned(),
+            turn.config,
+            turn.request_content.as_deref().map(|text| text.to_string()),
+            turn.task_system_prompt
+                .as_deref()
+                .map(|text| text.to_string()),
             cx,
         );
-        self.reset_ai_chat_input_after_submit(cx);
+        true
+    }
+
+    pub(in crate::workspace) fn apply_ai_queue_action(
+        &mut self,
+        conversation: &str,
+        id: &str,
+        action: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .ai_entity
+            .read(cx)
+            .conversation_state()
+            .active_conversation_id
+            .as_deref()
+            != Some(conversation)
+        {
+            return;
+        }
+        if action == "edit" && !self.ai_entity.read(cx).chat_ui().draft.is_empty() {
+            self.push_ai_settings_toast(
+                self.i18n.t("ai.queue.draft_not_empty"),
+                TerminalNoticeVariant::Warning,
+                cx,
+            );
+            return;
+        }
+        if action == "send" && self.ai_entity.read(cx).chat_is_loading() {
+            let content = self
+                .ai_entity
+                .read(cx)
+                .queued_chat_turns
+                .get(conversation)
+                .and_then(|turns| turns.iter().find(|turn| turn.id == id))
+                .map(|turn| turn.content.to_string());
+            let Some(content) = content else {
+                return;
+            };
+            let accepted = self.ai_entity.update(cx, |ai, _| {
+                if ai.supplement_agent(&content).is_err() {
+                    return false;
+                }
+                ai.conversation_state_mut()
+                    .add_message(conversation, agent_chat_message(AiChatRole::User, content));
+                ai.persist_chat_state();
+                true
+            });
+            if !accepted {
+                self.push_ai_settings_toast(
+                    self.i18n.t("ai.queue.steer_unavailable"),
+                    TerminalNoticeVariant::Warning,
+                    cx,
+                );
+                return;
+            }
+        }
+        self.ai_entity.update(cx, |ai, _| {
+            let Some(turns) = ai.queued_chat_turns.get_mut(conversation) else {
+                return;
+            };
+            let Some(index) = turns.iter().position(|turn| turn.id == id) else {
+                return;
+            };
+            match action {
+                "up" => {
+                    if index > 0 {
+                        turns.swap(index, index - 1);
+                    }
+                }
+                "edit" => {
+                    let turn = turns.remove(index).expect("located queued message");
+                    ai.set_chat_draft(turn.content.to_string());
+                    ai.focus_chat_input();
+                }
+                "remove" => {
+                    turns.remove(index);
+                }
+                "send" => {
+                    let turn = turns.remove(index).expect("located queued message");
+                    if !ai.chat_is_loading() {
+                        ai.queued_chat_turns
+                            .entry(conversation.to_owned())
+                            .or_default()
+                            .push_front(turn);
+                    }
+                }
+                _ => {}
+            }
+        });
+        if action == "send" {
+            self.send_next_queued_ai_message(conversation, cx);
+        }
         cx.notify();
+    }
+
+    pub(in crate::workspace) fn interrupt_and_send_ai_chat_draft(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) {
+        if self.ai_entity.read(cx).chat_ui().draft.trim().is_empty() {
+            self.cancel_ai_chat_stream(cx);
+            return;
+        }
+        self.cancel_ai_chat_stream(cx);
+        // The replacement takes precedence over queued follow-ups without deleting them.
+        let id = self
+            .ai_entity
+            .read(cx)
+            .conversation_state()
+            .active_conversation_id
+            .clone();
+        let queued = id.as_ref().and_then(|id| {
+            self.ai_entity
+                .update(cx, |ai, _| ai.queued_chat_turns.remove(id))
+        });
+        self.send_ai_chat_draft(cx);
+        if let (Some(id), Some(queued)) = (id, queued) {
+            self.ai_entity.update(cx, |ai, _| {
+                ai.queued_chat_turns.entry(id).or_default().extend(queued)
+            });
+        }
     }
 
     pub(in crate::workspace) fn start_ai_chat_stream_after_api_key_lookup(
@@ -540,6 +744,11 @@ impl WorkspaceApp {
         task_system_prompt: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        let launch_id = self.next_ai_chat_id(ai_now_ms(), cx);
+        self.ai_entity.update(cx, |ai, _| {
+            ai.chat_launches.insert(conversation_id.clone(), launch_id);
+            ai.set_conversation_loading(&conversation_id, true);
+        });
         if stream_config.execution_backend == AiExecutionBackend::Acp {
             // ACP is a session protocol, not a provider completion backend.
             // It owns history and authentication after connection negotiation.
@@ -567,49 +776,71 @@ impl WorkspaceApp {
         let runtime = self.forwarding_runtime.clone();
         let failed_to_get_key = self.i18n.t("ai.model_selector.failed_to_get_api_key");
         let api_key_not_found = self.i18n.t("ai.model_selector.api_key_not_found");
-        self.ai_entity.update(cx, |ai, _cx| ai.set_chat_loading(true));
+        let launch = self
+            .ai_entity
+            .read(cx)
+            .chat_launches
+            .get(&conversation_id)
+            .cloned();
         cx.spawn(async move |weak, cx| {
             let key_result = runtime
                 .spawn_blocking(move || key_store.get_provider_key(&provider_id))
                 .await
                 .map_err(|error| error.to_string())
                 .and_then(|result| result.map_err(|error| error.to_string()));
-            let _ = weak.update(cx, |this, cx| match key_result {
-                Ok(api_key) => {
-                    if requires_key && api_key.is_none() {
-                        this.ai_entity.update(cx, |ai, _cx| ai.set_chat_loading(false));
+            let _ = weak.update(cx, |this, cx| {
+                if !this
+                    .ai_entity
+                    .read(cx)
+                    .chat_launch_matches(&conversation_id, launch.as_deref())
+                {
+                    return;
+                }
+                match key_result {
+                    Ok(api_key) => {
+                        if requires_key && api_key.is_none() {
+                            this.ai_entity.update(cx, |ai, _cx| {
+                                ai.set_conversation_loading(&conversation_id, false)
+                            });
+                            this.push_ai_settings_toast(
+                                api_key_not_found,
+                                TerminalNoticeVariant::Error,
+                                cx,
+                            );
+                            cx.notify();
+                            return;
+                        }
+                        stream_config.api_key = api_key.map(oxideterm_ai::SharedAiProviderKey::new);
+                        this.start_ai_chat_stream_after_rag_lookup(
+                            conversation_id,
+                            stream_config,
+                            request_content,
+                            task_system_prompt,
+                            cx,
+                        );
+                    }
+                    Err(_) if requires_key => {
+                        this.ai_entity.update(cx, |ai, _cx| {
+                            ai.set_conversation_loading(&conversation_id, false)
+                        });
                         this.push_ai_settings_toast(
-                            api_key_not_found,
+                            failed_to_get_key,
                             TerminalNoticeVariant::Error,
                             cx,
                         );
                         cx.notify();
                         return;
                     }
-                    stream_config.api_key =
-                        api_key.map(oxideterm_ai::SharedAiProviderKey::new);
-                    this.start_ai_chat_stream_after_rag_lookup(
-                        conversation_id,
-                        stream_config,
-                        request_content,
-                        task_system_prompt,
-                        cx,
-                    );
-                }
-                Err(_) if requires_key => {
-                    this.ai_entity.update(cx, |ai, _cx| ai.set_chat_loading(false));
-                    this.push_ai_settings_toast(failed_to_get_key, TerminalNoticeVariant::Error, cx);
-                    cx.notify();
-                }
-                Err(_) => {
-                    stream_config.api_key = None;
-                    this.start_ai_chat_stream_after_rag_lookup(
-                        conversation_id,
-                        stream_config,
-                        request_content,
-                        task_system_prompt,
-                        cx,
-                    );
+                    Err(_) => {
+                        stream_config.api_key = None;
+                        this.start_ai_chat_stream_after_rag_lookup(
+                            conversation_id,
+                            stream_config,
+                            request_content,
+                            task_system_prompt,
+                            cx,
+                        );
+                    }
                 }
             });
         })

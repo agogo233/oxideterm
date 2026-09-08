@@ -372,6 +372,10 @@ pub struct TerminalSettings {
     #[serde(default)]
     pub font_ligatures: bool,
     pub line_height: f64,
+    #[serde(default = "default_terminal_padding_horizontal")]
+    pub padding_horizontal: i64,
+    #[serde(default = "default_terminal_padding_vertical")]
+    pub padding_vertical: i64,
     pub cursor_style: CursorStyle,
     pub cursor_blink: bool,
     pub scrollback: i64,
@@ -436,6 +440,8 @@ pub struct TerminalSettings {
     #[serde(default = "default_terminal_semantic_coloring")]
     pub semantic_coloring: bool,
     #[serde(default)]
+    pub selection_highlighting: bool,
+    #[serde(default)]
     pub semantic_scheme: TerminalSemanticScheme,
     #[serde(default)]
     pub semantic_custom_scheme: Option<String>,
@@ -459,10 +465,21 @@ pub const MAX_TERMINAL_BACKGROUND_OPACITY: f64 = 1.0;
 pub const DEFAULT_TERMINAL_FONT_WEIGHT: i64 = 400;
 pub const MIN_TERMINAL_FONT_WEIGHT: i64 = 100;
 pub const MAX_TERMINAL_FONT_WEIGHT: i64 = 900;
+pub const DEFAULT_TERMINAL_PADDING_HORIZONTAL: i64 = 1;
+pub const DEFAULT_TERMINAL_PADDING_VERTICAL: i64 = 1;
+pub const MAX_TERMINAL_PADDING: i64 = 64;
 pub const MAX_CUSTOM_SEMANTIC_SCHEMES: usize = 32;
 
 const fn default_terminal_font_weight() -> i64 {
     DEFAULT_TERMINAL_FONT_WEIGHT
+}
+
+const fn default_terminal_padding_horizontal() -> i64 {
+    DEFAULT_TERMINAL_PADDING_HORIZONTAL
+}
+
+const fn default_terminal_padding_vertical() -> i64 {
+    DEFAULT_TERMINAL_PADDING_VERTICAL
 }
 
 impl TerminalSettings {
@@ -519,6 +536,8 @@ impl Default for TerminalSettings {
             font_weight: DEFAULT_TERMINAL_FONT_WEIGHT,
             font_ligatures: false,
             line_height: 1.2,
+            padding_horizontal: DEFAULT_TERMINAL_PADDING_HORIZONTAL,
+            padding_vertical: DEFAULT_TERMINAL_PADDING_VERTICAL,
             cursor_style: CursorStyle::Block,
             cursor_blink: true,
             scrollback: DEFAULT_TERMINAL_SCROLLBACK,
@@ -557,6 +576,7 @@ impl Default for TerminalSettings {
             background_scope: BackgroundScope::Content,
             background_enabled_tabs: vec!["terminal".to_string(), "local_terminal".to_string()],
             semantic_coloring: false,
+            selection_highlighting: false,
             semantic_scheme: TerminalSemanticScheme::default(),
             semantic_custom_scheme: None,
             custom_semantic_schemes: Vec::new(),
@@ -663,7 +683,7 @@ mod tests {
 
     #[test]
     fn terminal_settings_restore_legacy_presentation_defaults() {
-        let defaults: [(&str, bool, fn(&TerminalSettings) -> bool); 6] = [
+        let defaults: [(&str, bool, fn(&TerminalSettings) -> bool); 7] = [
             ("smoothScroll", true, |settings| settings.smooth_scroll),
             ("highlightTabOnNewOutput", true, |settings| {
                 settings.highlight_tab_on_new_output
@@ -678,6 +698,7 @@ mod tests {
             ("semanticColoring", false, |settings| {
                 settings.semantic_coloring
             }),
+            ("selectionHighlighting", false, |settings| settings.selection_highlighting),
         ];
 
         for (field, expected, read) in defaults {
@@ -687,6 +708,17 @@ mod tests {
             let settings: TerminalSettings = serde_json::from_value(value).unwrap();
             assert_eq!(read(&settings), expected, "legacy {field} default");
         }
+    }
+
+    #[test]
+    fn selection_highlighting_default_round_trips() {
+        let mut settings = TerminalSettings::default();
+        assert!(!settings.selection_highlighting);
+        settings.selection_highlighting = true;
+        let value = serde_json::to_value(&settings).unwrap();
+        assert_eq!(value["selectionHighlighting"], serde_json::json!(true));
+        let restored: TerminalSettings = serde_json::from_value(value).unwrap();
+        assert!(restored.selection_highlighting);
     }
 
     #[test]

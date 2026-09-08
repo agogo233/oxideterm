@@ -179,7 +179,8 @@ use oxideterm_gpui_terminal::{
     TerminalSessionLogStatus, TerminalTmuxLabels, TerminalTrzszLabels,
     TerminalUiPreferenceOverrides, TerminalUiPreferences, TerminalUiTheme,
     TerminalWorkingDirectorySource, detect_custom_privilege_prompt, prune_terminal_session_logs,
-    resolved_terminal_semantic_scheme,
+    resolved_terminal_semantic_scheme, terminal_semantic_line_band,
+    terminal_semantic_variant_color,
 };
 use oxideterm_gpui_ui::scroll::ScrollableElement;
 use oxideterm_gpui_ui::{
@@ -760,6 +761,7 @@ pub(crate) struct WorkspaceApp {
     terminal_semantic_highlight_section_expanded: bool,
     terminal_rule_highlight_section_expanded: bool,
     terminal_command_context_highlight_section_expanded: bool,
+    terminal_selection_highlight_section_expanded: bool,
     terminal_command_sender: Entity<terminal_command_sender::TerminalCommandSenderEntity>,
     _terminal_command_sender_observation: Subscription,
     local_terminal_command_history: SharedTerminalCommandHistory,
@@ -892,6 +894,7 @@ pub(crate) struct WorkspaceApp {
     pending_standalone_sftp_pair_launches:
         HashMap<String, new_connection::PendingStandaloneSftpPairLaunch>,
     embedded_sftp_node_id: Option<NodeId>,
+    embedded_sftp_pinned: bool,
     sftp_presentation_request: Option<sftp::SftpPresentationRequest>,
     ide_workspace: Entity<ide::IdeWorkspaceEntity>,
     _ide_workspace_subscription: Subscription,

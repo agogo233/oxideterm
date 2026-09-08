@@ -130,6 +130,7 @@ impl WorkspaceApp {
                 .relative()
                 .bg(self.context_sidebar_content_background(self.tokens.ui.bg))
                 .child(self.render_ai_sidebar_chat_header(cx))
+                .when_some(self.render_ai_agent_resource_notice(cx), |panel, notice| panel.child(notice))
                 .when_some(self.render_ai_compaction_notice(cx), |panel, notice| {
                     panel.child(notice)
                 })
@@ -191,6 +192,7 @@ impl WorkspaceApp {
         &mut self,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        if let Some(detail) = self.render_ai_agent_detail(cx) { return detail; }
         if let Some(error) = self.ai_entity.read(cx).chat_initialization_error().copied() {
             return self.render_ai_sidebar_initialization_error(error, cx);
         }
@@ -221,7 +223,7 @@ impl WorkspaceApp {
                         ai_chat_message_base_signature(message)
                     });
                     let signature = ai_chat_message_list_signature(
-                        base_signature,
+                        base_signature ^ ai.agents.parent_revisions.get(&message.id).copied().unwrap_or_default(),
                         chat_ui.thinking_expansion_state.get(&message.id),
                     );
                     items.push(AiChatListItem::Message {

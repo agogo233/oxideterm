@@ -1,10 +1,56 @@
+struct AiAgentLoopOutcome { content: String, failed: bool }
+
+pub(in crate::workspace) async fn run_ai_chat_tool_loop(
+    config: AiChatStreamConfig, mut history: Vec<AiChatMessage>, model_runtime: AiModelRuntimeState,
+    services: AiModelBackendServices, budget_level: u8, generation: u64, tool_session_id: ToolSessionId,
+    conversation_id: String, assistant_id: String, ui_tx: AiStreamDeliverySender, mut execution: Option<AgentExecution>,
+) {
+    let cancellation = execution.as_ref().and_then(|agent| agent.runtime.cancellation(&agent.run).ok());
+    let mut work = Box::pin(execute_ai_chat_tool_loop(config, &mut history, model_runtime, services, budget_level, generation, tool_session_id,
+        conversation_id.clone(), assistant_id.clone(), ui_tx.clone(), &mut execution));
+    let outcome = if let Some(mut cancellation) = cancellation {
+        if *cancellation.borrow() { AiAgentLoopOutcome { content: String::new(), failed: true } }
+        else { tokio::select! {
+            outcome = &mut work => outcome,
+            _ = cancellation.changed() => AiAgentLoopOutcome { content: String::new(), failed: true },
+        } }
+    } else { work.as_mut().await };
+    drop(work);
+    if let Some(agent) = execution.as_mut() {
+        if !agent.is_child() && outcome.failed { stop_and_wait_for_children(agent).await; }
+        let cancelled = agent.runtime.cancellation(&agent.run).is_ok_and(|cancelled| *cancelled.borrow());
+        let evidence = history.iter().filter_map(|message| message.tool_call_id.as_ref()).map(|id| AgentText::new(&format!("agent:{}/run:{}/tool:{id}", agent.run.agent_id, agent.run.run_id))).collect();
+        let mut actions = Vec::new();
+        let mut unfinished = Vec::new();
+        for message in history.iter().filter(|message| message.role == AiChatRole::Tool) {
+            if let Ok(result) = serde_json::from_str::<serde_json::Value>(&message.content) {
+                let summary = result.get("summary").and_then(serde_json::Value::as_str).unwrap_or_default();
+                if summary.is_empty() { continue; }
+                if result.get("ok").and_then(serde_json::Value::as_bool) == Some(true) { actions.push(AgentText::new(summary)); }
+                else if outcome.failed { unfinished.push(AgentText::new(summary)); }
+            }
+        }
+        let _ = agent.runtime.save_context(&agent.run, history);
+        let _ = agent.runtime.complete(&agent.run, AgentResult { summary: AgentText::new(&outcome.content), evidence,
+            actions, unfinished, error_code: outcome.failed.then(|| if cancelled { "agent_cancelled" } else { "agent_execution_failed" }.into()) });
+        if !agent.is_child() { let _ = agent.runtime.finish_group(&agent.run); }
+        let event = if outcome.failed && !cancelled { AiStreamEvent::Error(outcome.content) } else { AiStreamEvent::Done };
+        let _ = send_ai_stream_delivery(&ui_tx, generation, &conversation_id, &assistant_id, AiStreamDeliveryEvent::Stream(event));
+    }
+}
+
+fn send_ai_loop_delivery(defer_terminal: bool, sender: &AiStreamDeliverySender, generation: u64, conversation_id: &str, assistant_id: &str, event: AiStreamDeliveryEvent) -> Result<(), ()> {
+    if defer_terminal && matches!(event, AiStreamDeliveryEvent::Stream(AiStreamEvent::Done | AiStreamEvent::Error(_))) { return Ok(()); }
+    send_ai_stream_delivery(sender, generation, conversation_id, assistant_id, event).map_err(|_| ())
+}
+
 const AI_TOOL_CALLS_PER_ROUND_SAFETY_LIMIT: usize = 16;
 const AI_RUNTIME_CONTEXT_MESSAGE_ID: &str = "runtime-context-v2";
 
-pub(in crate::workspace) async fn run_ai_chat_tool_loop(
-    config: AiChatStreamConfig,
-    mut history: Vec<AiChatMessage>,
-    model_runtime: AiModelRuntimeState,
+async fn execute_ai_chat_tool_loop(
+    mut config: AiChatStreamConfig,
+    mut history: &mut Vec<AiChatMessage>,
+    mut model_runtime: AiModelRuntimeState,
     services: AiModelBackendServices,
     budget_level: u8,
     generation: u64,
@@ -12,7 +58,13 @@ pub(in crate::workspace) async fn run_ai_chat_tool_loop(
     conversation_id: String,
     assistant_id: String,
     ui_tx: AiStreamDeliverySender,
-) {
+    execution: &mut Option<AgentExecution>,
+) -> AiAgentLoopOutcome {
+    if let Some(agent) = execution.as_mut().filter(|agent| agent.is_child()) {
+        if let Err(error) = configure_ai_child_model(agent, &mut config, &mut model_runtime, &services).await {
+            return AiAgentLoopOutcome { content: error, failed: true };
+        }
+    }
     let max_rounds = config
         .tool_policy
         .max_rounds
@@ -53,7 +105,31 @@ pub(in crate::workspace) async fn run_ai_chat_tool_loop(
 
     let mut awaiting_summary_round_id: Option<String> = None;
 
-    for round_index in 0..=max_rounds {
+    for round_index in 0usize.. {
+        if execution.is_none() && round_index > max_rounds { break; }
+        let mut summary_only = false;
+        if let Some(agent) = execution.as_mut() {
+            if agent.ready().await.is_err() { return AiAgentLoopOutcome { content: assistant_content, failed: true }; }
+            append_agent_mailbox(&mut history, agent);
+            match agent.runtime.take_round(&agent.run) {
+                Ok(()) => {}
+                Err(oxideterm_ai::agent::AgentError::BudgetExhausted) if !agent.is_child() => {
+                    if agent.runtime.take_final_summary(&agent.run).is_err() { return AiAgentLoopOutcome { content: assistant_content, failed: true }; }
+                    stop_and_wait_for_children(agent).await;
+                    append_agent_mailbox(&mut history, agent);
+                    loop {
+                        match agent.runtime.prepare_completion(&agent.run, agent.event_cursor) {
+                            Ok(()) => break,
+                            Err(oxideterm_ai::agent::AgentError::PendingMessages) => append_agent_mailbox(&mut history, agent),
+                            Err(_) => return AiAgentLoopOutcome { content: assistant_content, failed: true },
+                        }
+                    }
+                    history.push(agent_chat_message(AiChatRole::System, "The shared tool-round budget is exhausted. Summarize completed work and remaining limitations from the available evidence. Do not call tools or claim that cancelled remote operations were terminated.".into()));
+                    summary_only = true;
+                }
+                Err(_) => { return AiAgentLoopOutcome { content: "The shared task budget is exhausted or this run was stopped.".into(), failed: true }; }
+            }
+        }
         let Some(runtime_context) = request_ai_runtime_context(
             &ui_tx,
             generation,
@@ -63,11 +139,11 @@ pub(in crate::workspace) async fn run_ai_chat_tool_loop(
         )
         .await
         else {
-            return;
+            return AiAgentLoopOutcome { content: assistant_content, failed: true };
         };
         replace_ai_runtime_context_message(&mut history, runtime_context);
-        let (stream_tx, mut stream_rx) = tokio::sync::mpsc::unbounded_channel();
-        let provider_config = config.clone();
+        let mut provider_config = config.clone();
+        if summary_only { provider_config.tools.clear(); provider_config.tool_choice = oxideterm_ai::AiToolChoice::Auto; }
         let _ = send_ai_diagnostic(
             &ui_tx,
             generation,
@@ -109,21 +185,25 @@ pub(in crate::workspace) async fn run_ai_chat_tool_loop(
             ),
             model_runtime.context_window,
         );
-        tokio::spawn(stream_chat_completion(
+        let usage_request = execution.as_ref().and_then(|agent| agent.runtime.begin_request(&agent.run).ok());
+        let mut model_request = oxideterm_ai::agent::AgentModelRequest::start(
             provider_config,
             provider_history,
-            stream_tx,
-        ));
+        );
 
         let mut stream_error = None;
         let mut round_content = String::new();
         let mut round_thinking = String::new();
         let mut pending_calls = BTreeMap::<String, AiToolCall>::new();
+        let mut call_ids = HashMap::<String, String>::new();
         let mut completed_calls = Vec::<AiToolCall>::new();
         let mut round_provider_parts = Vec::<serde_json::Value>::new();
 
-        while let Some(event) = stream_rx.recv().await {
+        while let Some(event) = model_request.next_event().await {
             match event {
+                AiStreamEvent::Usage { input_tokens, output_tokens } => {
+                    if let Some((agent, request)) = execution.as_ref().zip(usage_request) { let _ = agent.runtime.record_usage(&agent.run, request, input_tokens, output_tokens); }
+                }
                 AiStreamEvent::Content(chunk) => {
                     if let Some(round_id) = awaiting_summary_round_id.take() {
                         let _ = send_ai_round_stateful_marker(
@@ -137,7 +217,8 @@ pub(in crate::workspace) async fn run_ai_chat_tool_loop(
                     }
                     round_content.push_str(&chunk);
                     assistant_content.push_str(&chunk);
-                    if send_ai_stream_delivery(
+                    if send_ai_loop_delivery(
+                        execution.is_some(),
                         &ui_tx,
                         generation,
                         &conversation_id,
@@ -146,7 +227,7 @@ pub(in crate::workspace) async fn run_ai_chat_tool_loop(
                     )
                     .is_err()
                     {
-                        return;
+                        return AiAgentLoopOutcome { content: assistant_content, failed: true };
                     }
                 }
                 AiStreamEvent::Thinking(chunk) => {
@@ -162,7 +243,8 @@ pub(in crate::workspace) async fn run_ai_chat_tool_loop(
                     }
                     round_thinking.push_str(&chunk);
                     assistant_thinking.push_str(&chunk);
-                    if send_ai_stream_delivery(
+                    if send_ai_loop_delivery(
+                        execution.is_some(),
                         &ui_tx,
                         generation,
                         &conversation_id,
@@ -171,7 +253,7 @@ pub(in crate::workspace) async fn run_ai_chat_tool_loop(
                     )
                     .is_err()
                     {
-                        return;
+                        return AiAgentLoopOutcome { content: assistant_content, failed: true };
                     }
                 }
                 AiStreamEvent::ProviderResponsePart {
@@ -189,6 +271,7 @@ pub(in crate::workspace) async fn run_ai_chat_tool_loop(
                     name,
                     arguments,
                 } => {
+                    let id = call_ids.entry(id).or_insert_with(|| format!("call_{}", uuid::Uuid::new_v4().simple())).clone();
                     if let Some(round_id) = awaiting_summary_round_id.take() {
                         let _ = send_ai_round_stateful_marker(
                             &ui_tx,
@@ -207,7 +290,8 @@ pub(in crate::workspace) async fn run_ai_chat_tool_loop(
                             arguments: arguments.clone(),
                         },
                     );
-                    if send_ai_stream_delivery(
+                    if send_ai_loop_delivery(
+                        execution.is_some(),
                         &ui_tx,
                         generation,
                         &conversation_id,
@@ -220,7 +304,7 @@ pub(in crate::workspace) async fn run_ai_chat_tool_loop(
                     )
                     .is_err()
                     {
-                        return;
+                        return AiAgentLoopOutcome { content: assistant_content, failed: true };
                     }
                 }
                 AiStreamEvent::ToolCallComplete {
@@ -228,6 +312,9 @@ pub(in crate::workspace) async fn run_ai_chat_tool_loop(
                     name,
                     arguments,
                 } => {
+                    // Provider IDs are not unique across requests. Replay the same new ID in
+                    // both assistant calls and tool results so old approvals cannot target a new call.
+                    let id = call_ids.entry(id).or_insert_with(|| format!("call_{}", uuid::Uuid::new_v4().simple())).clone();
                     if let Some(round_id) = awaiting_summary_round_id.take() {
                         let _ = send_ai_round_stateful_marker(
                             &ui_tx,
@@ -245,7 +332,8 @@ pub(in crate::workspace) async fn run_ai_chat_tool_loop(
                     };
                     pending_calls.insert(id.clone(), call.clone());
                     record_completed_ai_tool_call(&mut completed_calls, call);
-                    if send_ai_stream_delivery(
+                    if send_ai_loop_delivery(
+                        execution.is_some(),
                         &ui_tx,
                         generation,
                         &conversation_id,
@@ -258,7 +346,7 @@ pub(in crate::workspace) async fn run_ai_chat_tool_loop(
                     )
                     .is_err()
                     {
-                        return;
+                        return AiAgentLoopOutcome { content: assistant_content, failed: true };
                     }
                 }
                 AiStreamEvent::Done => {
@@ -291,15 +379,21 @@ pub(in crate::workspace) async fn run_ai_chat_tool_loop(
             }
         }
 
+        // Provider completion can precede a long approval wait. Release the
+        // request and its credentials before entering any tool interaction.
+        drop(model_request);
+
         if let Some(error) = stream_error {
-            let _ = send_ai_stream_delivery(
+            assistant_content = error.clone();
+            let _ = send_ai_loop_delivery(
+                        execution.is_some(),
                 &ui_tx,
                 generation,
                 &conversation_id,
                 &assistant_id,
                 AiStreamDeliveryEvent::Stream(AiStreamEvent::Error(error)),
             );
-            return;
+            return AiAgentLoopOutcome { content: assistant_content, failed: true };
         }
 
         let round_number = round_index.saturating_add(1) as i64;
@@ -433,14 +527,31 @@ pub(in crate::workspace) async fn run_ai_chat_tool_loop(
                 hard_deny_retry_count = retry_attempt;
                 continue;
             }
-            let _ = send_ai_stream_delivery(
+            history.push(agent_chat_message(AiChatRole::Assistant, round_content.clone()));
+            if let Some(agent) = execution.as_mut() {
+                if !summary_only { let _ = agent.runtime.refund_empty_round(&agent.run); }
+                if !agent.is_child() && agent.runtime.children(&agent.run).is_ok_and(|children| children.iter().any(|child| !child.state.is_terminal())) {
+                    let runtime = agent.runtime.clone();
+                    let run = agent.run.clone();
+                    let cursor = agent.event_cursor;
+                    let _ = agent.wait(AgentState::AwaitingParent, runtime.wait_updates(&run, cursor)).await;
+                    continue;
+                }
+                match agent.runtime.prepare_completion(&agent.run, agent.event_cursor) {
+                    Ok(()) => {}
+                    Err(oxideterm_ai::agent::AgentError::PendingMessages) => continue,
+                    Err(_) => return AiAgentLoopOutcome { content: assistant_content, failed: true },
+                }
+            }
+            let _ = send_ai_loop_delivery(
+                        execution.is_some(),
                 &ui_tx,
                 generation,
                 &conversation_id,
                 &assistant_id,
                 AiStreamDeliveryEvent::Stream(AiStreamEvent::Done),
             );
-            return;
+            return AiAgentLoopOutcome { content: assistant_content, failed: false };
         }
 
         if completed_calls.len() > max_calls_per_round {
@@ -456,7 +567,8 @@ pub(in crate::workspace) async fn run_ai_chat_tool_loop(
                     max_calls_per_round
                 ),
             );
-            let _ = send_ai_stream_delivery(
+            let _ = send_ai_loop_delivery(
+                        execution.is_some(),
                 &ui_tx,
                 generation,
                 &conversation_id,
@@ -466,10 +578,10 @@ pub(in crate::workspace) async fn run_ai_chat_tool_loop(
                     max_calls_per_round
                 ))),
             );
-            return;
+            return AiAgentLoopOutcome { content: assistant_content, failed: true };
         }
 
-        if round_index >= max_rounds {
+        if summary_only || (execution.is_none() && round_index >= max_rounds) {
             let _ = send_ai_guardrail(
                 &ui_tx,
                 generation,
@@ -488,7 +600,8 @@ pub(in crate::workspace) async fn run_ai_chat_tool_loop(
                 "tool_budget_limit",
                 "Tool use stopped because the conversation reached the configured tool-round limit.",
             );
-            let _ = send_ai_stream_delivery(
+            let _ = send_ai_loop_delivery(
+                        execution.is_some(),
                 &ui_tx,
                 generation,
                 &conversation_id,
@@ -497,7 +610,7 @@ pub(in crate::workspace) async fn run_ai_chat_tool_loop(
                     "Tool execution stopped after reaching the maximum tool rounds.".to_string(),
                 )),
             );
-            return;
+            return AiAgentLoopOutcome { content: assistant_content, failed: true };
         }
 
         let assistant_round_id = format!("assistant-tool-round-{round_index}");
@@ -553,6 +666,14 @@ pub(in crate::workspace) async fn run_ai_chat_tool_loop(
                     success: false,
                     summary: executed_summary(&executed),
                 });
+                history.push(ai_tool_result_message(executed));
+                continue;
+            }
+            if oxideterm_ai::agent::is_agent_tool(&call.name) {
+                let executed = execute_ai_agent_coordination(execution, &ui_tx, generation, &tool_session_id, &conversation_id, &assistant_id, &call).await;
+                let _ = send_ai_tool_status(&ui_tx, generation, &conversation_id, &assistant_id, &call,
+                    if executed.success { "completed" } else { "error" }, Some(executed.envelope.clone()), Some("read".into()), Some(executed_summary(&executed)));
+                round_results.push(AiRoundToolResultSummary { tool_name: call.name.clone(), success: executed.success, summary: executed_summary(&executed) });
                 history.push(ai_tool_result_message(executed));
                 continue;
             }
@@ -651,7 +772,8 @@ pub(in crate::workspace) async fn run_ai_chat_tool_loop(
                 }
                 oxideterm_ai::AiPolicyDecisionKind::RequireApproval => {
                     let (approval_tx, approval_rx) = tokio::sync::oneshot::channel();
-                    if send_ai_stream_delivery(
+                    if send_ai_loop_delivery(
+                        execution.is_some(),
                         &ui_tx,
                         generation,
                         &conversation_id,
@@ -669,9 +791,11 @@ pub(in crate::workspace) async fn run_ai_chat_tool_loop(
                     )
                     .is_err()
                     {
-                        return;
+                        return AiAgentLoopOutcome { content: assistant_content, failed: true };
                     }
-                    let approved = approval_rx.await.unwrap_or(false);
+                    let approved = if let Some(agent) = execution.as_mut() {
+                        agent.wait(AgentState::AwaitingApproval, approval_rx).await.ok().and_then(Result::ok).unwrap_or(false)
+                    } else { approval_rx.await.unwrap_or(false) };
                     if !approved {
                         send_ai_tool_status(
                             &ui_tx,
@@ -734,6 +858,7 @@ pub(in crate::workspace) async fn run_ai_chat_tool_loop(
                             execution_args,
                             true,
                             dangerous_command_approved,
+                            execution.as_mut(),
                         )
                         .await
                     }
@@ -781,10 +906,12 @@ pub(in crate::workspace) async fn run_ai_chat_tool_loop(
                         execution_args,
                         false,
                         dangerous_command_approved,
+                        execution.as_mut(),
                     )
                     .await
                 }
             };
+            if !execution.as_ref().is_some_and(AgentExecution::is_child) {
             executed = resolve_ai_candidate_selection_if_needed(
                 &ui_tx,
                 generation,
@@ -794,6 +921,7 @@ pub(in crate::workspace) async fn run_ai_chat_tool_loop(
                 executed,
             )
             .await;
+            }
             if executed_after_policy {
                 if call.name == "run_command" {
                     annotate_ai_run_command_execution_result(
@@ -918,14 +1046,15 @@ pub(in crate::workspace) async fn run_ai_chat_tool_loop(
                 "Tool use stopped because the conversation is approaching the current context window limit.",
                 Some("Tool use stopped: approaching context window limit".to_string()),
             );
-            let _ = send_ai_stream_delivery(
+            let _ = send_ai_loop_delivery(
+                        execution.is_some(),
                 &ui_tx,
                 generation,
                 &conversation_id,
                 &assistant_id,
                 AiStreamDeliveryEvent::Stream(AiStreamEvent::Done),
             );
-            return;
+            return AiAgentLoopOutcome { content: assistant_content, failed: true };
         }
         let _ = send_ai_round_stateful_marker(
             &ui_tx,
@@ -938,13 +1067,15 @@ pub(in crate::workspace) async fn run_ai_chat_tool_loop(
         awaiting_summary_round_id = Some(round_id);
     }
 
-    let _ = send_ai_stream_delivery(
+    let _ = send_ai_loop_delivery(
+                        execution.is_some(),
         &ui_tx,
         generation,
         &conversation_id,
         &assistant_id,
         AiStreamDeliveryEvent::Stream(AiStreamEvent::Done),
     );
+    AiAgentLoopOutcome { content: assistant_content, failed: false }
 }
 
 async fn request_ai_runtime_context(

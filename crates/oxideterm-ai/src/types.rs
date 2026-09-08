@@ -259,6 +259,10 @@ pub struct AiChatStreamConfig {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AiStreamEvent {
+    Usage {
+        input_tokens: Option<u64>,
+        output_tokens: Option<u64>,
+    },
     Content(String),
     Thinking(String),
     /// Opaque provider metadata that must survive a provider-owned replay.

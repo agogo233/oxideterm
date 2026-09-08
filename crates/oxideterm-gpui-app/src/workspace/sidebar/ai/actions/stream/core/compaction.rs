@@ -183,7 +183,7 @@ impl WorkspaceApp {
             .collect::<Vec<_>>();
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let ui_tx = self.ai_entity.read(cx).compaction_sender();
-        self.ai_entity.update(cx, |ai, _cx| ai.set_chat_loading(true));
+        self.ai_entity.update(cx, |ai, _cx| ai.set_conversation_loading(&conversation_id, true));
         self.start_ai_compaction_stream_after_api_key_lookup(
             config,
             AiCompactionDeliveryKind::Summary,
@@ -238,7 +238,7 @@ impl WorkspaceApp {
                     if requires_key && api_key.is_none() {
                         this.ai_entity
                             .update(cx, |ai, _cx| ai.finish_compaction(&conversation_id));
-                        this.ai_entity.update(cx, |ai, _cx| ai.set_chat_loading(false));
+                        this.ai_entity.update(cx, |ai, _cx| ai.set_conversation_loading(&conversation_id, false));
                         if silent {
                             this.ai_entity.update(cx, |ai, cx| {
                                 ai.clear_compaction_notice_for(&conversation_id, cx);
@@ -273,7 +273,7 @@ impl WorkspaceApp {
                 Err(_) if requires_key => {
                     this.ai_entity
                         .update(cx, |ai, _cx| ai.finish_compaction(&conversation_id));
-                    this.ai_entity.update(cx, |ai, _cx| ai.set_chat_loading(false));
+                    this.ai_entity.update(cx, |ai, _cx| ai.set_conversation_loading(&conversation_id, false));
                     if silent {
                         this.ai_entity.update(cx, |ai, cx| {
                             ai.clear_compaction_notice_for(&conversation_id, cx);
@@ -336,6 +336,7 @@ impl WorkspaceApp {
                         summary.push_str(&chunk);
                     }
                     AiStreamEvent::Thinking(_)
+                    | AiStreamEvent::Usage { .. }
                     | AiStreamEvent::ProviderResponsePart { .. }
                     | AiStreamEvent::ToolCall { .. }
                     | AiStreamEvent::ToolCallComplete { .. } => {}

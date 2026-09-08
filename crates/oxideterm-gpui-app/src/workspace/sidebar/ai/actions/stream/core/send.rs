@@ -41,6 +41,29 @@ impl AiWorkspaceEntity {
 }
 
 impl WorkspaceApp {
+    fn begin_ai_chat_stream_with_authority(
+        &mut self,
+        conversation_id: &str,
+        assistant_id: &str,
+        cx: &mut Context<Self>,
+    ) -> (u64, AiStreamDeliverySender, ToolSessionId) {
+        let (replaced_generation, generation, sender) = self.ai_entity.update(cx, |ai, _cx| {
+            let replaced_generation = ai.conversation_stream_generations(conversation_id);
+            let (generation, sender) = ai.begin_chat_stream(conversation_id.to_owned(), assistant_id.to_owned());
+            ai.set_conversation_loading(conversation_id, true);
+            (replaced_generation, generation, sender)
+        });
+        let tool_session = self.ai_runtime_context.update(cx, |runtime, _cx| {
+            // The UI run owner chooses which stream was replaced. The broker
+            // must not infer that starting a stream cancels every other run.
+            for generation in replaced_generation {
+                runtime.finish_tool_session(generation, oxideterm_ai::RuntimeRevocationReason::ToolSessionCancelled);
+            }
+            runtime.begin_tool_session(generation)
+        });
+        (generation, sender, tool_session)
+    }
+
     pub(in crate::workspace) fn start_acp_chat_thread(
         &mut self,
         conversation_id: String,
@@ -54,7 +77,7 @@ impl WorkspaceApp {
         }) {
             Ok(launch) => launch,
             Err(_) => {
-                self.ai_entity.update(cx, |ai, _cx| ai.set_chat_loading(false));
+                self.ai_entity.update(cx, |ai, _cx| ai.set_conversation_loading(&conversation_id, false));
                 self.push_ai_settings_toast(
                     self.i18n.t("settings_view.ai.acp_agent_error_unknown"),
                     TerminalNoticeVariant::Error,
@@ -187,14 +210,9 @@ impl WorkspaceApp {
                 0,
                 backend,
             );
-            ai.set_chat_loading(true);
+            ai.set_conversation_loading(&conversation_id, true);
         });
-        let (generation, ui_tx) = self
-            .ai_entity
-            .update(cx, |ai, _cx| ai.begin_chat_stream());
-        let tool_session_id = self
-            .ai_runtime_context
-            .update(cx, |runtime, _cx| runtime.begin_tool_session(generation));
+        let (generation, ui_tx, tool_session_id) = self.begin_ai_chat_stream_with_authority(&conversation_id, &assistant_id, cx);
         let turn_id = format!("{conversation_id}:{generation}");
         let mut config_selections = self
             .ai_entity
@@ -321,6 +339,12 @@ impl WorkspaceApp {
             return;
         };
 
+        let launch = self
+            .ai_entity
+            .read(cx)
+            .chat_launches
+            .get(&conversation_id)
+            .cloned();
         let services = self.ai_model_backend_services(cx);
         let (rag_tx, rag_rx) = std::sync::mpsc::channel();
         self.forwarding_runtime.spawn(async move {
@@ -348,6 +372,13 @@ impl WorkspaceApp {
                 return;
             };
             let _ = weak.update(cx, |this, cx| {
+                if !this
+                    .ai_entity
+                    .read(cx)
+                    .chat_launch_matches(&conversation_id, launch.as_deref())
+                {
+                    return;
+                }
                 this.start_ai_chat_stream_after_budget_preflight(
                     conversation_id,
                     config,
@@ -366,7 +397,7 @@ impl WorkspaceApp {
     pub(in crate::workspace) fn start_ai_chat_stream_after_budget_preflight(
         &mut self,
         conversation_id: String,
-        config: AiChatStreamConfig,
+        mut config: AiChatStreamConfig,
         request_content: Option<String>,
         task_system_prompt: Option<String>,
         rag_system_prompt: Option<String>,
@@ -384,6 +415,12 @@ impl WorkspaceApp {
             )
         {
             let pending = AiPendingChatStream {
+                launch_id: self
+                    .ai_entity
+                    .read(cx)
+                    .chat_launches
+                    .get(&conversation_id)
+                    .cloned(),
                 conversation_id: conversation_id.clone(),
                 config,
                 request_content,
@@ -574,19 +611,15 @@ impl WorkspaceApp {
             cx,
         );
         self.persist_ai_diagnostic_events(conversation_id.clone(), diagnostic_events, cx);
-        self.ai_entity.update(cx, |ai, _cx| ai.set_chat_loading(true));
-        let (generation, ui_tx) = self
-            .ai_entity
-            .update(cx, |ai, _cx| ai.begin_chat_stream());
+        self.ai_entity.update(cx, |ai, _cx| ai.set_conversation_loading(&conversation_id, true));
         // Every model turn receives a fresh authority lease. The token remains
         // transient and never enters conversation history or diagnostics.
-        let tool_session_id = self
-            .ai_runtime_context
-            .update(cx, |runtime, _cx| runtime.begin_tool_session(generation));
+        let (generation, ui_tx, tool_session_id) = self.begin_ai_chat_stream_with_authority(&conversation_id, &assistant_id, cx);
         let model_runtime = AiModelRuntimeState {
             context_window,
         };
         let services = self.ai_model_backend_services(cx);
+        let execution = self.start_ai_agent_group(generation, &conversation_id, &assistant_id, &mut config, &services, &tool_session_id, context_window, cx);
         let task = self.forwarding_runtime.spawn(run_ai_chat_tool_loop(
             config,
             history,
@@ -598,6 +631,7 @@ impl WorkspaceApp {
             conversation_id,
             assistant_id,
             ui_tx,
+            Some(execution),
         ));
         self.ai_entity
             .update(cx, |ai, _cx| ai.set_chat_stream_task(generation, task));

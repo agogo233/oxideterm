@@ -14,6 +14,8 @@ use redb::{Database, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+mod agents;
+
 use crate::{
     AiChatMessage, AiChatMessageMetadata, AiChatRole, AiChatState, AiConversation,
     AiMessageBranches,
@@ -207,6 +209,7 @@ impl AiChatPersistenceStore {
             let existing_ids = collect_keys(&conv_table)?;
             for conversation_id in existing_ids {
                 if !desired_ids.contains(&conversation_id) {
+                    agents::delete_conversation(&write_txn, &conversation_id)?;
                     delete_conversation_rows(
                         &conversation_id,
                         &mut conv_table,
@@ -370,6 +373,7 @@ impl AiChatPersistenceStore {
             let _ = write_txn.open_table(METADATA_TABLE)?;
             let _ = write_txn.open_table(DIAGNOSTIC_TABLE)?;
             let _ = write_txn.open_table(CONV_DIAGNOSTIC_TABLE)?;
+            agents::initialize(&write_txn)?;
         }
         write_txn.commit()?;
 

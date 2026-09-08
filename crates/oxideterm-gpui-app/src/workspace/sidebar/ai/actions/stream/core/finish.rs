@@ -294,6 +294,13 @@ impl WorkspaceApp {
         let Some(pending) = resume_after else {
             return;
         };
+        if !self
+            .ai_entity
+            .read(cx)
+            .chat_launch_matches(&pending.conversation_id, pending.launch_id.as_deref())
+        {
+            return;
+        }
         self.start_ai_chat_stream_after_budget_preflight(
             pending.conversation_id,
             pending.config,
@@ -315,7 +322,7 @@ impl WorkspaceApp {
     ) {
         self.ai_entity
             .update(cx, |ai, _cx| ai.finish_compaction(&conversation_id));
-        self.ai_entity.update(cx, |ai, _cx| ai.set_chat_loading(false));
+        self.ai_entity.update(cx, |ai, _cx| ai.set_conversation_loading(&conversation_id, false));
         if failed {
             self.push_ai_settings_toast(
                 self.i18n.t("settings_view.ai.acp_agent_error_unknown"),

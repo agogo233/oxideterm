@@ -625,6 +625,7 @@ impl WorkspaceApp {
             terminal_semantic_highlight_section_expanded: true,
             terminal_rule_highlight_section_expanded: true,
             terminal_command_context_highlight_section_expanded: true,
+            terminal_selection_highlight_section_expanded: true,
             terminal_command_sender,
             _terminal_command_sender_observation: terminal_command_sender_observation,
             local_terminal_command_history,
@@ -808,6 +809,7 @@ impl WorkspaceApp {
             ssh_consumer_managed_key_resolver,
             pending_standalone_sftp_pair_launches: HashMap::new(),
             embedded_sftp_node_id: None,
+            embedded_sftp_pinned: false,
             sftp_presentation_request: None,
             ide_workspace,
             _ide_workspace_subscription: ide_workspace_subscription,
@@ -1122,6 +1124,8 @@ impl WorkspaceApp {
             font_size: terminal.font_size as f32,
             font_weight: terminal.font_weight as f32,
             line_height: terminal.line_height as f32,
+            padding_horizontal: terminal.padding_horizontal as f32,
+            padding_vertical: terminal.padding_vertical as f32,
             cursor_shape: match terminal.cursor_style {
                 SettingsCursorStyle::Block => TerminalCursorShape::Block,
                 SettingsCursorStyle::Underline => TerminalCursorShape::Underline,
@@ -1140,6 +1144,7 @@ impl WorkspaceApp {
             open_links_with_modifier: terminal.open_links_with_modifier,
             detect_file_paths_as_links: terminal.detect_file_paths_as_links,
             semantic_coloring: terminal.semantic_coloring,
+            selection_highlighting: terminal.selection_highlighting,
             semantic_scheme: resolved_terminal_semantic_scheme(
                 terminal.semantic_scheme,
                 terminal.active_custom_semantic_scheme(),
@@ -1280,8 +1285,11 @@ impl WorkspaceApp {
                 directory_template: session_log_settings.directory_template.clone(),
                 include_control_sequences: session_log_settings.include_control_sequences,
                 retention_days: session_log_settings.retention_days.max(0) as u64,
-                max_file_bytes: (session_log_settings.max_file_size_mib.max(1) as u64)
-                    .saturating_mul(1024 * 1024),
+                // Zero is the explicit unlimited setting; positive values keep a byte boundary.
+                max_file_bytes: u64::try_from(session_log_settings.max_file_size_mib)
+                    .ok()
+                    .filter(|size_mib| *size_mib > 0)
+                    .map(|size_mib| size_mib.saturating_mul(1024 * 1024)),
                 file_name_template: session_log_settings.file_name_template.clone(),
                 content_template: session_log_settings.content_template.clone(),
                 file_mode: session_log_settings.file_mode,

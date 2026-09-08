@@ -137,6 +137,7 @@ pub(in crate::workspace) enum AiHeaderAction {
 }
 
 pub(in crate::workspace) struct AiPendingChatStream {
+    pub(super) launch_id: Option<String>,
     pub(super) conversation_id: String,
     pub(super) config: AiChatStreamConfig,
     pub(super) request_content: Option<String>,

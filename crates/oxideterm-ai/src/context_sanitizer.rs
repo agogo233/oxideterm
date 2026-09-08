@@ -386,7 +386,7 @@ pub fn sanitize_chat_state_for_persistence(state: &mut AiChatState) {
     }
 }
 
-fn sanitize_chat_message_for_persistence(message: &mut AiChatMessage) {
+pub(crate) fn sanitize_chat_message_for_persistence(message: &mut AiChatMessage) {
     // Persisted conversation projections can replay into prompts and
     // diagnostics, including nested branch and compaction snapshots.
     message.content = sanitize_for_persistence(&message.content);

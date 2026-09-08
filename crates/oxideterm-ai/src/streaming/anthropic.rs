@@ -23,14 +23,13 @@ pub(crate) async fn stream_anthropic_completion(
         "{}/v1/messages",
         config.base_url.trim().trim_end_matches('/')
     );
-    let client = oxideterm_network_proxy::application_http_client_builder()
-        .context("failed to apply application proxy to AI chat client")?
-        .timeout(CHAT_STREAM_TIMEOUT)
-        .build()
-        .context("failed to create Anthropic chat client")?;
+    // Reuse the application pool while keeping the API key on this request only.
+    let client = oxideterm_network_proxy::application_http_client()
+        .context("failed to acquire application Anthropic chat client")?;
     let body = anthropic_chat_body(&config, &messages);
     let response = client
         .post(&url)
+        .timeout(CHAT_STREAM_TIMEOUT)
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .header("x-api-key", api_key)
         .header("anthropic-version", ANTHROPIC_VERSION)
@@ -326,6 +325,15 @@ pub(crate) fn parse_anthropic_data_line_with_accumulator(
 
     let mut events = Vec::new();
     if let Ok(json) = serde_json::from_str::<Value>(data) {
+        if let Some(usage) = json
+            .get("usage")
+            .or_else(|| json.get("message").and_then(|message| message.get("usage")))
+        {
+            events.push(AiStreamEvent::Usage {
+                input_tokens: usage.get("input_tokens").and_then(Value::as_u64),
+                output_tokens: usage.get("output_tokens").and_then(Value::as_u64),
+            });
+        }
         match json.get("type").and_then(Value::as_str) {
             Some("content_block_start") => {
                 if json

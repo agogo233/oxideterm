@@ -1010,6 +1010,7 @@ impl WorkspaceApp {
                             .unwrap_or(oxideterm_settings::DEFAULT_AI_TOOL_MAX_ROUNDS),
                         cx,
                     ),
+                    self.render_ai_agent_settings(cx),
                     policy_groups,
                     self.ai_disabled_tools_notice(settings, cx),
                     settings_ai_policy_warning(

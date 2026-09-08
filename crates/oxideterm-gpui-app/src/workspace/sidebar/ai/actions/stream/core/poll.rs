@@ -24,13 +24,21 @@ impl WorkspaceApp {
             if !self
                 .ai_entity
                 .read(cx)
-                .is_chat_stream_generation(delivery.generation)
+                .chat_stream_matches(delivery.generation, &delivery.conversation_id, &delivery.assistant_id)
             {
                 // Dropping a stale delivery also drops any retained approval
                 // sender, matching the old generation-scoped receiver.
                 continue;
             }
             match delivery.event {
+                AiStreamDeliveryEvent::ToolResourcesRequested { tool_session_id, name, args, sender } => {
+                    let result = self.ai_tool_resource_keys(delivery.generation, &tool_session_id, &name, &args, cx);
+                    let _ = sender.send(result);
+                }
+                AiStreamDeliveryEvent::AgentCommandRequested { tool_session_id, call, sender } => {
+                    self.flush_pending_ai_stream_text(&mut pending_text, cx);
+                    self.handle_ai_agent_command(delivery.generation, &delivery.conversation_id, &tool_session_id, call, sender, cx);
+                }
                 AiStreamDeliveryEvent::PromptUsage {
                     last_user_message_id,
                     provider_id,
@@ -38,6 +46,7 @@ impl WorkspaceApp {
                     breakdown,
                     max_tokens,
                 } => {
+                    if self.ai_entity.read(cx).is_child_stream(delivery.generation) { continue; }
                     self.flush_pending_ai_stream_text(&mut pending_text, cx);
                     let usage = AiPreparedPromptUsage {
                         conversation_id: delivery.conversation_id,
@@ -91,8 +100,7 @@ impl WorkspaceApp {
                             response_tx,
                         } => {
                             self.flush_pending_ai_stream_text(&mut pending_text, cx);
-                            if self.ai_entity.read(cx).chat_stream_generation()
-                                != delivery.generation
+                            if !self.ai_entity.read(cx).is_chat_stream_generation(delivery.generation)
                             {
                                 let _ = response_tx
                                     .send(Ok(oxideterm_ai::acp_permission_cancelled_response()));
@@ -848,7 +856,7 @@ impl WorkspaceApp {
                             sender,
                         );
                     });
-                    window.focus(&self.focus_handle, cx);
+                    if self.ai_entity.read(cx).chat_stream_generation() == delivery.generation { window.focus(&self.focus_handle, cx); }
                     cx.notify();
                 }
                 AiStreamDeliveryEvent::ToolPreflightRequested {
@@ -912,6 +920,7 @@ impl WorkspaceApp {
                     let _ = sender.send(context);
                 }
                 AiStreamDeliveryEvent::ToolExecutionRequested {
+                    leases,
                     tool_session_id,
                     tool_call_id,
                     name,
@@ -925,7 +934,7 @@ impl WorkspaceApp {
                         delivery.generation,
                         &tool_session_id,
                     );
-                    if !session_is_active {
+                    if !session_is_active || !self.ai_entity.read(cx).run_accepts_tools(delivery.generation) || leases.iter().any(|lease| !lease.is_current()) || sender.is_closed() {
                         let _ = sender.send(rejected_ai_tool_result(
                             tool_call_id,
                             name,
@@ -933,6 +942,10 @@ impl WorkspaceApp {
                             "The AI tool session is no longer active.",
                         ));
                         continue;
+                    }
+                    if name != "run_command" { for lease in &leases { lease.dispatched(); } }
+                    if !leases.is_empty() {
+                        self.ai_entity.update(cx, |ai, _cx| { ai.agents.tool_leases.insert((tool_session_id.clone(), tool_call_id.clone()), leases); });
                     }
                     self.start_ai_ui_orchestrator_tool_execution(
                         delivery.conversation_id.clone(),

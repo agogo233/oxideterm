@@ -1,4 +1,5 @@
 mod acp;
+pub mod agent;
 mod application_tools;
 mod chat;
 mod context_sanitizer;

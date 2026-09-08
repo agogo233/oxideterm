@@ -124,6 +124,7 @@ impl WorkspaceApp {
         tool_session_id: Option<&ToolSessionId>,
         cx: &mut Context<Self>,
     ) -> AiOrchestratorRuntimeSnapshot {
+        let scoped_session = tool_session_id.filter(|session| self.ai_runtime_context.read(cx).is_agent_scoped_session(session));
         let mut targets = Vec::new();
         for connection in self.connection_store.connections() {
             let mut refs = BTreeMap::new();
@@ -295,6 +296,7 @@ impl WorkspaceApp {
                 let Some(session_id) = root.session_id_for_pane(pane_id) else {
                     continue;
                 };
+                if scoped_session.is_some_and(|session| !self.ai_runtime_context.read(cx).agent_can_observe_terminal(session, session_id)) { continue; }
                 let Some(pane) = tab_host.panes().get(&pane_id) else {
                     continue;
                 };
@@ -470,8 +472,8 @@ impl WorkspaceApp {
                 deduped_targets.push(target);
             }
         }
-        let targets = deduped_targets;
-        let runtime_handles = tool_session_id
+        let mut targets = deduped_targets;
+        let runtime_handles: HashMap<String, oxideterm_ai::RuntimeHandleProjection> = tool_session_id
             .map(|tool_session_id| {
                 targets
                     .iter()
@@ -539,6 +541,16 @@ impl WorkspaceApp {
             })
             .unwrap_or_default();
 
+        if tool_session_id.is_some_and(|session| self.ai_runtime_context.read(cx).is_agent_scoped_session(session)) {
+            // Child discovery projects only delegated handles; global UI state is not authority.
+            targets.retain(|target| runtime_handles.contains_key(&target.id));
+            return AiOrchestratorRuntimeSnapshot {
+                targets, runtime_handles, active_tab: None, active_node: None,
+                active_session_id: None, active_tab_id: None, active_node_id: None,
+                memory: serde_json::Value::Null, health_state: serde_json::Value::Null,
+                transfers_state: serde_json::Value::Null, model_visible_settings: serde_json::Value::Null,
+            };
+        }
         let settings = self.settings_store.settings();
         let active_tab_ref = self.active_tab_id(cx)
             .and_then(|active_tab_id| self.tabs(cx).iter().find(|tab| tab.id == active_tab_id));
@@ -675,6 +687,15 @@ impl WorkspaceApp {
             ai_key_store: ai.key_store().clone(),
             ai_providers: settings.ai.providers.clone(),
             ai_embedding_config: settings.ai.embedding_config.clone(),
+            agent_model_limits: ai_provider_views(&settings.ai.providers).into_iter().flat_map(|provider| {
+                provider.models.into_iter().map(move |model| {
+                    let context = ai_context_window_from_maps(&settings.ai.user_context_windows, &settings.ai.model_context_windows, &provider.id, &model).unwrap_or(AI_COMPACTION_DEFAULT_CONTEXT_WINDOW);
+                    let response = ai_chat_request_max_response_tokens(settings, &provider.id, &model);
+                    let reasoning = settings.ai.reasoning_model_overrides.get(&provider.id).and_then(|models| models.get(&model)).and_then(serde_json::Value::as_str).unwrap_or("auto");
+                    let reasoning = oxideterm_ai::normalize_reasoning_level_for_model(&provider.provider_type, &model, reasoning).as_str().to_owned();
+                    ((provider.id.clone(), model), (context, response, reasoning))
+                })
+            }).collect(),
         }
     }
 
@@ -699,7 +720,7 @@ impl WorkspaceApp {
         // round useful without trusting the internal target scan as authority.
         let snapshot =
             self.ai_orchestrator_snapshot_for_tool_session(Some(tool_session_id), cx);
-        let mut stable_resources = ai_app_surface_stable_resources();
+        let mut stable_resources = if self.ai_runtime_context.read(cx).is_agent_scoped_session(tool_session_id) { Vec::new() } else { ai_app_surface_stable_resources() };
         for resource_ref in snapshot.targets.iter().filter_map(ai_stable_resource_ref_for_target) {
             if !stable_resources.contains(&resource_ref) {
                 stable_resources.push(resource_ref);
@@ -795,24 +816,26 @@ impl WorkspaceApp {
 
     pub(in crate::workspace) fn resolve_ai_tool_approval(
         &mut self,
+        generation: u64,
         tool_call_id: String,
         approved: bool,
         cx: &mut Context<Self>,
     ) {
         self.ai_entity.update(cx, |ai, _cx| {
-            ai.resolve_tool_approval(&tool_call_id, approved);
+            ai.resolve_tool_approval(generation, &tool_call_id, approved);
         });
         cx.notify();
     }
 
     pub(in crate::workspace) fn resolve_ai_acp_permission(
         &mut self,
+        generation: u64,
         tool_call_id: String,
         option_id: Option<String>,
         cx: &mut Context<Self>,
     ) {
         self.ai_entity.update(cx, |ai, _cx| {
-            ai.resolve_acp_permission_choice(&tool_call_id, option_id);
+            ai.resolve_acp_permission_choice(generation, &tool_call_id, option_id);
         });
         self.acp_entity.update(cx, |entity, _cx| {
             entity.remove_file_write_preview(&tool_call_id);
@@ -822,12 +845,13 @@ impl WorkspaceApp {
 
     pub(in crate::workspace) fn resolve_ai_tool_candidate_selection(
         &mut self,
+        generation: u64,
         tool_call_id: String,
         selected_index: Option<usize>,
         cx: &mut Context<Self>,
     ) {
         self.ai_entity.update(cx, |ai, _cx| {
-            ai.resolve_tool_candidate_selection(&tool_call_id, selected_index);
+            ai.resolve_tool_candidate_selection(generation, &tool_call_id, selected_index);
         });
         cx.notify();
     }
@@ -1895,6 +1919,10 @@ impl WorkspaceApp {
         args: serde_json::Value,
         cx: &App,
     ) -> Result<serde_json::Value, oxideterm_ai::RuntimeValidationError> {
+        if self.ai_runtime_context.read(cx).is_agent_scoped_session(tool_session_id)
+            && (args.get("resource_ref").is_some() || (tool_name == "get_state" && args.get("scope").and_then(serde_json::Value::as_str) != Some("target"))) {
+            return Err(oxideterm_ai::RuntimeValidationError::new(oxideterm_ai::RuntimeValidationFailure::CapabilityUnavailable));
+        }
         if ai_rejects_legacy_live_target_argument(tool_name, &args) {
             return Err(oxideterm_ai::RuntimeValidationError::new(
                 oxideterm_ai::RuntimeValidationFailure::CapabilityUnavailable,
@@ -2340,7 +2368,7 @@ impl WorkspaceApp {
         &mut self,
         tool_session_id: &ToolSessionId,
         args: &serde_json::Value,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AiActionResultLite {
         let snapshot = self.ai_orchestrator_snapshot(cx);
@@ -2371,7 +2399,7 @@ impl WorkspaceApp {
                         .is_some_and(|value| value == &session_id.0.to_string())
             })
             .cloned();
-        let Some((_pane_id, pane)) = self.reveal_ai_terminal_session(session_id, window, cx) else {
+        let Some((_pane_id, pane)) = self.ai_terminal_session(session_id, cx) else {
             return snapshot
                 .fail(
                     "Runtime terminal is unavailable.",
@@ -2507,9 +2535,10 @@ impl WorkspaceApp {
         post_user_approval: bool,
         dangerous_command_approved: bool,
         sender: tokio::sync::oneshot::Sender<AiExecutedToolResult>,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let execution_leases = self.ai_entity.read(cx).agents.tool_leases.get(&(tool_session_id.clone(), tool_call_id.clone())).cloned().unwrap_or_default();
         let started = std::time::Instant::now();
         let snapshot = self.ai_orchestrator_snapshot_for_tool_session(Some(&tool_session_id), cx);
         let raw_handle_id = args.get("handle_id").and_then(serde_json::Value::as_str);
@@ -2561,6 +2590,7 @@ impl WorkspaceApp {
             return;
         };
         if owner == crate::workspace::ai_runtime_context::AiRunCommandOwner::LocalShell {
+            for lease in &execution_leases { lease.dispatched(); }
             let cwd = args
                 .get("cwd")
                 .and_then(serde_json::Value::as_str)
@@ -2610,7 +2640,7 @@ impl WorkspaceApp {
             &command,
             args.get("cwd").and_then(serde_json::Value::as_str),
         ));
-        let Some((_pane_id, pane)) = self.reveal_ai_terminal_session(session_id, window, cx) else {
+        let Some((_pane_id, pane)) = self.ai_terminal_session(session_id, cx) else {
             let result = snapshot.to_executed_tool_result(
                 tool_call_id,
                 tool_name,
@@ -2645,12 +2675,18 @@ impl WorkspaceApp {
             return;
         }
         let before = pane.read(cx).ai_buffer_snapshot();
+        if execution_leases.iter().any(|lease| !lease.is_current()) {
+            let _ = sender.send(rejected_ai_tool_result(tool_call_id, tool_name, "terminal_taken_over", "User input took control of the terminal before dispatch."));
+            return;
+        }
+        for lease in &execution_leases { lease.dispatched(); }
         let command_id = pane.update(cx, |pane, cx| {
             let command_id =
                 pane.begin_command_mark(&command, TerminalCommandMarkDetectionSource::Ai, cx);
             pane.send_command_line(&command, cx);
             command_id
         });
+        self.monitor_ai_terminal_command(pane.clone(), command_id.clone(), execution_leases.clone(), cx);
         if args.get("await_output").and_then(serde_json::Value::as_bool) == Some(false) {
             let result = snapshot.to_executed_tool_result(
                 tool_call_id,
@@ -2678,11 +2714,16 @@ impl WorkspaceApp {
             let mut last = before.clone();
             let mut changed_at = std::time::Instant::now();
             let mut owner_closed = false;
+            let mut user_taken_over = false;
             for _ in 0..300 {
                 if sender.as_ref().is_none_or(tokio::sync::oneshot::Sender::is_closed) {
                     return;
                 }
                 Timer::after(Duration::from_millis(100)).await;
+                if execution_leases.iter().any(|lease| !lease.is_current()) {
+                    user_taken_over = true;
+                    break;
+                }
                 let current = weak.update(cx, |this, cx| {
                     // Do not let the retained pane entity become authority
                     // after its terminal owner or tool session is revoked.
@@ -2762,6 +2803,9 @@ impl WorkspaceApp {
                     this.ai_orchestrator_snapshot_for_tool_session(Some(&tool_session_id), cx);
                 let output = terminal_delta_output(&before, &last);
                 let output_empty = output.trim().is_empty();
+                if user_taken_over {
+                    return rejected_ai_tool_result(tool_call_id, tool_name, "terminal_taken_over", "The terminal was taken over or disconnected. Output attribution is no longer reliable; the remote command's termination is not confirmed.");
+                }
                 if owner_closed {
                     return current_snapshot.to_executed_tool_result(
                         tool_call_id,
@@ -3422,38 +3466,15 @@ impl WorkspaceApp {
             .cloned()
     }
 
-    pub(in crate::workspace) fn reveal_ai_terminal_session(
-        &mut self,
+    pub(in crate::workspace) fn ai_terminal_session(
+        &self,
         session_id: TerminalSessionId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &App,
     ) -> Option<(PaneId, gpui::Entity<oxideterm_gpui_terminal::TerminalPane>)> {
         let location = self.tab_host.read(cx).terminal_location(session_id)?;
-        let tab_id = location.tab_id;
         let pane_id = location.pane_id;
         let pane = self.tab_host.read(cx).panes().get(&pane_id)?.clone();
-
-        if self.tab_host.read(cx).is_outside_main_window(tab_id) {
-            // The detached window already owns this pane entity. Focus that
-            // owner without mounting the same terminal into the main window.
-            self.focus_detached_tab_window(tab_id, cx);
-            return Some((pane_id, pane));
-        }
-
-        // AI terminal tools must act on the same pane the user can see. The
-        // model may target a non-active session from context, so make that tab
-        // and pane visible before writing input or reading command output.
-        self.set_main_window_active_tab(Some(tab_id), cx);
-        self.tab_host.update(cx, |tab_host, _| {
-            tab_host.set_active_pane(Some(tab_id), pane_id);
-        });
-        self.sync_active_tab_surface(cx);
-        self.active_surface = ActiveSurface::Terminal;
-        self.needs_active_pane_focus = true;
-        self.focus_active_pane(window, cx);
-        self.reveal_active_tab(window, cx);
-        cx.notify();
-
+        // Background work follows the stable session without changing the user's active pane.
         Some((pane_id, pane))
     }
 

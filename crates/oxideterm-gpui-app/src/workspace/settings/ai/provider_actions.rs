@@ -67,6 +67,7 @@ impl WorkspaceApp {
                     .ai_entity
                     .update(cx, |ai, _cx| ai.take_chat_stream_deliveries());
                 self.apply_ai_chat_stream_deliveries(deliveries, window, cx);
+                cx.notify();
             }
             ai_state::AiWorkspaceEvent::CompactionDeliveryReady => {
                 let deliveries = self

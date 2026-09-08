@@ -1385,6 +1385,7 @@ async fn terminal_git_generate_ai_commit_message(
                 return TerminalGitAiCommitMessageOutcome::Error(message);
             }
             AiStreamEvent::Thinking(_)
+            | AiStreamEvent::Usage { .. }
             | AiStreamEvent::ProviderResponsePart { .. }
             | AiStreamEvent::ToolCall { .. }
             | AiStreamEvent::ToolCallComplete { .. } => {}

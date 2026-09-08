@@ -261,6 +261,7 @@ impl WorkspaceApp {
             // round-level transition at the message footer so it appears once.
             body = body.child(self.render_ai_tool_summary_indicator(message, cx));
         }
+        if let Some(group) = self.render_ai_agent_group(&message.id, cx) { body = body.child(group); }
         if user
             && !editing
             && let Some(branches) = message
@@ -550,17 +551,20 @@ window.focus(&this.focus_handle, cx);
         );
         let workspace = cx.entity();
         let mut code_actions = self.markdown_mermaid_actions(cx);
-        code_actions.on_run = Some(Arc::new(move |command, window, cx| {
-            let workspace = workspace.clone();
-            // Markdown action callbacks are plain event callbacks, not
-            // WorkspaceApp listeners. Defer the entity write so code block
-            // buttons cannot nest a WorkspaceApp update inside another one.
-            window.defer(cx, move |_window, cx| {
-                let _ = workspace.update(cx, |this, cx| {
-                    this.insert_ai_code_block_command(command, cx);
+        // Child output cannot infer authority over the currently selected terminal.
+        if self.ai_entity.read(cx).agents.detail.is_none() {
+            code_actions.on_run = Some(Arc::new(move |command, window, cx| {
+                let workspace = workspace.clone();
+                // Markdown action callbacks are plain event callbacks, not
+                // WorkspaceApp listeners. Defer the entity write so code block
+                // buttons cannot nest a WorkspaceApp update inside another one.
+                window.defer(cx, move |_window, cx| {
+                    let _ = workspace.update(cx, |this, cx| {
+                        this.insert_ai_code_block_command(command, cx);
+                    });
                 });
-            });
-        }));
+            }));
+        }
         let mut text_order = 0usize;
         let mut render_text =
             |key: String, text: gpui::SharedString, runs: Vec<gpui::TextRun>| -> AnyElement {
@@ -747,7 +751,7 @@ window.focus(&this.focus_handle, cx);
                         segment_index = segment_index.saturating_add(1);
                     }
                 }
-                "thinking" => {
+                "thinking" if self.ai_entity.read(cx).agents.detail.is_none() => {
                     if let Some(text) = part
                         .get("text")
                         .and_then(serde_json::Value::as_str)
@@ -1124,6 +1128,7 @@ window.focus(&this.focus_handle, cx);
             .filter(|(index, _)| !should_condense || show_condensed || *index >= split_at)
             .map(|(_, call)| call);
         for call in calls {
+            let approval_generation = call.get("approvalGeneration").and_then(serde_json::Value::as_u64).unwrap_or_default();
             let id = call
                 .get("id")
                 .and_then(serde_json::Value::as_str)
@@ -1390,7 +1395,7 @@ window.focus(&this.focus_handle, cx);
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, _event, _window, cx| {
-                                this.resolve_ai_tool_approval(approve_id.clone(), true, cx);
+                                this.resolve_ai_tool_approval(approval_generation, approve_id.clone(), true, cx);
                                 cx.stop_propagation();
                             }),
                         ),
@@ -1407,7 +1412,7 @@ window.focus(&this.focus_handle, cx);
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, _event, _window, cx| {
-                                this.resolve_ai_tool_approval(reject_id.clone(), false, cx);
+                                this.resolve_ai_tool_approval(approval_generation, reject_id.clone(), false, cx);
                                 cx.stop_propagation();
                             }),
                         ),
@@ -1458,6 +1463,7 @@ window.focus(&this.focus_handle, cx);
                                 MouseButton::Left,
                                 cx.listener(move |this, _event, _window, cx| {
                                     this.resolve_ai_acp_permission(
+                                        approval_generation,
                                         tool_call_id.clone(),
                                         Some(option_id.clone()),
                                         cx,
@@ -1583,6 +1589,7 @@ window.focus(&this.focus_handle, cx);
                                         MouseButton::Left,
                                         cx.listener(move |this, _event, _window, cx| {
                                             this.resolve_ai_tool_candidate_selection(
+                                                approval_generation,
                                                 candidate_id.clone(),
                                                 Some(candidate_index),
                                                 cx,
@@ -1611,6 +1618,7 @@ window.focus(&this.focus_handle, cx);
                                         MouseButton::Left,
                                         cx.listener(move |this, _event, _window, cx| {
                                             this.resolve_ai_tool_candidate_selection(
+                                                approval_generation,
                                                 cancel_id.clone(),
                                                 None,
                                                 cx,

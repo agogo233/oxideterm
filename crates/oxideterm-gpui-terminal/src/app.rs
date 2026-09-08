@@ -72,7 +72,9 @@ use crate::trzsz_worker::{
 use image_cache::ImageRenderCache;
 pub(crate) use image_cache::TerminalRenderedImage;
 pub(crate) use ime::TerminalInputHandler;
-use scrollbar::{ScrollbarDrag, ScrollbarGeometry};
+use scrollbar::{
+    HorizontalScrollbarDrag, HorizontalScrollbarGeometry, ScrollbarDrag, ScrollbarGeometry,
+};
 
 #[derive(Clone, Debug)]
 enum TmuxPromptKind {
@@ -305,6 +307,7 @@ fn terminal_maintenance_interval(
     process_refresh_remaining: Option<Duration>,
     pending_cwd_remaining: Option<Duration>,
     editor_expiry_remaining: Option<Duration>,
+    pending_output_flush_delay: Option<Duration>,
 ) -> Option<Duration> {
     if drain_budget_exhausted {
         return Some(drain_boost_interval);
@@ -316,6 +319,7 @@ fn terminal_maintenance_interval(
         process_refresh_remaining,
         pending_cwd_remaining,
         editor_expiry_remaining,
+        pending_output_flush_delay,
     ]
     .into_iter()
     .flatten()
@@ -407,6 +411,8 @@ pub struct TerminalPane {
     // Command-derived query highlighting is session-only and never becomes a
     // persisted keyword rule or shared backend state.
     command_context_highlighting_enabled: bool,
+    session_selection_highlighting_override: Option<bool>,
+    selection_highlight_cache: Option<SelectionHighlightCache>,
     preferences: TerminalUiPreferences,
     settings: TerminalUiSettings,
     theme: TerminalUiTheme,
@@ -417,8 +423,7 @@ pub struct TerminalPane {
     terminal_timestamps_enabled: bool,
     // Visual-only metadata keyed by stable snapshot line identity; never write this
     // into the PTY buffer, copied text, or search/indexed terminal content.
-    row_timestamps: Arc<HashMap<u64, TerminalRowTimestamp>>,
-    row_timestamp_retained_min_line: Option<u64>,
+    row_timestamps: Arc<TerminalRowTimestampStore>,
     metrics: TerminalMetrics,
     metrics_dirty: bool,
     selection: Option<TerminalSelection>,
@@ -487,6 +492,10 @@ pub struct TerminalPane {
     smooth_scroll_animation: Option<SmoothScrollAnimation>,
     smooth_scroll_snapshot_cache: Option<SmoothScrollSnapshotCache>,
     scrollbar_drag: Option<ScrollbarDrag>,
+    // Horizontal panning belongs to the visual timestamp overlay and never
+    // changes the backing PTY grid or remote window size.
+    horizontal_scroll_offset_px: Pixels,
+    horizontal_scrollbar_drag: Option<HorizontalScrollbarDrag>,
     tmux_separator_drag: Option<TmuxSeparatorDrag>,
     selection_autoscroll_position: Option<Point<Pixels>>,
     selection_autoscroll_scheduled: bool,
@@ -600,11 +609,28 @@ pub(crate) struct TerminalRowTimestamp {
     source_signature: u64,
 }
 
+/// Visual metadata follows the emulator row, independent of viewport coordinates.
+#[derive(Clone, Default)]
+pub(crate) struct TerminalRowTimestampStore {
+    pub(crate) entries: HashMap<u64, TerminalRowTimestamp>,
+}
+
+impl TerminalRowTimestampStore {
+    pub(crate) fn get(&self, identity: u64) -> Option<&TerminalRowTimestamp> {
+        self.entries.get(&identity)
+    }
+}
+
 #[derive(Clone)]
 struct TerminalSearchCache {
     query: String,
     content_revision: u64,
     matches: Arc<[oxideterm_terminal::TerminalSearchMatch]>,
+}
+
+struct SelectionHighlightCache {
+    selection: TerminalSelection,
+    query: Option<Arc<Zeroizing<String>>>,
 }
 
 struct SmoothScrollSnapshotCache {
@@ -1055,6 +1081,8 @@ impl TerminalPane {
             session_highlight_override: None,
             session_semantic_coloring_override: None,
             command_context_highlighting_enabled: true,
+            session_selection_highlighting_override: None,
+            selection_highlight_cache: None,
             preferences: preferences.clone(),
             settings: TerminalUiSettings::from_preferences(&preferences),
             theme: preferences.theme.clone(),
@@ -1063,8 +1091,7 @@ impl TerminalPane {
             snapshot_generation: 1,
             next_snapshot_line_id,
             terminal_timestamps_enabled: false,
-            row_timestamps: Arc::new(HashMap::new()),
-            row_timestamp_retained_min_line: None,
+            row_timestamps: Arc::new(TerminalRowTimestampStore::default()),
             metrics,
             metrics_dirty: false,
             selection: None,
@@ -1135,6 +1162,8 @@ impl TerminalPane {
             smooth_scroll_animation: None,
             smooth_scroll_snapshot_cache: None,
             scrollbar_drag: None,
+            horizontal_scroll_offset_px: px(0.0),
+            horizontal_scrollbar_drag: None,
             tmux_separator_drag: None,
             selection_autoscroll_position: None,
             selection_autoscroll_scheduled: false,
@@ -1229,32 +1258,24 @@ impl TerminalPane {
         // Match iTerm-style semantics: a row label is the time that row was
         // last modified, not the time it first became visible in the viewport.
         let label = current_terminal_timestamp_label();
-        record_timestampable_snapshot_rows(
-            Arc::make_mut(&mut self.row_timestamps),
-            snapshot,
-            &label,
-        );
+        let store = Arc::make_mut(&mut self.row_timestamps);
+        record_timestampable_snapshot_rows(store, snapshot, &label);
         self.trim_row_timestamps(snapshot);
     }
 
     fn trim_row_timestamps(&mut self, snapshot: &TerminalSnapshot) {
-        let Some(max_line) = snapshot.lines.iter().map(|row| row.line_id).max() else {
-            Arc::make_mut(&mut self.row_timestamps).clear();
-            self.row_timestamp_retained_min_line = None;
+        let store = Arc::make_mut(&mut self.row_timestamps);
+        if snapshot.lines.is_empty() {
+            store.entries.clear();
             return;
-        };
+        }
         let retained_rows = self
             .preferences
             .scrollback_lines
             .saturating_add(snapshot.rows)
             .saturating_add(1024)
-            .max(2048) as u64;
-        let min_line = max_line.saturating_sub(retained_rows);
-        trim_row_timestamp_history(
-            Arc::make_mut(&mut self.row_timestamps),
-            &mut self.row_timestamp_retained_min_line,
-            min_line,
-        );
+            .max(2048);
+        trim_row_timestamp_history(&mut store.entries, retained_rows);
     }
 
     pub fn terminal_timestamps_enabled(&self) -> bool {
@@ -1263,6 +1284,8 @@ impl TerminalPane {
 
     pub fn toggle_terminal_timestamps(&mut self, cx: &mut Context<Self>) {
         self.terminal_timestamps_enabled = !self.terminal_timestamps_enabled;
+        self.horizontal_scroll_offset_px = px(0.0);
+        self.horizontal_scrollbar_drag = None;
         // Timestamp visibility is paint-only. Do not restamp or resize here:
         // both would make old scrollback look like it was modified at toggle time.
         cx.notify();
@@ -1412,6 +1435,10 @@ impl TerminalPane {
 
     pub fn ai_command_records(&self) -> Vec<TerminalAiCommandRecord> {
         self.command_fact_ledger.ai_records()
+    }
+
+    pub fn ai_command_status(&self, id: &str) -> Option<crate::TerminalCommandFactStatus> {
+        self.command_fact_ledger.ai_command_status(id)
     }
 
     pub fn autosuggest_command_records(&self) -> Vec<TerminalAutosuggestCommandRecord> {
@@ -1613,6 +1640,9 @@ impl TerminalPane {
         if let Some(highlight_override) = &self.session_highlight_override {
             preferences.highlight_rules = highlight_override.rules.clone();
         }
+        if self.preferences.selection_highlighting != preferences.selection_highlighting {
+            self.selection_highlight_cache = None;
+        }
         if self.session_semantic_coloring_override == Some(preferences.semantic_coloring) {
             self.session_semantic_coloring_override = None;
         }
@@ -1726,6 +1756,28 @@ impl TerminalPane {
             return;
         }
         self.command_context_highlighting_enabled = enabled;
+        cx.notify();
+    }
+
+    pub fn selection_highlighting_enabled(&self) -> bool {
+        self.session_selection_highlighting_override
+            .unwrap_or(self.preferences.selection_highlighting)
+    }
+
+    pub fn selection_highlighting_overridden(&self) -> bool {
+        self.session_selection_highlighting_override.is_some()
+    }
+
+    pub fn set_selection_highlighting_override(
+        &mut self,
+        enabled: Option<bool>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.session_selection_highlighting_override == enabled {
+            return;
+        }
+        self.session_selection_highlighting_override = enabled;
+        self.selection_highlight_cache = None;
         cx.notify();
     }
 
@@ -2086,6 +2138,7 @@ impl TerminalPane {
     }
 
     fn mark_terminal_content_changed(&mut self, cx: &mut Context<Self>) {
+        self.selection_highlight_cache = None;
         self.terminal_content_revision = self.terminal_content_revision.wrapping_add(1).max(1);
         self.search_cache = None;
         self.schedule_search_refresh(cx);
@@ -2669,12 +2722,13 @@ impl TerminalPane {
             CURSOR_BLINK_INTERVAL
                 .saturating_sub(now.saturating_duration_since(self.last_cursor_blink))
         });
-        let (mode, ssh_still_connecting, process_refresh_supported) = {
+        let (mode, ssh_still_connecting, process_refresh_supported, pending_output_flush_delay) = {
             let terminal = self.terminal.lock();
             (
                 terminal.mode(),
                 terminal.kind() == TerminalSessionKind::SshPty && !terminal.is_interactive(),
                 terminal.process_info_probe().is_some(),
+                terminal.pending_output_flush_delay(),
             )
         };
         let needs_process_refresh = (self.settings.free_type_mode
@@ -2710,6 +2764,7 @@ impl TerminalPane {
             process_refresh_remaining,
             pending_cwd_remaining,
             editor_expiry_remaining,
+            pending_output_flush_delay,
         )
     }
 
@@ -3030,6 +3085,12 @@ impl TerminalPane {
                 self.reset_cursor_blink();
                 TerminalEventEffect::notify()
             }
+            TerminalEvent::StartupFailed => {
+                self.notify_trzsz_connection_lost_if_active();
+                self.notify_modem_connection_lost_if_active();
+                self.terminal_exited = true;
+                TerminalEventEffect::notify()
+            }
             TerminalEvent::ChildExited(code) => {
                 self.notify_trzsz_connection_lost_if_active();
                 self.notify_modem_connection_lost_if_active();
@@ -3206,6 +3267,11 @@ impl TerminalPane {
                         }
                         TerminalCommandMarkEvent::Reset => {
                             self.clear_visual_command_marks();
+                        }
+                        TerminalCommandMarkEvent::HistoryTrimmed { lines } => {
+                            self.command_marks
+                                .retain_mut(|mark| mark.trim_history(lines));
+                            self.command_fact_ledger.trim_history(lines);
                         }
                     }
                     if let Some(selected_id) = &self.selected_command_mark_id
@@ -3692,6 +3758,10 @@ impl TerminalPane {
         TERMINAL_CONTENT_PADDING + self.timestamp_gutter_width() + self.command_mark_gutter_width()
     }
 
+    fn terminal_horizontal_scroll_limit(&self) -> Pixels {
+        px(self.timestamp_gutter_width())
+    }
+
     fn command_mark_gutter_width(&self) -> f32 {
         if self.settings.command_marks_enabled {
             TERMINAL_COMMAND_MARK_GUTTER_WIDTH
@@ -3708,12 +3778,19 @@ impl TerminalPane {
         // cell metrics. Expose pane-local facts rather than making workspace
         // code duplicate terminal layout math.
         Some(TerminalCursorAnchor {
-            x: f32::from(cursor_bounds.origin.x) + self.terminal_content_padding_x(),
-            y: f32::from(cursor_bounds.origin.y) + TERMINAL_CONTENT_PADDING,
+            x: self.preferences.padding_horizontal
+                + f32::from(cursor_bounds.origin.x)
+                + self.terminal_content_padding_x()
+                - f32::from(self.horizontal_scroll_offset_px),
+            y: self.preferences.padding_vertical
+                + f32::from(cursor_bounds.origin.y)
+                + TERMINAL_CONTENT_PADDING,
             line_height: self.metrics.line_height_f32(),
             char_width: self.metrics.cell_width_f32(),
-            container_width: f32::from(bounds.size.width),
-            container_height: f32::from(bounds.size.height),
+            container_width: f32::from(bounds.size.width)
+                + self.preferences.padding_horizontal * 2.0,
+            container_height: f32::from(bounds.size.height)
+                + self.preferences.padding_vertical * 2.0,
         })
     }
 }
@@ -3771,15 +3848,20 @@ fn terminal_timestamp_label(hour: u32, minute: u32, second: u32, millis: u32) ->
 }
 
 fn record_timestampable_snapshot_rows(
-    row_timestamps: &mut HashMap<u64, TerminalRowTimestamp>,
+    store: &mut TerminalRowTimestampStore,
     snapshot: &TerminalSnapshot,
     label: &str,
 ) {
     for row in &snapshot.lines {
+        let key = terminal_row_timestamp_identity(row);
+        if key == 0 {
+            continue;
+        }
         // The snapshot signature is a cheap invalidation key. Cursor-only changes
         // still fall through to the content signature comparison below.
-        if row_timestamps
-            .get(&row.line_id)
+        if store
+            .entries
+            .get(&key)
             .is_some_and(|timestamp| timestamp.source_signature == row.signature)
         {
             continue;
@@ -3787,15 +3869,15 @@ fn record_timestampable_snapshot_rows(
 
         if terminal_row_has_timestamp_content(row) {
             let timestamp_signature = terminal_row_timestamp_signature(row);
-            if let Some(timestamp) = row_timestamps.get_mut(&row.line_id) {
+            if let Some(timestamp) = store.entries.get_mut(&key) {
                 if timestamp.signature != timestamp_signature {
                     timestamp.label = label.to_string();
                     timestamp.signature = timestamp_signature;
                 }
                 timestamp.source_signature = row.signature;
             } else {
-                row_timestamps.insert(
-                    row.line_id,
+                store.entries.insert(
+                    key,
                     TerminalRowTimestamp {
                         label: label.to_string(),
                         signature: timestamp_signature,
@@ -3806,41 +3888,25 @@ fn record_timestampable_snapshot_rows(
         } else {
             // Blank viewport rows are recycled later. Removing their metadata
             // prevents new output from inheriting a stale line-modification time.
-            row_timestamps.remove(&row.line_id);
+            store.entries.remove(&key);
         }
     }
 }
 
 fn trim_row_timestamp_history(
     row_timestamps: &mut HashMap<u64, TerminalRowTimestamp>,
-    retained_min_line: &mut Option<u64>,
-    min_line: u64,
+    retained_rows: usize,
 ) {
-    let Some(previous_min_line) = *retained_min_line else {
-        row_timestamps.retain(|line, _| *line >= min_line);
-        *retained_min_line = Some(min_line);
-        return;
-    };
-
-    if min_line <= previous_min_line {
-        // Snapshot identity can restart when a pane is rebuilt. New rows may then be inserted
-        // below the former boundary, so restart incremental trimming from this identity.
-        *retained_min_line = Some(min_line);
+    // IDs are process-wide; other terminals can make them arbitrarily sparse.
+    // Batch pruning bounds memory without scanning the cache on every frame.
+    if row_timestamps.len() <= retained_rows.saturating_add(1024) {
         return;
     }
-
-    let advanced_lines =
-        usize::try_from(min_line.saturating_sub(previous_min_line)).unwrap_or(usize::MAX);
-    if advanced_lines < row_timestamps.len() {
-        // Normal scrolling advances by only a few rows. Removing those keys is
-        // cheaper than scanning the entire retained timestamp history.
-        for line in previous_min_line..min_line {
-            row_timestamps.remove(&line);
-        }
-    } else {
-        row_timestamps.retain(|line, _| *line >= min_line);
-    }
-    *retained_min_line = Some(min_line);
+    let mut identities: Vec<_> = row_timestamps.keys().copied().collect();
+    let remove_count = identities.len() - retained_rows;
+    identities.select_nth_unstable(remove_count);
+    let min_identity = identities[remove_count];
+    row_timestamps.retain(|identity, _| *identity >= min_identity);
 }
 
 fn terminal_row_timestamp_signature(row: &TerminalRow) -> u64 {
@@ -3925,6 +3991,7 @@ mod tests {
                 false,
                 Duration::from_millis(8),
                 false,
+                None,
                 None,
                 None,
                 None,
@@ -4061,6 +4128,96 @@ mod tests {
                 viewport_needs_live_output_restore(display_offset, smooth_offset, animation_active),
                 expected
             );
+        }
+    }
+
+    #[gpui::test]
+    fn terminal_padding_updates_layout_grid_and_input_coordinates(cx: &mut TestAppContext) {
+        let (pane, cx) = cx.add_window_view(|window, cx| {
+            TerminalPane::new_recording_playback(
+                DEFAULT_COLS,
+                DEFAULT_ROWS,
+                TerminalUiPreferences::default(),
+                window,
+                cx,
+            )
+            .expect("test terminal pane")
+        });
+        cx.simulate_resize(gpui::size(px(640.0), px(320.0)));
+
+        for (horizontal, vertical) in [(1.0, 1.0), (24.0, 12.0), (0.0, 0.0)] {
+            pane.update(cx, |pane, cx| {
+                let mut preferences = pane.preferences.clone();
+                preferences.padding_horizontal = horizontal;
+                preferences.padding_vertical = vertical;
+                pane.set_preferences(preferences, cx);
+            });
+            cx.update(|window, cx| {
+                window.draw(cx).clear(cx);
+            });
+            cx.update(|window, cx| {
+                window.simulate_next_frame(cx);
+            });
+            cx.run_until_parked();
+
+            pane.update(cx, |pane, cx| {
+                let bounds = pane.bounds.expect("rendered terminal viewport");
+                assert_eq!(bounds.origin, gpui::point(px(horizontal), px(vertical)));
+                assert_eq!(
+                    bounds.size,
+                    gpui::size(px(640.0 - horizontal * 2.0), px(320.0 - vertical * 2.0))
+                );
+                pane.flush_pending_pty_resize(pane.pty_resize_generation, cx);
+                let cell_width = pane.metrics.cell_width_f32();
+                let line_height = pane.metrics.line_height_f32();
+                // Font advances may round just below an integer cell count.
+                // The resized grid must fit, with less than one cell left over.
+                let available_width = 640.0 - horizontal * 2.0 - SCROLLBAR_RESERVED_WIDTH;
+                let available_height = 320.0 - vertical * 2.0;
+                let remaining_width = available_width - pane.snapshot.cols as f32 * cell_width;
+                let remaining_height = available_height - pane.snapshot.rows as f32 * line_height;
+                assert!(remaining_width >= -0.001 && remaining_width < cell_width - 0.001);
+                assert!(remaining_height >= -0.001 && remaining_height < line_height - 0.001);
+
+                let position =
+                    bounds.origin + gpui::point(px(cell_width * 3.5), px(line_height * 2.5));
+                assert_eq!(
+                    pane.terminal_point_for_position(position),
+                    TerminalPoint { row: 2, col: 3 }
+                );
+                // Selection beginning in the left padding must include column zero.
+                let padding_position = gpui::point(px(0.0), position.y);
+                pane.handle_mouse_down(
+                    &gpui::MouseDownEvent {
+                        position: padding_position,
+                        button: gpui::MouseButton::Left,
+                        modifiers: gpui::Modifiers {
+                            shift: true,
+                            ..Default::default()
+                        },
+                        click_count: 1,
+                        first_mouse: false,
+                    },
+                    cx,
+                );
+                assert_eq!(
+                    pane.selection.expect("padding starts selection").anchor.col,
+                    0
+                );
+                let anchor = pane.cursor_anchor().expect("cursor anchor");
+                assert_eq!(
+                    anchor.x,
+                    horizontal + pane.snapshot.cursor_col as f32 * cell_width
+                );
+                assert_eq!(
+                    anchor.y,
+                    vertical + pane.snapshot.cursor_row as f32 * line_height
+                );
+                assert_eq!(
+                    (anchor.container_width, anchor.container_height),
+                    (640.0, 320.0)
+                );
+            });
         }
     }
 
@@ -4218,7 +4375,7 @@ mod tests {
         }
         let mut row = TerminalRow {
             line_id: absolute_line.max(0) as u64,
-            source_id: 0,
+            source_id: absolute_line.max(0) as usize,
             absolute_line,
             cells: Arc::new(cells),
             wrapped: false,
@@ -4289,26 +4446,25 @@ mod tests {
 
     #[test]
     fn row_timestamps_track_last_modified_nonblank_content() {
-        let mut row_timestamps = HashMap::new();
+        let mut store = TerminalRowTimestampStore::default();
         let blank_snapshot = timestamp_test_snapshot(timestamp_test_row(42, "   "));
-        record_timestampable_snapshot_rows(&mut row_timestamps, &blank_snapshot, "10:00:00");
+        record_timestampable_snapshot_rows(&mut store, &blank_snapshot, "10:00:00");
 
-        assert!(!row_timestamps.contains_key(&42));
+        // This fixture uses emulator source identity 42.
+        assert!(!store.entries.contains_key(&42));
 
         let content_snapshot = timestamp_test_snapshot(timestamp_test_row(42, "ls"));
-        record_timestampable_snapshot_rows(&mut row_timestamps, &content_snapshot, "10:00:01");
+        record_timestampable_snapshot_rows(&mut store, &content_snapshot, "10:00:01");
 
         assert_eq!(
-            row_timestamps
-                .get(&42)
-                .map(|timestamp| timestamp.label.as_str()),
+            store.get(42).map(|timestamp| timestamp.label.as_str()),
             Some("10:00:01")
         );
 
         let unchanged_snapshot =
             timestamp_test_snapshot(timestamp_test_row_with_cursor(42, "ls", Some(1), true));
-        record_timestampable_snapshot_rows(&mut row_timestamps, &unchanged_snapshot, "10:00:02");
-        let unchanged_timestamp = row_timestamps.get(&42).expect("timestamped row");
+        record_timestampable_snapshot_rows(&mut store, &unchanged_snapshot, "10:00:02");
+        let unchanged_timestamp = store.get(42).expect("timestamped row");
         assert_eq!(unchanged_timestamp.label, "10:00:01");
         assert_eq!(
             unchanged_timestamp.source_signature,
@@ -4316,11 +4472,9 @@ mod tests {
         );
 
         let changed_snapshot = timestamp_test_snapshot(timestamp_test_row(42, "pwd"));
-        record_timestampable_snapshot_rows(&mut row_timestamps, &changed_snapshot, "10:00:03");
+        record_timestampable_snapshot_rows(&mut store, &changed_snapshot, "10:00:03");
         assert_eq!(
-            row_timestamps
-                .get(&42)
-                .map(|timestamp| timestamp.label.as_str()),
+            store.get(42).map(|timestamp| timestamp.label.as_str()),
             Some("10:00:03")
         );
 
@@ -4329,38 +4483,100 @@ mod tests {
         assert_eq!(label.chars().count(), TERMINAL_TIMESTAMP_LABEL_CELLS);
 
         let cleared_snapshot = timestamp_test_snapshot(timestamp_test_row(42, ""));
-        record_timestampable_snapshot_rows(&mut row_timestamps, &cleared_snapshot, "10:00:04");
+        record_timestampable_snapshot_rows(&mut store, &cleared_snapshot, "10:00:04");
 
-        assert!(!row_timestamps.contains_key(&42));
+        assert!(!store.entries.contains_key(&42));
     }
 
     #[test]
-    fn row_timestamp_history_trims_incrementally_and_handles_rewind() {
-        let timestamp = |line: u64| TerminalRowTimestamp {
-            label: line.to_string(),
-            signature: line,
-            source_signature: line,
+    fn timestamp_identity_survives_burst_output_and_viewport_jumps() {
+        let mut terminal =
+            TerminalSession::recording_playback(20, 3, GraphicsOptions::default(), 10);
+        terminal.feed_recording_output(b"same\r\nsame\r\nsame\r\nsame\r\nsame\r\nsame\r\nsame\r\nsame\r\nsame\r\nsame\r\nkept\r\nsame");
+        let before = terminal.snapshot();
+        let kept = before
+            .lines
+            .iter()
+            .find(|row| row.text().trim() == "kept")
+            .unwrap();
+        let original_key = terminal_row_timestamp_identity(kept);
+        let mut store = TerminalRowTimestampStore::default();
+        record_timestampable_snapshot_rows(&mut store, &before, "old");
+        terminal.feed_recording_output(b"\r\nsame\r\nsame\r\nsame\r\nsame");
+        let after = terminal.snapshot();
+        record_timestampable_snapshot_rows(&mut store, &after, "new");
+        for row in after.lines.iter().filter(|row| row.text().trim() == "same") {
+            assert_eq!(
+                store
+                    .get(terminal_row_timestamp_identity(row))
+                    .unwrap()
+                    .label,
+                "new"
+            );
+        }
+        terminal.scroll_to_top();
+        let top = terminal.snapshot();
+        record_timestampable_snapshot_rows(&mut store, &top, "scroll");
+        terminal.scroll_to_display_offset(4);
+        let historical = terminal.snapshot();
+        let kept = historical
+            .lines
+            .iter()
+            .find(|row| row.text().trim() == "kept")
+            .unwrap();
+        record_timestampable_snapshot_rows(&mut store, &historical, "scroll");
+        assert_eq!(terminal_row_timestamp_identity(kept), original_key);
+        assert_eq!(store.get(original_key).unwrap().label, "old");
+    }
+
+    #[test]
+    fn timestamp_identity_follows_local_line_deletion_without_moving_other_rows() {
+        let mut terminal =
+            TerminalSession::recording_playback(20, 4, GraphicsOptions::default(), 10);
+        terminal.feed_recording_output(b"fixed\r\nremoved\r\nkept\r\nlast");
+        let before = terminal.snapshot();
+        let mut store = TerminalRowTimestampStore::default();
+        record_timestampable_snapshot_rows(&mut store, &before, "old");
+        terminal.feed_recording_output(b"\x1b[2;1H\x1b[M");
+        let after = terminal.snapshot();
+        assert_eq!(after.scrollback_lines, before.scrollback_lines);
+        record_timestampable_snapshot_rows(&mut store, &after, "new");
+        for text in ["fixed", "kept", "last"] {
+            let row = after
+                .lines
+                .iter()
+                .find(|row| row.text().trim() == text)
+                .unwrap();
+            assert_eq!(
+                store
+                    .get(terminal_row_timestamp_identity(row))
+                    .unwrap()
+                    .label,
+                "old",
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn timestamp_cache_bounds_sparse_identities_and_revisited_history() {
+        let timestamp = |id: u64| TerminalRowTimestamp {
+            label: id.to_string(),
+            signature: id,
+            source_signature: id,
         };
-        let mut row_timestamps = (0..6)
-            .map(|line| (line, timestamp(line)))
+        let mut entries = (0..1100)
+            .map(|id| (id * 1000, timestamp(id)))
             .collect::<HashMap<_, _>>();
-        let mut retained_min_line = None;
-
-        trim_row_timestamp_history(&mut row_timestamps, &mut retained_min_line, 2);
-        assert_eq!(retained_min_line, Some(2));
-        assert_eq!(row_timestamps.len(), 4);
-        assert!(row_timestamps.keys().all(|line| *line >= 2));
-
-        trim_row_timestamp_history(&mut row_timestamps, &mut retained_min_line, 4);
-        assert_eq!(retained_min_line, Some(4));
-        assert_eq!(row_timestamps.len(), 2);
-        assert!(row_timestamps.keys().all(|line| *line >= 4));
-
-        trim_row_timestamp_history(&mut row_timestamps, &mut retained_min_line, 1);
-        row_timestamps.insert(1, timestamp(1));
-        trim_row_timestamp_history(&mut row_timestamps, &mut retained_min_line, 3);
-        assert_eq!(retained_min_line, Some(3));
-        assert!(!row_timestamps.contains_key(&1));
+        trim_row_timestamp_history(&mut entries, 50);
+        assert_eq!(entries.len(), 50);
+        assert!(entries.contains_key(&1_099_000));
+        for id in 0..1100 {
+            entries.insert(id, timestamp(id));
+        }
+        trim_row_timestamp_history(&mut entries, 50);
+        assert_eq!(entries.len(), 50);
+        assert!(!entries.contains_key(&1));
     }
 
     #[gpui::test]

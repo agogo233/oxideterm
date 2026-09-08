@@ -1,5 +1,6 @@
 use std::{
     env,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -17,8 +18,9 @@ use unicode_width::UnicodeWidthStr;
 use zeroize::Zeroizing;
 
 use super::{
-    FreeTypeDragAction, FreeTypeDragState, PendingTerminalEditorClipboard, ScrollbarDrag,
-    ScrollbarGeometry, SmoothScrollAnimation, TerminalContextMenu, TerminalPane, TerminalPaneEvent,
+    FreeTypeDragAction, FreeTypeDragState, HorizontalScrollbarDrag, HorizontalScrollbarGeometry,
+    PendingTerminalEditorClipboard, ScrollbarDrag, ScrollbarGeometry, SelectionHighlightCache,
+    SmoothScrollAnimation, TerminalContextMenu, TerminalPane, TerminalPaneEvent,
     TmuxSeparatorDirection, TmuxSeparatorDrag, command_mark_ui_available,
 };
 use crate::command_facts::TerminalAutosuggestInputState;
@@ -389,6 +391,9 @@ impl TerminalPane {
             self.context_menu_presence.reopen();
             cx.notify();
         }
+        if self.handle_horizontal_scroll(event, cx) {
+            return;
+        }
         let mode = self.terminal.lock().mode();
         let scroll_multiplier = if mouse_mode(mode, event.modifiers.shift) {
             1.0
@@ -484,6 +489,36 @@ impl TerminalPane {
         if scroll_delta.repaint || clamped_remainder || applied_rows.abs() > f32::EPSILON {
             cx.notify();
         }
+    }
+
+    fn handle_horizontal_scroll(
+        &mut self,
+        event: &ScrollWheelEvent,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let max_scroll = self.terminal_horizontal_scroll_limit();
+        if max_scroll <= px(0.0) {
+            return false;
+        }
+
+        let delta = event.delta.pixel_delta(self.metrics.line_height);
+        let delta_x = f32::from(delta.x);
+        let delta_y = f32::from(delta.y);
+        let requested_delta = if delta_x.abs() > delta_y.abs() {
+            delta.x
+        } else if event.modifiers.shift && delta_y.abs() > f32::EPSILON {
+            delta.y
+        } else {
+            return false;
+        };
+        let next_offset =
+            (self.horizontal_scroll_offset_px - requested_delta).clamp(px(0.0), max_scroll);
+        if next_offset != self.horizontal_scroll_offset_px {
+            self.horizontal_scroll_offset_px = next_offset;
+            cx.notify();
+        }
+        cx.stop_propagation();
+        true
     }
 
     pub(super) fn clear_smooth_scroll_remainder(&mut self) -> bool {
@@ -878,13 +913,50 @@ impl TerminalPane {
             return selected_text_for_selection(&self.snapshot, selection);
         };
 
-        // Cross-page selections outlive any individual viewport snapshot. Materialize only their
-        // grid range at copy time so normal rendering and in-view copies keep their current cost.
+        // Cross-page selections outlive a viewport snapshot. Materialize only the selected grid
+        // range when copying text or deriving a new selection-highlight query.
         let snapshot = self
             .terminal
             .lock()
             .snapshot_with_display_offset(request.display_offset, request.rows);
         selected_text_for_selection(&snapshot, selection)
+    }
+
+    pub(super) fn selection_highlight_query(&mut self) -> Option<Arc<Zeroizing<String>>> {
+        let selection = self.selection.filter(|selection| !selection.is_empty());
+        let Some(selection) =
+            selection.filter(|_| self.selection_highlighting_enabled() && !self.selecting)
+        else {
+            self.selection_highlight_cache = None;
+            return None;
+        };
+        if let Some(cache) = &self.selection_highlight_cache
+            && cache.selection == selection
+        {
+            return cache.query.clone();
+        }
+        let (start, end) = selection.normalized();
+        // Reject ordinary multiline selections before materializing potentially large scrollback.
+        let multiline = selection.mode == TerminalSelectionMode::Lines
+            || (selection.mode == TerminalSelectionMode::Block && start.line != end.line)
+            || self.snapshot.lines.iter().enumerate().any(|(row, line)| {
+                let grid_line = row as i32 - self.snapshot.display_offset as i32;
+                grid_line >= start.line && grid_line < end.line && !line.wrapped
+            });
+        let query = if multiline {
+            None
+        } else {
+            self.selected_text_snapshot()
+                .map(Zeroizing::new)
+                .filter(|text| !text.trim().is_empty() && !text.contains(['\n', '\r']))
+                .map(Arc::new)
+        };
+        // The pane owns this transient text; replacing or disabling it zeroizes the last copy.
+        self.selection_highlight_cache = Some(SelectionHighlightCache {
+            selection,
+            query: query.clone(),
+        });
+        query
     }
 
     pub fn selected_text_snapshot(&self) -> Option<String> {
@@ -911,7 +983,8 @@ impl TerminalPane {
         position: gpui::Point<Pixels>,
     ) -> TerminalPoint {
         let origin = self.content_origin();
-        let col = ((f32::from(position.x - origin.x) - self.terminal_content_padding_x())
+        let col = ((f32::from(position.x - origin.x) - self.terminal_content_padding_x()
+            + f32::from(self.horizontal_scroll_offset_px))
             / self.metrics.cell_width_f32())
         .floor()
         .max(0.0) as usize;
@@ -992,6 +1065,45 @@ impl TerminalPane {
                 track_height: px(self.snapshot.rows as f32 * self.metrics.line_height_f32()),
             }
         })
+    }
+
+    fn horizontal_scrollbar_geometry(&self) -> Option<HorizontalScrollbarGeometry> {
+        let bounds = self.bounds?;
+        let max_scroll = self.terminal_horizontal_scroll_limit();
+        let gutter_width = self.timestamp_gutter_width() + self.command_mark_gutter_width();
+        let track_width =
+            (bounds.size.width - px(gutter_width + SCROLLBAR_RESERVED_WIDTH)).max(px(0.0));
+        let scrollbar = terminal_horizontal_scrollbar_for_viewport(
+            f32::from(track_width),
+            f32::from(max_scroll),
+            f32::from(self.horizontal_scroll_offset_px),
+        )?;
+        Some(HorizontalScrollbarGeometry {
+            x: bounds.origin.x + px(gutter_width),
+            y: bounds.origin.y + bounds.size.height - px(SCROLLBAR_WIDTH),
+            left: px(scrollbar.left),
+            width: px(scrollbar.width),
+            track_width,
+            max_scroll: px(scrollbar.max_scroll),
+        })
+    }
+
+    fn set_horizontal_scrollbar_position(
+        &mut self,
+        position: gpui::Point<Pixels>,
+        thumb_offset_x: Pixels,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(geometry) = self.horizontal_scrollbar_geometry() else {
+            return;
+        };
+        let thumb_travel = (geometry.track_width - geometry.width).max(px(1.0));
+        let thumb_left = (position.x - geometry.x - thumb_offset_x).clamp(px(0.0), thumb_travel);
+        let next_offset = thumb_left / thumb_travel * geometry.max_scroll;
+        if next_offset != self.horizontal_scroll_offset_px {
+            self.horizontal_scroll_offset_px = next_offset;
+            cx.notify();
+        }
     }
 
     fn set_scrollbar_position(
@@ -1250,6 +1362,20 @@ impl TerminalPane {
         }
 
         if event.button == MouseButton::Left
+            && let Some(geometry) = self.horizontal_scrollbar_geometry()
+            && geometry.contains_track(event.position)
+        {
+            let thumb_offset_x = if geometry.contains_thumb(event.position) {
+                event.position.x - geometry.x - geometry.left
+            } else {
+                geometry.width / 2.0
+            };
+            self.horizontal_scrollbar_drag = Some(HorizontalScrollbarDrag { thumb_offset_x });
+            self.set_horizontal_scrollbar_position(event.position, thumb_offset_x, cx);
+            return;
+        }
+
+        if event.button == MouseButton::Left
             && terminal_link_activation_allowed(
                 event.modifiers,
                 self.settings.open_links_with_modifier,
@@ -1280,6 +1406,17 @@ impl TerminalPane {
             };
             self.scrollbar_drag = Some(ScrollbarDrag { thumb_offset_y });
             self.set_scrollbar_position(event.position, thumb_offset_y, cx);
+            return;
+        }
+
+        if event.button == MouseButton::Left
+            && event.click_count <= 1
+            && event.modifiers.shift
+            && self.selection.is_some()
+        {
+            // Preserve the scrollback anchor before tmux hit testing can replace the selection.
+            self.selecting = true;
+            self.update_selection_with_autoscroll(event.position, cx);
             return;
         }
 
@@ -1421,6 +1558,13 @@ impl TerminalPane {
     }
 
     pub(crate) fn handle_mouse_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if let Some(drag) = self.horizontal_scrollbar_drag
+            && event.pressed_button == Some(MouseButton::Left)
+        {
+            self.set_horizontal_scrollbar_position(event.position, drag.thumb_offset_x, cx);
+            return;
+        }
+
         if let Some(drag) = self.tmux_separator_drag
             && event.pressed_button == Some(MouseButton::Left)
         {
@@ -1450,6 +1594,7 @@ impl TerminalPane {
         let mode = self.terminal.lock().mode();
         let can_hover_terminal_content = !self.selecting
             && self.scrollbar_drag.is_none()
+            && self.horizontal_scrollbar_drag.is_none()
             && !mouse_mode(mode, event.modifiers.shift);
         let hovered_link = can_hover_terminal_content
             .then(|| self.link_at_position(event.position))
@@ -1500,6 +1645,11 @@ impl TerminalPane {
     }
 
     pub(crate) fn handle_mouse_up(&mut self, event: &MouseUpEvent, cx: &mut Context<Self>) {
+        if self.horizontal_scrollbar_drag.take().is_some() {
+            cx.notify();
+            return;
+        }
+
         if self.tmux_separator_drag.take().is_some() {
             cx.notify();
             return;
@@ -2938,6 +3088,258 @@ mod tests {
             assert!(!pane.handle_terminal_autosuggest_key("up", Modifiers::default(), cx));
             assert_eq!(pane.autosuggest_selected_index, None);
             assert_eq!(pane.autosuggest_dismissed_query.as_deref(), Some("ls"));
+        });
+    }
+
+    #[gpui::test]
+    fn selection_highlighting_is_opt_in_and_independent_of_search(cx: &mut TestAppContext) {
+        let (_, cx) = cx.add_window_view(|_window, _cx| TerminalScrollTestRoot);
+        let pane = cx.update(|window, cx| {
+            cx.new(|cx| {
+                TerminalPane::new_recording_playback(
+                    20,
+                    3,
+                    TerminalUiPreferences::default(),
+                    window,
+                    cx,
+                )
+                .unwrap()
+            })
+        });
+        pane.update(cx, |pane, cx| {
+            pane.terminal
+                .lock()
+                .feed_recording_output(b"share share\r\nother text");
+            let snapshot = pane.terminal.lock().snapshot();
+            pane.snapshot = pane.stamp_snapshot(snapshot);
+            pane.selection = Some(TerminalSelection {
+                anchor: TerminalGridPoint { line: 0, col: 0 },
+                head: TerminalGridPoint { line: 0, col: 4 },
+                mode: TerminalSelectionMode::Simple,
+            });
+            assert!(!pane.selection_highlighting_enabled());
+            assert!(pane.selection_highlight_query().is_none());
+            pane.set_search_query(Some("other".into()), None, cx);
+            pane.set_command_context_highlighting_enabled(false, cx);
+            pane.set_selection_highlighting_override(Some(true), cx);
+            assert_eq!(
+                pane.selection_highlight_query()
+                    .as_ref()
+                    .map(|query| query.as_str()),
+                Some("share")
+            );
+            assert_eq!(pane.search_status().query.as_deref(), Some("other"));
+            assert!(!pane.command_context_highlighting_enabled());
+            pane.selecting = true;
+            assert!(pane.selection_highlight_query().is_none());
+            pane.selecting = false;
+            pane.selection.as_mut().unwrap().head = TerminalGridPoint { line: 1, col: 4 };
+            assert!(pane.selection_highlight_query().is_none());
+            pane.selection = None;
+            assert!(pane.selection_highlight_query().is_none());
+            pane.selection = Some(TerminalSelection {
+                anchor: TerminalGridPoint { line: 0, col: 5 },
+                head: TerminalGridPoint { line: 0, col: 5 },
+                mode: TerminalSelectionMode::Semantic,
+            });
+            assert!(pane.selection_highlight_query().is_none());
+            pane.set_selection_highlighting_override(Some(false), cx);
+            assert!(pane.selection_highlight_query().is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn selection_highlighting_inherits_global_settings_until_overridden(cx: &mut TestAppContext) {
+        let (_, cx) = cx.add_window_view(|_window, _cx| TerminalScrollTestRoot);
+        let mut preferences = TerminalUiPreferences::default();
+        preferences.selection_highlighting = true;
+        let pane = cx.update(|window, cx| {
+            cx.new(|cx| {
+                TerminalPane::new_recording_playback(20, 3, preferences.clone(), window, cx)
+                    .unwrap()
+            })
+        });
+        pane.update(cx, |pane, cx| {
+            assert!(pane.selection_highlighting_enabled());
+            assert!(!pane.selection_highlighting_overridden());
+            pane.set_selection_highlighting_override(Some(false), cx);
+            assert!(!pane.selection_highlighting_enabled());
+            assert!(pane.selection_highlighting_overridden());
+            // Matching the global value must not silently erase an explicit session choice.
+            preferences.selection_highlighting = false;
+            pane.set_preferences(preferences.clone(), cx);
+            preferences.selection_highlighting = true;
+            pane.set_preferences(preferences.clone(), cx);
+            assert!(!pane.selection_highlighting_enabled());
+            pane.set_selection_highlighting_override(None, cx);
+            assert!(pane.selection_highlighting_enabled());
+            assert!(!pane.selection_highlighting_overridden());
+            preferences.selection_highlighting = false;
+            pane.set_preferences(preferences.clone(), cx);
+            assert!(!pane.selection_highlighting_enabled());
+        });
+    }
+
+    #[gpui::test]
+    fn selection_highlight_query_survives_scrolling_out_of_view(cx: &mut TestAppContext) {
+        let (_, cx) = cx.add_window_view(|_window, _cx| TerminalScrollTestRoot);
+        let pane = cx.update(|window, cx| {
+            cx.new(|cx| {
+                TerminalPane::new_recording_playback(
+                    5,
+                    2,
+                    TerminalUiPreferences::default(),
+                    window,
+                    cx,
+                )
+                .unwrap()
+            })
+        });
+        pane.update(cx, |pane, cx| {
+            let snapshot = {
+                let mut terminal = pane.terminal.lock();
+                terminal.feed_recording_output(b"shareshare\r\nother\r\nlast");
+                terminal.scroll_to_display_offset(usize::MAX);
+                terminal.snapshot()
+            };
+            pane.snapshot = pane.stamp_snapshot(snapshot);
+            let first_line = -(pane.snapshot.display_offset as i32);
+            pane.selection = Some(TerminalSelection {
+                anchor: TerminalGridPoint {
+                    line: first_line,
+                    col: 0,
+                },
+                head: TerminalGridPoint {
+                    line: first_line + 1,
+                    col: 4,
+                },
+                mode: TerminalSelectionMode::Simple,
+            });
+            pane.set_selection_highlighting_override(Some(true), cx);
+            assert_eq!(
+                pane.selection_highlight_query()
+                    .as_ref()
+                    .map(|query| query.as_str()),
+                Some("shareshare")
+            );
+            let snapshot = {
+                let mut terminal = pane.terminal.lock();
+                terminal.scroll_to_display_offset(0);
+                terminal.snapshot()
+            };
+            pane.snapshot = pane.stamp_snapshot(snapshot);
+            assert_eq!(
+                pane.selection_highlight_query()
+                    .as_ref()
+                    .map(|query| query.as_str()),
+                Some("shareshare")
+            );
+            pane.set_selection_highlighting_override(Some(false), cx);
+            assert!(pane.selection_highlight_query().is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn shift_click_extends_selection_across_scrollback(cx: &mut TestAppContext) {
+        let (_, cx) = cx.add_window_view(|_window, _cx| TerminalScrollTestRoot);
+        let pane = cx.update(|window, cx| {
+            cx.new(|cx| {
+                TerminalPane::new_recording_playback(
+                    16,
+                    4,
+                    TerminalUiPreferences::default(),
+                    window,
+                    cx,
+                )
+                .expect("test terminal pane")
+            })
+        });
+        pane.update(cx, |pane, cx| {
+            pane.settings.copy_on_select = false;
+            pane.bounds = Some(gpui::Bounds::new(
+                point(px(0.0), px(0.0)),
+                gpui::size(
+                    px(pane.terminal_content_padding_x()
+                        + 16.0 * pane.metrics.cell_width_f32()
+                        + SCROLLBAR_RESERVED_WIDTH),
+                    px(2.0 * TERMINAL_CONTENT_PADDING + 4.0 * pane.metrics.line_height_f32()),
+                ),
+            ));
+            let lines = (0..12).map(|i| format!("line-{i:02}")).collect::<Vec<_>>();
+            pane.terminal
+                .lock()
+                .feed_recording_output(lines.join("\r\n").as_bytes());
+            let position = |pane: &TerminalPane, row: usize, col: usize| {
+                let origin = pane.content_origin();
+                point(
+                    origin.x
+                        + px(pane.terminal_content_padding_x()
+                            + (col as f32 + 0.5) * pane.metrics.cell_width_f32()),
+                    origin.y
+                        + px(TERMINAL_CONTENT_PADDING
+                            + (row as f32 + 0.5) * pane.metrics.line_height_f32()),
+                )
+            };
+            let gesture = |pane: &mut TerminalPane,
+                           start: (usize, usize),
+                           end: (usize, usize),
+                           shift,
+                           cx: &mut Context<TerminalPane>| {
+                let start_position = position(pane, start.0, start.1);
+                let end_position = position(pane, end.0, end.1);
+                let modifiers = gpui::Modifiers {
+                    shift,
+                    ..Default::default()
+                };
+                pane.handle_mouse_down(
+                    &MouseDownEvent {
+                        button: MouseButton::Left,
+                        position: start_position,
+                        modifiers,
+                        click_count: 1,
+                        first_mouse: false,
+                    },
+                    cx,
+                );
+                pane.handle_mouse_up(
+                    &MouseUpEvent {
+                        button: MouseButton::Left,
+                        position: end_position,
+                        modifiers,
+                        click_count: 1,
+                    },
+                    cx,
+                );
+            };
+            for require_shift in [false, true] {
+                pane.settings.selection_requires_shift = require_shift;
+                pane.selection = None;
+                let snapshot = {
+                    let mut terminal = pane.terminal.lock();
+                    terminal.scroll_to_display_offset(usize::MAX);
+                    terminal.snapshot()
+                };
+                pane.snapshot = pane.stamp_snapshot(snapshot);
+                gesture(pane, (0, 0), (0, 3), true, cx);
+                assert_eq!(pane.selected_text_snapshot().as_deref(), Some("line"));
+                let snapshot = {
+                    let mut terminal = pane.terminal.lock();
+                    terminal.scroll_to_display_offset(0);
+                    terminal.snapshot()
+                };
+                pane.snapshot = pane.stamp_snapshot(snapshot);
+                gesture(pane, (2, 6), (2, 6), true, cx);
+                assert_eq!(pane.selected_text_snapshot(), Some(lines[..11].join("\n")));
+                gesture(pane, (1, 6), (1, 6), true, cx);
+                assert_eq!(pane.selected_text_snapshot(), Some(lines[..10].join("\n")));
+            }
+            pane.settings.selection_requires_shift = false;
+            gesture(pane, (3, 2), (3, 2), false, cx);
+            assert!(pane.selected_text_snapshot().is_none());
+            gesture(pane, (2, 6), (1, 0), false, cx);
+            assert_eq!(pane.selected_text_snapshot(), Some(lines[9..11].join("\n")));
+            gesture(pane, (0, 0), (0, 0), true, cx);
+            assert_eq!(pane.selected_text_snapshot(), Some(lines[8..11].join("\n")));
         });
     }
 
