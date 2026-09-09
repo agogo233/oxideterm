@@ -80,9 +80,19 @@ jobs:
           --version ${{ steps.version.outputs.version }}
           --dist dist
 
+      - name: Unpack portable package for artifact
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem -Path dist -Filter 'OxideTerm_*_windows_x64_portable.zip' | Select-Object -First 1
+          if (-not $zip) { throw 'portable zip not found' }
+          $artifactRoot = Join-Path dist 'artifact'
+          if (Test-Path $artifactRoot) { Remove-Item -Recurse -Force $artifactRoot }
+          # 7z preserves the empty data/plugins directory that Expand-Archive drops.
+          & 7z x $zip.FullName "-o$artifactRoot" -y
+
       - name: Upload portable artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: OxideTerm-windows-x64-portable
-          path: dist/OxideTerm_*_windows_x64_portable.zip
+          path: dist/artifact
           if-no-files-found: error
