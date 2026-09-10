@@ -12,17 +12,67 @@ impl WorkspaceApp {
             self.sftp_view.read(cx).dialog,
             Some(SftpDialog::Editor { .. })
         ) {
-            if event.keystroke.modifiers.platform && key == "s" {
-                self.save_sftp_preview_editor(cx);
-                cx.notify();
-                return true;
+            // The capture route already releases stale query ownership when a
+            // document click moves GPUI focus to the editor; Escape arrives via
+            // the modal route, so the focus check stays authoritative here too.
+            let find_focused = self.sftp_view.read(cx).focused_input
+                == Some(SftpInput::PreviewFind)
+                && self.focus_handle.is_focused(window);
+            let plain_secondary = event.keystroke.modifiers.secondary()
+                && !event.keystroke.modifiers.shift
+                && !event.keystroke.modifiers.alt;
+            if find_focused {
+                match key {
+                    "escape" => {
+                        self.close_sftp_preview_find(window, cx);
+                        cx.notify();
+                        return true;
+                    }
+                    "enter" => {
+                        self.sftp_preview_find_select_next(event.keystroke.modifiers.shift, cx);
+                        cx.notify();
+                        return true;
+                    }
+                    "tab"
+                        if !event.keystroke.modifiers.platform
+                            && !event.keystroke.modifiers.control =>
+                    {
+                        self.close_sftp_preview_find(window, cx);
+                        cx.notify();
+                        return true;
+                    }
+                    _ => {}
+                }
+                if key == "f" && plain_secondary {
+                    return true;
+                }
+                if key == "s" && plain_secondary {
+                    self.save_sftp_preview_editor(cx);
+                    cx.notify();
+                    return true;
+                }
+            } else {
+                if key == "f" && plain_secondary {
+                    self.open_sftp_preview_find(window, cx);
+                    cx.notify();
+                    return true;
+                }
+                if key == "s" && plain_secondary {
+                    self.save_sftp_preview_editor(cx);
+                    cx.notify();
+                    return true;
+                }
+                if key == "escape" {
+                    if self.sftp_view.read(cx).preview_find_open {
+                        self.close_sftp_preview_find(window, cx);
+                    } else {
+                        self.request_close_sftp_editor(cx);
+                    }
+                    cx.notify();
+                    return true;
+                }
+                return false;
             }
-            if key == "escape" {
-                self.request_close_sftp_editor(cx);
-                cx.notify();
-                return true;
-            }
-            return false;
         }
         if key == "escape" && self.dismiss_workspace_context_menus(cx) {
             cx.notify();
@@ -131,6 +181,11 @@ impl WorkspaceApp {
             }
             if self.handle_active_text_input_transpose(&event.keystroke, cx) {
                 return true;
+            }
+            if matches!(input, SftpInput::PreviewFind) {
+                // Unmatched keys must not reach pane-level shortcuts (rename,
+                // delete, quick-look) while the find bar owns the keyboard.
+                return false;
             }
         }
         let active_pane = self.sftp_view.read(cx).active_pane;
@@ -307,7 +362,10 @@ impl WorkspaceApp {
         match input {
             SftpInput::LocalPath => self.cancel_sftp_path_edit(SftpPane::Local, cx),
             SftpInput::RemotePath => self.cancel_sftp_path_edit(SftpPane::Remote, cx),
-            SftpInput::LocalFilter | SftpInput::RemoteFilter | SftpInput::DialogValue => {
+            SftpInput::LocalFilter
+            | SftpInput::RemoteFilter
+            | SftpInput::DialogValue
+            | SftpInput::PreviewFind => {
                 self.sftp_view.update(cx, |sftp, cx| {
                     sftp.focused_input = None;
                     cx.notify();
@@ -341,7 +399,10 @@ impl WorkspaceApp {
             }
             SftpInput::LocalPath => self.refresh_sftp_local_path_completion(cx),
             SftpInput::RemotePath => self.refresh_sftp_remote_path_completion(cx),
-            SftpInput::LocalFilter | SftpInput::RemoteFilter | SftpInput::DialogValue => {}
+            SftpInput::LocalFilter
+            | SftpInput::RemoteFilter
+            | SftpInput::DialogValue
+            | SftpInput::PreviewFind => {}
         }
     }
 

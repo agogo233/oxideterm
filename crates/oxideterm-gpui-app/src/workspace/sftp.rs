@@ -127,7 +127,7 @@ const SFTP_ORANGE: u32 = 0xfb923c; // Tauri text-orange-400
 const SFTP_RED: u32 = 0xf87171; // Tauri text-red-400
 const SFTP_DESTRUCTIVE_TEXT: u32 = 0xffffff;
 const SFTP_CONTEXT_MENU_WIDTH: f32 = 180.0; // Tauri min-w-[180px]
-const SFTP_CONTEXT_MENU_MAX_HEIGHT: f32 = 288.0; // 8 items + separators, clamped like fixed portal menu
+const SFTP_CONTEXT_MENU_MAX_HEIGHT: f32 = 318.0; // 9 items + separators, clamped like fixed portal menu
 const SFTP_CONTEXT_MENU_PADDING: f32 = 4.0; // Tauri py-1
 const SFTP_CONTEXT_MENU_ITEM_HEIGHT: f32 = 30.0; // Tauri px-3 py-1.5 text-xs
 const SFTP_BUTTON_TRANSPARENT_ALPHA: u32 = 0x00; // Tauri Button border-transparent/bg-transparent
@@ -179,6 +179,7 @@ pub(super) enum SftpInput {
     LocalFilter,
     RemoteFilter,
     DialogValue,
+    PreviewFind,
 }
 
 impl SftpInput {
@@ -189,6 +190,7 @@ impl SftpInput {
             Self::LocalFilter => 3,
             Self::RemoteFilter => 4,
             Self::DialogValue => 5,
+            Self::PreviewFind => 6,
         }
     }
 }
@@ -1086,6 +1088,13 @@ pub(super) struct SftpWorkspaceEntity {
     preview_editor_last_saved_mtime: Option<u64>,
     preview_editor_last_atomic_write: Option<bool>,
     preview_editor_retry_task: Option<Task<()>>,
+    // Right-click "Edit" arms the preview load; the render pass consumes the
+    // request only after settled content is text so focus can move into the editor.
+    preview_edit_pending: bool,
+    // Editor find bar state mirrors IdeSurface's find panel for the preview editor.
+    preview_find_open: bool,
+    preview_find_query: String,
+    preview_find_case: bool,
     transfers: Vec<SftpTransferItem>,
     transfer_queue_list_state: ListState,
     transfer_queue_list_cache: RefCell<VirtualListSignatureCache>,
@@ -1205,6 +1214,10 @@ impl Default for SftpWorkspaceEntity {
             preview_editor_last_saved_mtime: None,
             preview_editor_last_atomic_write: None,
             preview_editor_retry_task: None,
+            preview_edit_pending: false,
+            preview_find_open: false,
+            preview_find_query: String::new(),
+            preview_find_case: false,
             transfers: Vec::new(),
             // Transfer queues are fixed-height browser scroll regions; use the
             // shared variable list state so large transfer batches do not build
@@ -1331,6 +1344,7 @@ impl SftpWorkspaceEntity {
             SftpInput::LocalFilter => &self.local_filter,
             SftpInput::RemoteFilter => &self.remote_filter,
             SftpInput::DialogValue => &self.dialog_value,
+            SftpInput::PreviewFind => &self.preview_find_query,
         }
     }
 
@@ -1341,6 +1355,7 @@ impl SftpWorkspaceEntity {
             SftpInput::LocalFilter => &mut self.local_filter,
             SftpInput::RemoteFilter => &mut self.remote_filter,
             SftpInput::DialogValue => &mut self.dialog_value,
+            SftpInput::PreviewFind => &mut self.preview_find_query,
         }
     }
 
@@ -1464,6 +1479,58 @@ impl SftpWorkspaceEntity {
         self.preview_editor_last_saved_mtime = None;
         self.preview_editor_last_atomic_write = None;
         self.preview_editor_retry_task = None;
+        self.close_preview_find();
+        self.preview_edit_pending = false;
+    }
+
+    // The find bar only exists inside the editor shell, so both shell exits clear
+    // it before the next preview or editor session reuses the same fields.
+    fn close_preview_find(&mut self) {
+        self.preview_find_query.clear();
+        self.preview_find_open = false;
+        self.preview_find_case = false;
+    }
+
+    // Releases keyboard ownership and the query state. Callers clear the editor
+    // highlight outside this entity borrow so observer callbacks cannot re-enter.
+    pub(in crate::workspace::sftp) fn release_preview_find(&mut self) {
+        if matches!(self.focused_input, Some(SftpInput::PreviewFind)) {
+            self.focused_input = None;
+        }
+        self.close_preview_find();
+    }
+
+    pub(in crate::workspace::sftp) fn arm_preview_edit(&mut self) {
+        self.preview_edit_pending = true;
+    }
+
+    // The preview load settles asynchronously, so the render pass consumes the
+    // armed request only after content is text and hands the file name to the editor.
+    // The flag is always consumed so a dialog transition cannot re-arm scheduling.
+    pub(in crate::workspace) fn take_preview_edit_request(&mut self) -> Option<String> {
+        if !self.preview_edit_pending {
+            return None;
+        }
+        self.preview_edit_pending = false;
+        if !matches!(self.dialog, Some(SftpDialog::Preview { .. })) {
+            return None;
+        }
+        let Some(path) = self.preview_path.clone() else {
+            return None;
+        };
+        if !matches!(
+            self.preview_content.as_deref(),
+            Some(PreviewContent::Text { .. })
+        ) {
+            return None;
+        }
+        let name = sftp_file_name(&path);
+        (!name.is_empty()).then_some(name)
+    }
+
+    // Loading keeps the request armed so the editor opens on the real preview result.
+    pub(in crate::workspace) fn preview_edit_request_pending(&self) -> bool {
+        self.preview_edit_pending && !self.preview_loading
     }
 
     pub(in crate::workspace::sftp) fn stop_preview_media(&mut self) {
@@ -1846,6 +1913,54 @@ mod entity_delivery_tests {
         cx.update(|_cx| {});
         assert!(wake.is_stopped());
     }
+
+    #[test]
+    fn preview_edit_request_opens_only_for_settled_text_preview() {
+        let mut sftp = SftpWorkspaceEntity::default();
+        sftp.dialog = Some(SftpDialog::Preview {
+            name: "config.yaml".to_string(),
+        });
+        sftp.preview_path = Some("/remote/config.yaml".to_string());
+        sftp.arm_preview_edit();
+        sftp.preview_loading = true;
+        assert!(!sftp.preview_edit_request_pending());
+
+        sftp.preview_loading = false;
+        assert!(sftp.preview_edit_request_pending());
+        assert_eq!(sftp.take_preview_edit_request(), None);
+        assert!(!sftp.preview_edit_request_pending());
+
+        sftp.arm_preview_edit();
+        sftp.preview_content = Some(Arc::new(PreviewContent::Text {
+            data: "key: value".to_string(),
+            mime_type: Some("application/yaml".to_string()),
+            language: Some("yaml".to_string()),
+            encoding: "UTF-8".to_string(),
+            confidence: 1.0,
+            has_bom: false,
+        }));
+        assert_eq!(
+            sftp.take_preview_edit_request().as_deref(),
+            Some("config.yaml")
+        );
+        assert_eq!(sftp.take_preview_edit_request(), None);
+    }
+
+    #[test]
+    fn preview_reset_clears_find_bar_and_pending_edit() {
+        let mut sftp = SftpWorkspaceEntity::default();
+        sftp.preview_find_open = true;
+        sftp.preview_find_query = "needle".to_string();
+        sftp.preview_find_case = true;
+        sftp.arm_preview_edit();
+
+        sftp.reset_preview_editor();
+
+        assert!(!sftp.preview_find_open);
+        assert!(sftp.preview_find_query.is_empty());
+        assert!(!sftp.preview_find_case);
+        assert!(!sftp.preview_edit_request_pending());
+    }
 }
 
 // Keep each SFTP responsibility in a real module while preserving this file as the facade.
@@ -1871,8 +1986,8 @@ use helpers::{
     normalize_external_dropped_path, normalize_remote_path, parent_path, preview_content_text,
     refreshed_local_files, remote_directory_prefixes, save_remote_sftp_preview, sftp_bg,
     sftp_border, sftp_card_surface, sftp_conflict_resolution_from_settings, sftp_diff_visual_lines,
-    sftp_editor_language, sftp_editor_language_id, sftp_file_name, sftp_hover_bg, sftp_panel_bg,
-    sftp_path_segments, sftp_preview_editor_is_network_error, sftp_preview_is_markdown,
-    sftp_source_not_newer_than_target, sftp_transfer_conflicts,
+    sftp_editor_language, sftp_editor_language_id, sftp_file_is_editable_text, sftp_file_name,
+    sftp_hover_bg, sftp_panel_bg, sftp_path_segments, sftp_preview_editor_is_network_error,
+    sftp_preview_is_markdown, sftp_source_not_newer_than_target, sftp_transfer_conflicts,
     sftp_transfer_state_from_background, sorted_sftp_files, unique_sftp_conflict_name,
 };

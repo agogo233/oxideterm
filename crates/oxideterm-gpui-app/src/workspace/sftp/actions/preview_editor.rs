@@ -45,6 +45,21 @@ impl WorkspaceApp {
         }
     }
 
+    // The preview load is asynchronous, so the menu arms the request and the
+    // render pass hands focus to the editor once text content settles.
+    pub(in crate::workspace::sftp) fn open_sftp_file_for_edit(
+        &mut self,
+        pane: SftpPane,
+        file: &SftpFileEntry,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_or_preview_sftp_file(pane, file, cx);
+        self.sftp_view.update(cx, |sftp, cx| {
+            sftp.arm_preview_edit();
+            cx.notify();
+        });
+    }
+
     pub(in crate::workspace::sftp) fn can_compare_sftp_preview(
         &self,
         name: &str,
@@ -194,6 +209,132 @@ impl WorkspaceApp {
         window.focus(&focus_handle, cx);
     }
 
+    // The render pass is the first place holding both a window and the settled
+    // preview result, so the editor transition is deferred out of the render commit.
+    pub(in crate::workspace) fn schedule_pending_sftp_preview_edit(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.defer_in(window, |this, window, cx| {
+            let Some(name) = this
+                .sftp_view
+                .update(cx, |sftp, _cx| sftp.take_preview_edit_request())
+            else {
+                return;
+            };
+            this.open_sftp_preview_editor(&name, window, cx);
+        });
+    }
+
+    pub(in crate::workspace::sftp) fn open_sftp_preview_find(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.sftp_view.read(cx).preview_editor.is_none() {
+            return;
+        }
+        self.sftp_view.update(cx, |sftp, cx| {
+            sftp.preview_find_open = true;
+            sftp.focused_input = Some(SftpInput::PreviewFind);
+            cx.notify();
+        });
+        self.sync_sftp_preview_find_query(cx);
+        // The document keeps its caret; typed characters must reach the query.
+        window.focus(&self.focus_handle, cx);
+    }
+
+    pub(in crate::workspace::sftp) fn close_sftp_preview_find(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(editor) = self.sftp_view.update(cx, |sftp, _cx| {
+            sftp.release_preview_find();
+            sftp.preview_editor.clone()
+        }) else {
+            return;
+        };
+        editor.update(cx, |editor, cx| editor.set_find_query("", cx));
+        self.ime_marked_text = None;
+        self.clear_ime_selection();
+        let focus_handle = editor.read(cx).focus_handle(cx);
+        window.focus(&focus_handle, cx);
+        cx.notify();
+    }
+
+    pub(in crate::workspace::sftp) fn toggle_sftp_preview_find_case(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) {
+        self.sftp_view.update(cx, |sftp, cx| {
+            sftp.preview_find_case = !sftp.preview_find_case;
+            cx.notify();
+        });
+        self.sync_sftp_preview_find_query(cx);
+    }
+
+    pub(in crate::workspace::sftp) fn sftp_preview_find_select_next(
+        &mut self,
+        previous: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(editor) = self.sftp_view.read(cx).preview_editor.clone() else {
+            return;
+        };
+        editor.update(cx, |editor, cx| {
+            if previous {
+                editor.select_previous_find_match(cx);
+            } else {
+                editor.select_next_find_match(cx);
+            }
+        });
+    }
+
+    // The query lives in the shared SFTP input model, so every mutation route
+    // funnels the editor's find state through this one sync point.
+    pub(in crate::workspace) fn sync_sftp_preview_find_query(&mut self, cx: &mut Context<Self>) {
+        let Some(editor) = self.sftp_view.read(cx).preview_editor.clone() else {
+            return;
+        };
+        let (query, case_sensitive) = {
+            let sftp = self.sftp_view.read(cx);
+            (
+                sftp.input_value(SftpInput::PreviewFind).to_string(),
+                sftp.preview_find_case,
+            )
+        };
+        editor.update(cx, |editor, cx| {
+            if editor.find_query() != query.as_str() {
+                editor.set_find_query(query.clone(), cx);
+            }
+            editor.set_find_case_sensitive(case_sensitive, cx);
+        });
+    }
+
+    // Runs before the editor modal route yields document keys: it releases the
+    // stale query marker when a document click already moved GPUI focus, and
+    // otherwise defers printable/composition keys to the shared text pipeline.
+    pub(in crate::workspace) fn normalize_sftp_preview_find_ownership(
+        &mut self,
+        keystroke: &gpui::Keystroke,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.sftp_view.read(cx).focused_input != Some(SftpInput::PreviewFind) {
+            return false;
+        }
+        if !self.focus_handle.is_focused(window) {
+            self.sftp_view.update(cx, |sftp, cx| {
+                sftp.focused_input = None;
+                cx.notify();
+            });
+            return false;
+        }
+        self.defer_active_ime_key(keystroke, window, cx)
+    }
+
     pub(in crate::workspace::sftp) fn save_sftp_preview_editor(&mut self, cx: &mut Context<Self>) {
         let Some(editor) = ({
             let sftp = self.sftp_view.read(cx);
@@ -229,10 +370,17 @@ impl WorkspaceApp {
             (name, sftp.preview_editor_dirty)
         };
         if dirty {
-            self.sftp_view.update(cx, |sftp, cx| {
+            let editor = self.sftp_view.update(cx, |sftp, cx| {
+                // The confirmation shell has no find input; leaving ownership on
+                // the query would swallow Enter/Escape and route text invisibly.
+                sftp.release_preview_find();
                 sftp.set_dialog(SftpDialog::EditorCloseConfirm { name });
                 cx.notify();
+                sftp.preview_editor.clone()
             });
+            if let Some(editor) = editor {
+                editor.update(cx, |editor, cx| editor.set_find_query("", cx));
+            }
         } else {
             self.close_sftp_dialog(cx);
         }

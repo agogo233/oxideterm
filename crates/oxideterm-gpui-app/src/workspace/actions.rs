@@ -814,10 +814,13 @@ impl WorkspaceApp {
         }
 
         if self.sftp_view.read(cx).focused_input().is_some()
+            || self.sftp_view.read(cx).dialog_is_open()
             || self
                 .active_tab(cx)
                 .is_some_and(|tab| tab.kind == TabKind::Sftp)
         {
+            // Embedded SFTP inputs and window-root dialogs keep their keyboard
+            // model while a terminal tab is active.
             let _ = self.handle_sftp_key(event, window, cx);
             return;
         }

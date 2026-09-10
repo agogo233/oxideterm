@@ -99,6 +99,11 @@ impl WorkspaceApp {
             }
             _ => {}
         }
+        if self.sftp_view.read(cx).preview_edit_request_pending() {
+            // Right-click "Edit" arms the preview load here; the sidebar and
+            // SFTP-tab dialogs both settle into the same editor transition.
+            self.schedule_pending_sftp_preview_edit(window, cx);
+        }
         if *tab_kind != TabKind::Sftp
             && !self.sidebar_collapsed
             && self.effective_sidebar_panel_section() == SidebarSection::Sessions
@@ -320,6 +325,16 @@ impl WorkspaceApp {
                 if this.capture_active_window_modal_key(event, window, cx) {
                     window.prevent_default();
                     cx.stop_propagation();
+                    return;
+                }
+                // The find bar is a workspace text input rather than editor
+                // content, so its printable and composition keys must enter the
+                // shared platform-text pipeline before the editor owns the key.
+                if this.normalize_sftp_preview_find_ownership(
+                    &event.keystroke,
+                    window,
+                    cx,
+                ) {
                     return;
                 }
                 if this.active_sftp_editor_owns_key(event.keystroke.key.as_str(), cx) {

@@ -3034,6 +3034,9 @@ impl WorkspaceApp {
                     if matches!(input, SftpInput::LocalPath | SftpInput::RemotePath) {
                         self.refresh_sftp_path_completion(input, cx);
                     }
+                    if matches!(input, SftpInput::PreviewFind) {
+                        self.sync_sftp_preview_find_query(cx);
+                    }
                     self.show_active_input_caret(cx);
                     cx.notify();
                 }

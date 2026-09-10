@@ -66,5 +66,5 @@ pub use transfer_manager::{
 pub use types::{
     AssetFileKind, FileInfo, FileType, ListFilter, LocalDownloadDisposition, PreviewContent,
     RemoteRelayDisposition, SortOrder, TransferDirection, TransferProgress, TransferState,
-    encode_to_encoding,
+    encode_to_encoding, is_text_extension,
 };

@@ -73,6 +73,7 @@ impl WorkspaceApp {
             } else {
                 let can_extract =
                     selected_count == 1 && sftp_extract_archive_kind(&file.name).is_some();
+                let can_edit = selected_count == 1 && sftp_file_is_editable_text(&file.name);
                 menu_el
                     .child(self.render_sftp_context_menu_guarded_item(
                         LucideIcon::Eye,
@@ -89,6 +90,23 @@ impl WorkspaceApp {
                         },
                         cx,
                     ))
+                    .when(can_edit, |menu_el| {
+                        menu_el.child(self.render_sftp_context_menu_guarded_item(
+                            LucideIcon::FileCode,
+                            self.i18n.t("sftp.context.edit"),
+                            false,
+                            false,
+                            pane_loading,
+                            has_background,
+                            {
+                                let file = file.clone();
+                                move |this, _event, _window, cx| {
+                                    this.open_sftp_file_for_edit(menu.pane, &file, cx);
+                                }
+                            },
+                            cx,
+                        ))
+                    })
                     .when(can_extract, |menu_el| {
                         menu_el.child(self.render_sftp_context_menu_guarded_item(
                             LucideIcon::FolderArchive,

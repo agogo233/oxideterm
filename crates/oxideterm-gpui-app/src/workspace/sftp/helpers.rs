@@ -853,6 +853,18 @@ pub(in crate::workspace::sftp) fn sftp_file_name(path: &str) -> String {
         .to_string()
 }
 
+// Mirrors the preview text rule (text extension, plus extension-less dotfiles)
+// so right-click "Edit" only appears where the preview is editable.
+pub(in crate::workspace::sftp) fn sftp_file_is_editable_text(file_name: &str) -> bool {
+    let extension = Path::new(file_name)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    oxideterm_sftp::is_text_extension(&extension)
+        || (file_name.starts_with('.') && extension.is_empty())
+}
+
 pub(in crate::workspace::sftp) fn format_sftp_media_time(duration: std::time::Duration) -> String {
     let total = duration.as_secs();
     let minutes = total / 60;
@@ -947,5 +959,17 @@ mod sftp_helper_tests {
         );
         assert_eq!(parent_path(r"D:\Projects\OxideTerm", false), r"D:\Projects");
         assert_eq!(parent_path(r"D:\", false), r"D:\");
+    }
+
+    #[test]
+    fn editable_text_rule_mirrors_preview_classification() {
+        assert!(sftp_file_is_editable_text("server.conf"));
+        assert!(sftp_file_is_editable_text("NOTES.TXT"));
+        assert!(sftp_file_is_editable_text(".bashrc"));
+        assert!(!sftp_file_is_editable_text("photo.png"));
+        assert!(!sftp_file_is_editable_text("archive.tar.gz"));
+        // Dockerfile-style names only settle as text after content sniffing,
+        // which the extension-only menu rule cannot see.
+        assert!(!sftp_file_is_editable_text("Dockerfile"));
     }
 }
