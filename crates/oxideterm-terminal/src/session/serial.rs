@@ -1,21 +1,21 @@
 const SERIAL_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(50);
 const SERIAL_HEXDUMP_WIDTH: usize = 16;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum SerialParity {
     None,
     Odd,
     Even,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum SerialFlowControl {
     None,
     Software,
     Hardware,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SerialSessionConfig {
     pub port_path: String,
     pub baud_rate: u32,
@@ -1004,6 +1004,14 @@ impl TerminalSessionBackend for SerialSession {
             self.term.clone(),
             self.resize.cols,
         ))
+    }
+
+    fn set_selection(&self, selection: Option<crate::TerminalSelectionRange>) {
+        crate::selection::set_term_selection(&mut self.term.lock(), selection);
+    }
+
+    fn selection(&self) -> Option<crate::TerminalSelectionRange> {
+        crate::selection::term_selection(&self.term.lock())
     }
 
     fn clear_buffer(&mut self) {

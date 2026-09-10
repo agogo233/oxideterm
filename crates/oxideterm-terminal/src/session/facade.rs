@@ -5,7 +5,7 @@ pub struct TerminalSession {
     kitty_file_transmission: Option<KittyFileTransmissionControl>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TelnetSessionConfig {
     pub host: String,
     pub port: u16,
@@ -531,6 +531,14 @@ impl TerminalSession {
         self.backend.search_source()
     }
 
+    pub fn set_selection(&self, selection: Option<crate::TerminalSelectionRange>) {
+        self.backend.set_selection(selection);
+    }
+
+    pub fn selection(&self) -> Option<crate::TerminalSelectionRange> {
+        self.backend.selection()
+    }
+
     pub fn clear_buffer(&mut self) {
         self.backend.clear_buffer();
     }
@@ -549,6 +557,14 @@ impl TerminalSession {
 
     pub fn snapshot_incremental(&self, previous: &TerminalSnapshot) -> TerminalSnapshot {
         self.backend.snapshot_incremental(previous)
+    }
+
+    pub fn try_render_snapshot(
+        &self,
+        previous: &TerminalSnapshot,
+        allow_defer: bool,
+    ) -> Option<(TerminalSnapshot, Option<crate::TerminalSelectionRange>, TermMode)> {
+        self.backend.try_render_snapshot(previous, allow_defer)
     }
 
     pub fn snapshot_with_display_offset(
