@@ -499,6 +499,9 @@ pub struct TerminalPane {
     horizontal_scroll_offset_px: Pixels,
     horizontal_scrollbar_drag: Option<HorizontalScrollbarDrag>,
     tmux_separator_drag: Option<TmuxSeparatorDrag>,
+    pending_tmux_mouse: std::collections::VecDeque<interactions::DeferredTmuxMouse>,
+    tmux_selection_pending: bool,
+    completed_tmux_selection: Option<bool>,
     selection_autoscroll_position: Option<Point<Pixels>>,
     selection_autoscroll_scheduled: bool,
     copy_on_select_generation: u64,
@@ -1034,7 +1037,8 @@ impl TerminalPane {
                         this.tick(cx);
                         let listen_for_backend = backend_activity_enabled
                             && !backend_activity_closed
-                            && !this.terminal_exited
+                            && (!this.terminal_exited
+                                || this.session_kind == TerminalSessionKind::SshPty)
                             && !this.last_drain_budget_exhausted;
                         (
                             this.next_maintenance_interval(),
@@ -1170,6 +1174,9 @@ impl TerminalPane {
             horizontal_scroll_offset_px: px(0.0),
             horizontal_scrollbar_drag: None,
             tmux_separator_drag: None,
+            pending_tmux_mouse: Default::default(),
+            tmux_selection_pending: false,
+            completed_tmux_selection: None,
             selection_autoscroll_position: None,
             selection_autoscroll_scheduled: false,
             copy_on_select_generation: 0,
@@ -1559,7 +1566,8 @@ impl TerminalPane {
             .lines
             .get(self.snapshot.cursor_row)
             .is_some_and(|row| row.active_input);
-        if !self.autosuggest_prompt_active
+        if !self.preferences.autosuggest_enabled
+            || !self.autosuggest_prompt_active
             || self.marked_text.is_some()
             || self.tmux_prompt.is_some()
             || self.pending_paste.is_some()
@@ -1719,6 +1727,10 @@ impl TerminalPane {
     pub fn set_preferences(&mut self, preferences: TerminalUiPreferences, cx: &mut Context<Self>) {
         let mut preferences = preferences;
         self.preference_overrides.apply_to(&mut preferences);
+        if self.preferences.autosuggest_enabled != preferences.autosuggest_enabled {
+            self.autosuggest_selected_index = None;
+            self.autosuggest_dismissed_query = None;
+        }
         if preferences.session_log_options.is_none() && self.session_log.is_some() {
             // An explicit connection-level disable takes effect immediately for an active pane.
             let _ = self.stop_session_log(cx);
@@ -3171,13 +3183,31 @@ impl TerminalPane {
                 self.reset_cursor_blink();
                 TerminalEventEffect::notify()
             }
+            TerminalEvent::TmuxPaneSelected { selected } => {
+                self.finish_tmux_mouse_selection(selected, cx);
+                TerminalEventEffect::notify()
+            }
+            TerminalEvent::ProcessingFailed => {
+                self.cancel_pending_tmux_mouse();
+                self.notify_trzsz_connection_lost_if_active();
+                self.notify_modem_connection_lost_if_active();
+                self.terminal_exited = true;
+                self.emit_trzsz_notice(
+                    self.preferences.processing_failed_message.clone(),
+                    None,
+                    TerminalNoticeVariant::Error,
+                );
+                TerminalEventEffect::notify()
+            }
             TerminalEvent::StartupFailed => {
+                self.cancel_pending_tmux_mouse();
                 self.notify_trzsz_connection_lost_if_active();
                 self.notify_modem_connection_lost_if_active();
                 self.terminal_exited = true;
                 TerminalEventEffect::notify()
             }
             TerminalEvent::ChildExited(code) => {
+                self.cancel_pending_tmux_mouse();
                 self.notify_trzsz_connection_lost_if_active();
                 self.notify_modem_connection_lost_if_active();
                 let should_emit_exit = !self.terminal_exited;
@@ -3208,6 +3238,10 @@ impl TerminalPane {
                     },
                     cx,
                 );
+                TerminalEventEffect::notify()
+            }
+            TerminalEvent::ModemTransferStartFailed => {
+                self.manual_modem_transfer_failed(cx);
                 TerminalEventEffect::notify()
             }
             TerminalEvent::ModemTransferPrompt { request, transfer } => {
@@ -4396,6 +4430,24 @@ mod tests {
                 ["docker ps"]
             );
 
+            let mut preferences = pane.preferences.clone();
+            preferences.autosuggest_enabled = false;
+            pane.set_preferences(preferences.clone(), cx);
+            assert!(
+                pane.terminal_autosuggest_candidates().is_empty(),
+                "disabled suggestions remained visible"
+            );
+            preferences.autosuggest_enabled = true;
+            pane.set_preferences(preferences, cx);
+            assert_eq!(
+                pane.terminal_autosuggest_candidates()
+                    .into_iter()
+                    .map(|candidate| candidate.command)
+                    .collect::<Vec<_>>(),
+                ["docker ps"],
+                "toggling suggestions must preserve the draft and history"
+            );
+
             pane.observe_autosuggest_input_bytes(b"\r", cx);
             assert!(!pane.autosuggest_prompt_active);
             assert!(pane.terminal_autosuggest_candidates().is_empty());
@@ -4717,3 +4769,7 @@ mod tests {
         });
     }
 }
+
+#[cfg(test)]
+#[path = "app/ssh_worker_tests.rs"]
+mod ssh_worker_tests;

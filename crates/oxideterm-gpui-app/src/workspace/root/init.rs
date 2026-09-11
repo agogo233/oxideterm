@@ -1121,6 +1121,7 @@ impl WorkspaceApp {
             session_log_settings.directory.as_deref(),
         );
         TerminalUiPreferences {
+            processing_failed_message: self.i18n.t("terminal.processing_failed"),
             font_family: terminal
                 .font_family
                 .terminal_family_name(&terminal.custom_font_family),
@@ -1157,6 +1158,7 @@ impl WorkspaceApp {
             semantic_shell: SemanticShellDialect::Auto,
             selection_requires_shift: terminal.selection_requires_shift,
             free_type_mode: terminal.free_type_mode,
+            autosuggest_enabled: terminal.autosuggest.enabled,
             backspace_sequence: terminal.backspace_sequence,
             delete_sequence: terminal.delete_sequence,
             bidi_enabled: terminal.unicode.bidi_enabled,

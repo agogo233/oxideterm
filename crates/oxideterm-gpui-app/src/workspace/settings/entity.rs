@@ -262,7 +262,7 @@ pub(in crate::workspace) enum KeybindingRecordingKeyAction {
     Handled,
 }
 
-/// Transfers the completed recording into the persistence/window adapter without cloning it.
+/// Transfers the completed recording into the persistence/keymap adapter without cloning it.
 pub(in crate::workspace) struct KeybindingRecordingCommit {
     pub(in crate::workspace) action_id: String,
     pub(in crate::workspace) combo: crate::keybindings::KeyCombo,
@@ -273,7 +273,6 @@ pub(in crate::workspace) enum KeybindingFileOperationResult {
     ExportFailed,
     Imported {
         overrides: serde_json::Map<String, serde_json::Value>,
-        target_window: gpui::AnyWindowHandle,
     },
     ImportFailed,
 }
@@ -404,6 +403,7 @@ pub(in crate::workspace) struct SettingsWorkspaceEntity {
     pub(super) managed_key_dialog_presence: oxideterm_gpui_ui::motion::ExitPresence,
     pub(super) managed_key_dialog_exit_task: Option<Task<()>>,
     pub(super) managed_key_file_picker_task: Option<Task<()>>,
+    pub(super) expanded_mcp_client: Option<String>,
     pub(super) network_proxy_password: Zeroizing<String>,
     pub(super) network_proxy_password_status: Option<String>,
     pub(super) network_proxy_test_host: String,
@@ -540,6 +540,7 @@ impl SettingsWorkspaceEntity {
             managed_key_dialog_presence: oxideterm_gpui_ui::motion::ExitPresence::visible(),
             managed_key_dialog_exit_task: None,
             managed_key_file_picker_task: None,
+            expanded_mcp_client: None,
             network_proxy_password: Zeroizing::new(String::new()),
             network_proxy_password_status: None,
             network_proxy_test_host: String::new(),
@@ -1853,7 +1854,6 @@ impl SettingsWorkspaceEntity {
         &mut self,
         selection: impl std::future::Future<Output = Option<PathBuf>> + 'static,
         runtime: tokio::runtime::Handle,
-        target_window: gpui::AnyWindowHandle,
         cx: &mut Context<Self>,
     ) -> u64 {
         let generation = self.replace_keybinding_file_operation();
@@ -1878,10 +1878,7 @@ impl SettingsWorkspaceEntity {
                 .await
                 .map_err(|_| ())
                 .and_then(|result| result)
-                .map(|overrides| KeybindingFileOperationResult::Imported {
-                    overrides,
-                    target_window,
-                })
+                .map(|overrides| KeybindingFileOperationResult::Imported { overrides })
                 .unwrap_or(KeybindingFileOperationResult::ImportFailed);
             let _ = settings.update(cx, |settings, cx| {
                 settings.finish_keybinding_file_operation(generation, Some(result), cx);
