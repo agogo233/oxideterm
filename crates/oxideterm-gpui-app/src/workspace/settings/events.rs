@@ -222,7 +222,7 @@ impl WorkspaceApp {
                                 },
                                 cx,
                             );
-                            self.apply_runtime_key_bindings(runtime_bindings, cx);
+                            Self::apply_runtime_key_bindings(runtime_bindings, cx);
                             self.push_ai_settings_toast(
                                 self.i18n.t("settings_view.keybindings.import_success"),
                                 TerminalNoticeVariant::Success,
