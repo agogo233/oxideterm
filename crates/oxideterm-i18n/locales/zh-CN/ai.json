@@ -29,8 +29,6 @@
       "communication": "主子通信",
       "received": "已接收",
       "consumed": "已消费",
-      "remote_unknown": "代理已停止，尚未确认远端命令是否结束。",
-      "return_control": "将终端控制权交还 AI",
       "usage_unknown": "Token 用量未知",
       "message_not_sent": "无法发送补充说明。",
       "supplement": "补充说明",
@@ -79,6 +77,14 @@
       "load_failed_generic": "OxideSens 无法从本地数据库加载聊天记录。",
       "database_locked": "另一个 OxideTerm 实例正在使用聊天数据库。请关闭另一个实例后重试。",
       "database_upgrade_required": "此聊天数据库需要更新版本的迁移路径，无法安全打开。",
+      "conversations": "对话",
+      "archive_conversation": "归档对话",
+      "restore_conversation": "恢复对话",
+      "archived_conversations": "已归档对话",
+      "show_active": "返回对话列表",
+      "no_archived_conversations": "暂无已归档对话",
+      "list_more": "加载更多对话",
+      "list_retry": "加载失败，重试",
       "no_conversations": "暂无对话",
       "start_conversation": "开始对话",
       "start_conversation_hint": "询问关于 Shell 命令、脚本或终端操作的问题。",
@@ -351,7 +357,8 @@
         "manage_telnet_session": "管理 Telnet 会话",
         "open_transport_profile": "打开传输配置",
         "read_skill_resource": "读取技能资源",
-        "wait_terminal_output": "等待终端输出"
+        "wait_terminal_output": "等待终端输出",
+        "ask_user": "向用户提问"
       },
       "risk_labels": {
         "read": "只读",
@@ -544,6 +551,21 @@
       "draft_not_empty": "请先发送或清空当前草稿，再编辑排队消息。",
       "steer_unavailable": "当前轮暂时无法接收调整方向的消息，内容已保留。",
       "client_command_busy": "请等当前任务结束后再使用此命令。"
+    },
+    "questions": {
+      "waiting": "等待你的回答",
+      "answer": "发送回答",
+      "hint": "选择一个选项，或在下方输入框中回答。收到回答后任务将继续。"
+    },
+    "history": {
+      "loading": "正在加载聊天历史…",
+      "unsaved": "有内容尚未保存，新的请求和工具调用已暂停。",
+      "quit_title": "聊天历史尚未保存完成",
+      "quit_detail": "可以重试保存、取消退出，或退出并放弃尚未保存的内容。",
+      "cancel_quit": "取消退出",
+      "discard_quit": "放弃未保存内容并退出",
+      "older": "更早的消息",
+      "newer": "较新的消息"
     }
   }
 }

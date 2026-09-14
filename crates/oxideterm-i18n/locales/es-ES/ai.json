@@ -29,8 +29,6 @@
       "communication": "Comunicación entre agentes",
       "received": "Recibido",
       "consumed": "Procesado",
-      "remote_unknown": "El agente se ha detenido. No se ha confirmado el fin del comando remoto.",
-      "return_control": "Devolver el control del terminal a la IA",
       "usage_unknown": "Uso de tokens desconocido",
       "message_not_sent": "No se pudieron enviar las instrucciones adicionales.",
       "supplement": "Instrucciones adicionales",
@@ -79,6 +77,14 @@
       "load_failed_generic": "OxideSens no pudo cargar el historial del chat desde la base de datos local.",
       "database_locked": "Otra instancia de OxideTerm está usando la base de datos del chat. Cierre la otra instancia y vuelva a intentarlo.",
       "database_upgrade_required": "Esta base de datos del chat requiere una ruta de migración más reciente y no se pudo abrir de forma segura.",
+      "conversations": "Conversaciones",
+      "archive_conversation": "Archivar conversación",
+      "restore_conversation": "Restaurar conversación",
+      "archived_conversations": "Conversaciones archivadas",
+      "show_active": "Volver a conversaciones",
+      "no_archived_conversations": "No hay conversaciones archivadas",
+      "list_more": "Cargar más conversaciones",
+      "list_retry": "Error al cargar. Reintentar",
       "no_conversations": "Aún no hay conversaciones",
       "start_conversation": "Iniciar una conversación",
       "start_conversation_hint": "Haga preguntas sobre comandos de shell, scripts u operaciones de terminal.",
@@ -351,7 +357,8 @@
         "manage_telnet_session": "Gestionar sesión Telnet",
         "open_transport_profile": "Abrir perfil de transporte",
         "read_skill_resource": "Leer recurso de habilidad",
-        "wait_terminal_output": "Esperar salida del terminal"
+        "wait_terminal_output": "Esperar salida del terminal",
+        "ask_user": "Preguntar al usuario"
       },
       "risk_labels": {
         "read": "Lectura",
@@ -544,6 +551,21 @@
       "draft_not_empty": "Envía o borra el borrador actual antes de editar un mensaje en cola.",
       "steer_unavailable": "Este turno no puede aceptar cambios de dirección ahora. El mensaje se ha conservado.",
       "client_command_busy": "Espera a que termine la tarea actual para usar este comando."
+    },
+    "questions": {
+      "waiting": "Esperando tu respuesta",
+      "answer": "Enviar respuesta",
+      "hint": "Elige una opción o escribe tu respuesta abajo. La tarea continuará cuando respondas."
+    },
+    "history": {
+      "loading": "Cargando el historial…",
+      "unsaved": "Hay cambios sin guardar. Las nuevas solicitudes y llamadas a herramientas están en pausa.",
+      "quit_title": "El historial aún no se ha guardado por completo",
+      "quit_detail": "Reintenta guardar, cancela la salida o sal descartando solo los cambios sin guardar.",
+      "cancel_quit": "Cancelar salida",
+      "discard_quit": "Salir sin guardar",
+      "older": "Mensajes anteriores",
+      "newer": "Mensajes posteriores"
     }
   }
 }

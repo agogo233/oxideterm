@@ -218,7 +218,7 @@ async fn waiting_releases_capacity_and_model_stays_locked_until_followup() {
 }
 
 #[tokio::test]
-async fn terminal_response_and_interactive_input_do_not_release_running_command() {
+async fn tool_response_releases_request_ownership_without_a_remote_exit_event() {
     let runtime = AgentRuntime::new(2);
     let parent = group(&runtime);
     let first = child(&runtime, &parent);
@@ -234,30 +234,30 @@ async fn terminal_response_and_interactive_input_do_not_release_running_command(
         .unwrap();
     let command = AgentToolLease::new(resources.clone(), lease.clone());
     command.dispatched();
-    command.monitor_command();
-    command.finish_response(true);
-    drop(AgentToolResponse(vec![command.clone()]));
-    assert!(resources.owns(&lease));
-    drop(AgentToolLease::borrow_command(
-        resources.clone(),
-        lease.clone(),
-    ));
-    assert!(resources.owns(&lease));
-    let input = AgentToolLease::borrow_command(
-        resources.clone(),
-        resources.owned_by(&key, &first).unwrap(),
-    );
+    let input = AgentToolLease::borrow_command(resources.clone(), lease.clone());
     input.dispatched();
     input.finish_response(true);
-    drop(AgentToolResponse(vec![input]));
     assert!(resources.owns(&lease));
+    command.finish_response(true);
+    let next = resources
+        .acquire(
+            key.clone(),
+            first.clone(),
+            runtime.cancellation(&first).unwrap(),
+        )
+        .await
+        .unwrap();
     command.command_finished();
-    assert!(!resources.has_owner(&key));
-    assert!(!resources.is_blocked(&key));
+    drop(AgentToolResponse(vec![command]));
+    assert!(
+        resources.owns(&next),
+        "late completion must not release a newer request"
+    );
+    assert!(resources.complete(&next));
 }
 
 #[tokio::test]
-async fn dropped_mutation_blocks_reuse_but_undispatched_work_does_not() {
+async fn dropped_requests_allow_fresh_requests_without_manual_handback() {
     let runtime = AgentRuntime::new(1);
     let parent = group(&runtime);
     let resources = AgentResourceCoordinator::default();
@@ -282,12 +282,12 @@ async fn dropped_mutation_blocks_reuse_but_undispatched_work_does_not() {
     let tool = AgentToolLease::new(resources.clone(), lease);
     tool.dispatched();
     drop(AgentToolResponse(vec![tool]));
-    assert!(matches!(
-        resources
-            .acquire(key, parent.clone(), runtime.cancellation(&parent).unwrap())
-            .await,
-        Err(AgentError::ResourceUnresolved)
-    ));
+    let next = resources
+        .acquire(key, parent.clone(), runtime.cancellation(&parent).unwrap())
+        .await
+        .unwrap();
+    assert!(resources.owns(&next));
+    assert!(resources.complete(&next));
 }
 
 #[tokio::test]
@@ -405,17 +405,6 @@ async fn resource_timeout_retains_ownership_and_takeover_rejects_late_completion
     );
     assert!(resources.owns(&lease));
     assert_eq!(resources.invalidate(&resource), Some(first));
-    assert!(matches!(
-        resources
-            .acquire(
-                resource.clone(),
-                second.clone(),
-                runtime.cancellation(&second).unwrap()
-            )
-            .await,
-        Err(AgentError::ResourceUnresolved)
-    ));
-    resources.allow_new_requests(&resource);
     let next = resources
         .acquire(
             resource.clone(),
@@ -580,7 +569,7 @@ async fn changing_concurrency_and_cancelling_a_queued_future_preserves_progress(
 }
 
 #[tokio::test]
-async fn takeover_rejects_previously_queued_commands_even_after_hand_back() {
+async fn takeover_rejects_previously_queued_commands_without_blocking_fresh_requests() {
     let runtime = AgentRuntime::new(1);
     let parent = group(&runtime);
     let first = child(&runtime, &parent);
@@ -610,7 +599,6 @@ async fn takeover_rejects_previously_queued_commands_even_after_hand_back() {
     tokio::pin!(queued);
     assert!(futures_util::poll!(&mut queued).is_pending());
     resources.invalidate(&resource);
-    resources.allow_new_requests(&resource);
     assert_eq!(queued.await, Err(AgentError::ResourceUnresolved));
 }
 
@@ -654,4 +642,278 @@ async fn cancellation_is_scoped_and_disallows_more_work() {
     runtime.remove_conversation("conversation");
     assert!(runtime.snapshots("conversation").is_empty());
     assert_eq!(runtime.snapshots("other-conversation").len(), 1);
+}
+
+fn progress_message(id: &str, role: &str, content: &str) -> crate::AiChatMessage {
+    serde_json::from_value(
+        serde_json::json!({"id":id,"role":role,"content":content,"timestamp_ms":0}),
+    )
+    .unwrap()
+}
+
+fn progress_result(
+    call: &crate::AiToolCall,
+    success: bool,
+    output: &str,
+) -> crate::AiExecutedToolResult {
+    crate::AiExecutedToolResult {
+        tool_call_id: call.id.clone(),
+        tool_name: call.name.clone(),
+        success,
+        output: output.into(),
+        error: (!success).then(|| output.into()),
+        duration_ms: 1,
+        envelope: serde_json::json!({"ok":success,"summary":output,"error":if success {serde_json::Value::Null} else {serde_json::json!({"code":"failed","message":output})}}),
+    }
+}
+
+#[test]
+fn progress_guard_distinguishes_failures_unchanged_reads_and_legitimate_polling() {
+    let mut guard = ProgressGuard::default();
+    let call = crate::AiToolCall {
+        id: "c".into(),
+        name: "run_command".into(),
+        arguments: r#"{"command":"missing"}"#.into(),
+    };
+    let failure = progress_result(&call, false, "not found");
+    assert_eq!(
+        (0..5)
+            .map(|_| guard.observe(&call, &failure))
+            .collect::<Vec<_>>(),
+        vec![false, false, true, false, false]
+    );
+    assert!(guard.stalled());
+    guard.reset();
+    let read=crate::AiToolCall{name:"read_resource".into(),arguments:r#"{"resource":"file","handle_id":"rt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","path":"/tmp/a"}"#.into(),..call.clone()};
+    let unchanged = progress_result(&read, true, "same contents");
+    assert_eq!(
+        (0..5)
+            .map(|_| guard.observe(&read, &unchanged))
+            .collect::<Vec<_>>(),
+        vec![false, false, true, false, false]
+    );
+    assert!(!guard.stalled());
+    guard.observe(&call, &progress_result(&call, true, "file updated"));
+    assert!(!guard.observe(&read, &unchanged));
+    let poll = crate::AiToolCall {
+        name: "observe_terminal".into(),
+        arguments: r#"{"handle_id":"rt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#.into(),
+        ..call.clone()
+    };
+    assert_eq!(
+        (0..8)
+            .map(|_| guard.observe(&poll, &progress_result(&poll, true, "running")))
+            .collect::<Vec<_>>(),
+        vec![false; 8]
+    );
+    assert!(parallel_read_call(&read));
+    assert!(parallel_read_call(&poll));
+    assert!(!parallel_read_call(&call));
+    assert!(!parallel_read_call(&crate::AiToolCall {
+        name: "mcp_custom_read_file".into(),
+        ..call
+    }));
+}
+
+#[test]
+fn checkpoint_retains_user_directions_and_complete_wire_rounds_across_compaction() {
+    let mut checkpoint = AgentCheckpoint::new("fix deployment");
+    checkpoint.working_notes = AgentText::new(
+        "The middle of the log identified port 9000 as occupied. Stop the conflicting process before retrying deployment.",
+    );
+    let call = crate::AiToolCall {
+        id: "call".into(),
+        name: "run_command".into(),
+        arguments: "{}".into(),
+    };
+    checkpoint.pending(&call);
+    let mut interrupted = progress_message("interrupted", "assistant", "");
+    set_message_checkpoint(&mut interrupted, &checkpoint);
+    let uncertain = recoverable_checkpoint(&interrupted).unwrap();
+    assert_eq!(
+        uncertain.actions[0].error_code.as_deref(),
+        Some("outcome_unknown")
+    );
+    assert!(!uncertain.actions[0].success);
+    checkpoint.record(&call, &progress_result(&call, true, "Configuration saved"));
+    assert_eq!(
+        checkpoint
+            .actions
+            .iter()
+            .map(|action| (
+                action.call_id.as_str(),
+                action.success,
+                action.error_code.as_deref()
+            ))
+            .collect::<Vec<_>>(),
+        vec![("call", true, None)]
+    );
+    let mut assistant = progress_message("live-round", "assistant", "");
+    assistant.tool_calls =
+        vec![serde_json::json!({"id":"call","name":"run_command","arguments":"{}"})];
+    let native = serde_json::json!({"output":[{"type":"function_call","call_id":"wire","name":"run_command","arguments":"{}"}],"callIds":{"call":"wire"},"results":[]});
+    crate::set_ai_provider_parts(&mut assistant, "responses:scope", vec![native.clone()]);
+    let mut result = progress_message("result", "tool", "saved");
+    result.tool_call_id = Some("call".into());
+    let mut history = vec![
+        progress_message("base", "system", "system rules"),
+        progress_message("old", "user", "old task"),
+        progress_message("old-result", "assistant", "old answer"),
+        progress_message("task", "user", "fix deployment"),
+        assistant,
+        result,
+        progress_message("steer", "user", "Do not restart the database"),
+    ];
+    compact_agent_history(&mut history, &checkpoint, "task");
+    assert_eq!(
+        history
+            .iter()
+            .map(|message| message.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "agent-checkpoint",
+            "base",
+            "task",
+            "live-round",
+            "result",
+            "steer"
+        ]
+    );
+    assert!(history[0].content.contains("port 9000"));
+    assert_eq!(
+        crate::ai_provider_parts(&history[3], "responses:scope"),
+        Some([native].as_slice())
+    );
+    assert_eq!(history[4].tool_call_id.as_deref(), Some("call"));
+    assert_eq!(history[5].content, "Do not restart the database");
+    let mut message = progress_message("response", "assistant", "partial answer");
+    set_message_checkpoint(&mut message, &checkpoint);
+    let restored: crate::AiChatMessage =
+        serde_json::from_value(serde_json::to_value(message).unwrap()).unwrap();
+    let resume = recoverable_checkpoint(&restored).unwrap();
+    assert_eq!(resume.actions[0].call_id, "call");
+    assert_eq!(resume.actions[0].summary.as_str(), "Configuration saved");
+    checkpoint.needs_continuation = false;
+    let mut done = restored;
+    set_message_checkpoint(&mut done, &checkpoint);
+    assert!(recoverable_checkpoint(&done).is_none());
+}
+
+#[tokio::test]
+async fn direction_change_revokes_old_dispatch_until_new_instructions_are_consumed() {
+    let runtime = AgentRuntime::new(2);
+    let parent = group(&runtime);
+    let child = child(&runtime, &parent);
+    let old_parent = runtime.dispatch(&parent).unwrap();
+    let old_child = runtime.dispatch(&child).unwrap();
+    runtime
+        .send(
+            &parent,
+            &parent,
+            AgentMessageKind::UserSupplement,
+            AgentText::new("Only inspect"),
+        )
+        .unwrap();
+    old_parent.invalidated().await;
+    assert_eq!(old_parent.check(), Err(AgentError::DirectionChanged));
+    assert_eq!(old_child.check(), Err(AgentError::DirectionChanged));
+    runtime.drain_messages(&parent).unwrap();
+    runtime.dispatch(&parent).unwrap().check().unwrap();
+    assert_eq!(old_parent.check(), Err(AgentError::DirectionChanged));
+    assert!(matches!(
+        runtime.dispatch(&child),
+        Err(AgentError::DirectionChanged)
+    ));
+    runtime
+        .send(
+            &parent,
+            &child,
+            AgentMessageKind::FollowUp,
+            AgentText::new("Read only; do not edit"),
+        )
+        .unwrap();
+    runtime.drain_messages(&child).unwrap();
+    runtime.dispatch(&child).unwrap().check().unwrap();
+    assert_eq!(old_child.check(), Err(AgentError::DirectionChanged));
+}
+
+#[test]
+fn dependency_failures_block_mutations_without_blocking_independent_reads() {
+    let read = |id: &str, path: &str| {
+        crate::AiToolCall { id:id.into(), name:"read_resource".into(),
+        arguments:serde_json::json!({"resource":"file","handle_id":"rt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","path":path}).to_string() }
+    };
+    let a = read("a", "/a");
+    let b = read("b", "/b");
+    let write = crate::AiToolCall {
+        id: "write".into(),
+        name: "run_command".into(),
+        arguments: r#"{"command":"touch /result"}"#.into(),
+    };
+    let after = read("after", "/result");
+    let mut deps = ToolDependencies::new(&[a.clone(), b.clone(), write.clone(), after.clone()]);
+    deps.record(&a, false);
+    assert!(!deps.failed_dependency(&b));
+    deps.record(&b, true);
+    assert!(deps.failed_dependency(&write));
+    deps.record(&write, false);
+    assert!(deps.failed_dependency(&after));
+    let mut failed = progress_result(&a, false, "temporary failure");
+    failed.envelope["error"]["code"] = serde_json::json!("network_timeout");
+    let description = ToolExecutionDescription::for_call(&a);
+    assert_eq!(
+        description.retry_delay(&failed, 0),
+        Some(std::time::Duration::from_secs(1))
+    );
+    assert_eq!(description.retry_delay(&failed, 2), None);
+    assert_eq!(
+        ToolExecutionDescription::for_call(&write).retry_delay(&failed, 0),
+        None
+    );
+    failed.envelope["error"]["code"] = serde_json::json!("local_command_failed");
+    assert_eq!(result_recovery(&failed), Some(Recovery::OutcomeUnknown));
+    assert_eq!(description.retry_delay(&failed, 0), None);
+}
+
+#[test]
+fn owned_resources_report_cleanup_and_restore_running_work_as_unknown() {
+    let runtime = AgentRuntime::new(2);
+    let parent = group(&runtime);
+    let observation = runtime
+        .register_resource(
+            &parent,
+            OwnedResourceKind::Observation,
+            AgentText::new("command observation"),
+        )
+        .unwrap();
+    let remote = runtime
+        .register_resource(
+            &parent,
+            OwnedResourceKind::TerminalCommand,
+            AgentText::new("remote command"),
+        )
+        .unwrap();
+    runtime.cancel_group(&parent).unwrap();
+    drop(observation);
+    let snapshot = runtime.snapshot(&parent).unwrap();
+    assert_eq!(
+        snapshot
+            .resources
+            .iter()
+            .map(|resource| resource.state)
+            .collect::<Vec<_>>(),
+        vec![OwnedResourceState::Stopped, OwnedResourceState::Running]
+    );
+    let restored: AgentSnapshot =
+        serde_json::from_value(serde_json::to_value(snapshot).unwrap()).unwrap();
+    assert_eq!(
+        restored.resources[1].state,
+        OwnedResourceState::OutcomeUnknown
+    );
+    remote.finish(OwnedResourceState::Completed);
+    drop(remote);
+    assert_eq!(
+        runtime.snapshot(&parent).unwrap().resources[1].state,
+        OwnedResourceState::Completed
+    );
 }

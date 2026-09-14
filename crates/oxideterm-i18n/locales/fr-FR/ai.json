@@ -29,8 +29,6 @@
       "communication": "Communication des agents",
       "received": "Reçu",
       "consumed": "Traité",
-      "remote_unknown": "L’agent est arrêté. La fin de la commande distante n’a pas été confirmée.",
-      "return_control": "Rendre le contrôle du terminal à l’IA",
       "usage_unknown": "Utilisation des tokens inconnue",
       "message_not_sent": "Impossible d’envoyer les instructions supplémentaires.",
       "supplement": "Instructions supplémentaires",
@@ -79,6 +77,14 @@
       "load_failed_generic": "OxideSens n'a pas pu charger l'historique du chat depuis la base de données locale.",
       "database_locked": "Une autre instance d'OxideTerm utilise la base de données du chat. Fermez l'autre instance, puis réessayez.",
       "database_upgrade_required": "Cette base de données de chat nécessite un chemin de migration plus récent et n'a pas pu être ouverte en toute sécurité.",
+      "conversations": "Conversations",
+      "archive_conversation": "Archiver la conversation",
+      "restore_conversation": "Restaurer la conversation",
+      "archived_conversations": "Conversations archivées",
+      "show_active": "Retour aux conversations",
+      "no_archived_conversations": "Aucune conversation archivée",
+      "list_more": "Charger plus de conversations",
+      "list_retry": "Échec du chargement. Réessayer",
       "no_conversations": "Pas encore de conversations",
       "start_conversation": "Démarrer une conversation",
       "start_conversation_hint": "Posez des questions sur les commandes shell, les scripts ou les opérations du terminal.",
@@ -351,7 +357,8 @@
         "manage_telnet_session": "Gérer une session Telnet",
         "open_transport_profile": "Ouvrir un profil de transport",
         "read_skill_resource": "Lire une ressource de compétence",
-        "wait_terminal_output": "Attendre la sortie du terminal"
+        "wait_terminal_output": "Attendre la sortie du terminal",
+        "ask_user": "Poser une question"
       },
       "risk_labels": {
         "read": "Lecture",
@@ -544,6 +551,21 @@
       "draft_not_empty": "Envoyez ou effacez le brouillon actuel avant de modifier un message en file.",
       "steer_unavailable": "Ce tour ne peut pas être réorienté pour le moment. Votre message est conservé.",
       "client_command_busy": "Attendez la fin de la tâche actuelle avant d’utiliser cette commande."
+    },
+    "questions": {
+      "waiting": "En attente de votre réponse",
+      "answer": "Envoyer la réponse",
+      "hint": "Choisissez une option ou saisissez votre réponse ci-dessous. La tâche reprendra après votre réponse."
+    },
+    "history": {
+      "loading": "Chargement de l’historique…",
+      "unsaved": "Modifications non enregistrées. Les nouvelles requêtes et les appels d’outils sont suspendus.",
+      "quit_title": "L’enregistrement de l’historique n’est pas terminé",
+      "quit_detail": "Réessayez, annulez la fermeture ou quittez en abandonnant uniquement les modifications non enregistrées.",
+      "cancel_quit": "Annuler la fermeture",
+      "discard_quit": "Quitter sans enregistrer",
+      "older": "Messages précédents",
+      "newer": "Messages suivants"
     }
   }
 }

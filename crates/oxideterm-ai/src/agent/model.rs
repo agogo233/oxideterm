@@ -89,6 +89,22 @@ pub struct AgentRecord {
     pub revision: i64,
 }
 
+impl AgentRecord {
+    /// Display metadata has no ownership of message bodies or communication history.
+    pub fn metadata_projection(&self) -> Self {
+        Self {
+            parent_usage: self.parent_usage,
+            created_at_ms: self.created_at_ms,
+            snapshot: self.snapshot.clone(),
+            parent_message_id: self.parent_message_id.clone(),
+            target_labels: self.target_labels.clone(),
+            messages: Vec::new(),
+            communication: Vec::new(),
+            revision: self.revision,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct AgentScope {
     /// Host-owned identities survive pane selection, but cannot enter model or durable data.
@@ -109,6 +125,10 @@ pub enum AgentState {
     AwaitingApproval,
     AwaitingParent,
     AwaitingResource,
+    AwaitingCondition,
+    AwaitingUser,
+    AwaitingConnection,
+    Replanning,
     Stopping,
     Completed,
     Failed,
@@ -173,6 +193,8 @@ pub struct AgentMessage {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentSnapshot {
+    #[serde(default)]
+    pub resources: Vec<super::OwnedResource>,
     pub usage: AgentUsage,
     pub run: AgentRunRef,
     pub parent_id: Option<AgentId>,
@@ -240,6 +262,8 @@ fn restore_agent_state<'de, D: serde::Deserializer<'de>>(
 pub enum AgentError {
     #[error("agent run is no longer current")]
     StaleRun,
+    #[error("task direction changed before dispatch")]
+    DirectionChanged,
     #[error("operation is restricted to the parent agent")]
     ParentOnly,
     #[error("target or tool is outside the delegated scope")]

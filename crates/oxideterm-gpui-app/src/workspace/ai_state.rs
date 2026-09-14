@@ -1,5 +1,4 @@
 use super::*;
-use crate::workspace::root::init::ai_chat_initialization_error;
 use gpui::Task;
 use oxideterm_editor_core::utf16::replace_utf16;
 use oxideterm_settings_model::{
@@ -8,8 +7,26 @@ use oxideterm_settings_model::{
 };
 
 pub(in crate::workspace) mod agents;
+pub(in crate::workspace) mod history;
+pub(in crate::workspace) use history::HistoryStatus;
 pub(in crate::workspace) mod knowledge;
 pub(in crate::workspace) use knowledge::KNOWLEDGE_DOCUMENT_PAGE_SIZE;
+
+pub(in crate::workspace) struct AiPendingUserQuestion {
+    pub conversation_id: String,
+    pub dispatch: Option<oxideterm_ai::agent::AgentDispatch>,
+    pub sender: tokio::sync::oneshot::Sender<zeroize::Zeroizing<String>>,
+}
+
+impl AiPendingUserQuestion {
+    fn active(&self) -> bool {
+        !self.sender.is_closed()
+            && self
+                .dispatch
+                .as_ref()
+                .is_none_or(|guard| guard.check().is_ok())
+    }
+}
 
 /// Pending input is owned by this workspace and is never replayed from chat persistence.
 pub(in crate::workspace) struct AiQueuedChatTurn {
@@ -21,12 +38,6 @@ pub(in crate::workspace) struct AiQueuedChatTurn {
     pub task_system_prompt: Option<zeroize::Zeroizing<String>>,
     pub participant: Option<String>,
     pub skill: Option<(String, String)>,
-}
-
-pub(in crate::workspace) enum AiChatInitializationOutcome {
-    AlreadyInitialized,
-    Loaded,
-    Failed,
 }
 
 pub(in crate::workspace) enum AiWorkspaceEvent {
@@ -341,7 +352,7 @@ pub(in crate::workspace) struct AiWorkspaceEntity {
     chat_stream_rx: std::sync::mpsc::Receiver<AiStreamDelivery>,
     chat_stream_deliveries: VecDeque<AiStreamDelivery>,
     conversation_state: oxideterm_ai::AiChatState,
-    persistence_store: Option<oxideterm_ai::AiChatPersistenceStore>,
+    pub(in crate::workspace) history: history::AiHistoryState,
     chat_initialized: bool,
     chat_initialization_error: Option<AiChatInitializationError>,
     safety_modes_by_conversation: HashMap<String, oxideterm_gpui_ui::ai::AiSafetyMode>,
@@ -349,7 +360,7 @@ pub(in crate::workspace) struct AiWorkspaceEntity {
     pub(in crate::workspace) queued_chat_turns: HashMap<String, VecDeque<AiQueuedChatTurn>>,
     pub(in crate::workspace) chat_launches: HashMap<String, String>,
     chat_drafts: HashMap<String, zeroize::Zeroizing<String>>,
-    next_chat_sequence: u64,
+    pub(in crate::workspace) pending_user_questions: HashMap<(u64, String), AiPendingUserQuestion>,
     pending_tool_approvals: HashMap<(u64, String), tokio::sync::oneshot::Sender<bool>>,
     pending_acp_permission_choices:
         HashMap<(u64, String), tokio::sync::oneshot::Sender<Option<String>>>,
@@ -1115,7 +1126,7 @@ impl AiWorkspaceEntity {
             chat_stream_rx,
             chat_stream_deliveries: VecDeque::new(),
             conversation_state: oxideterm_ai::AiChatState::default(),
-            persistence_store: None,
+            history: history::AiHistoryState::default(),
             chat_initialized: false,
             chat_initialization_error: None,
             safety_modes_by_conversation: HashMap::new(),
@@ -1123,7 +1134,7 @@ impl AiWorkspaceEntity {
             queued_chat_turns: HashMap::new(),
             chat_launches: HashMap::new(),
             chat_drafts: HashMap::new(),
-            next_chat_sequence: 0,
+            pending_user_questions: HashMap::new(),
             pending_tool_approvals: HashMap::new(),
             pending_acp_permission_choices: HashMap::new(),
             pending_tool_candidate_selections: HashMap::new(),
@@ -1140,6 +1151,7 @@ impl AiWorkspaceEntity {
         };
         entity.schedule_model_refresh_delivery(cx);
         entity.schedule_agent_updates(cx);
+        entity.schedule_history(cx);
         entity.schedule_provider_key_status_delivery(cx);
         entity.schedule_selector_probe_delivery(cx);
         entity.schedule_acp_agent_probe_delivery(cx);
@@ -1529,6 +1541,9 @@ impl AiWorkspaceEntity {
             .message_signature_cache
             .borrow_mut()
             .invalidate_all();
+        if let Some(id) = self.conversation_state.active_conversation_id.as_deref() {
+            self.history_metadata_changed(id);
+        }
         &mut self.conversation_state
     }
 
@@ -1551,6 +1566,8 @@ impl AiWorkspaceEntity {
                     self.agents.dirty.borrow_mut().insert(run_id);
                 }
             }
+            self.history_message_changed(conversation_id, message_id);
+            self.schedule_history_stream_save();
             return;
         }
         // Streaming changes one assistant message at a time. Invalidate only
@@ -1561,6 +1578,62 @@ impl AiWorkspaceEntity {
             .invalidate_message(message_id);
         self.conversation_state
             .update_message(conversation_id, message_id, update);
+        self.history_message_changed(conversation_id, message_id);
+        self.schedule_history_stream_save();
+    }
+
+    pub(in crate::workspace) fn append_chat_stream_text(
+        &mut self,
+        conversation: &str,
+        message: &str,
+        text: &str,
+        thinking: bool,
+    ) {
+        let append = |message: &mut oxideterm_ai::AiChatMessage| {
+            if thinking {
+                message
+                    .thinking_content
+                    .get_or_insert_with(String::new)
+                    .push_str(text);
+            } else {
+                message.content.push_str(text);
+            }
+            oxideterm_ai::stream_state::append_ai_turn_text_part(
+                message,
+                if thinking { "thinking" } else { "text" },
+                text,
+                thinking,
+            );
+        };
+        if let Some(run) = self.agents.message_runs.get(message).cloned() {
+            if let Some(record) = self
+                .agents
+                .records
+                .get_mut(&run)
+                .filter(|record| record.snapshot.conversation_id == conversation)
+            {
+                if let Some(target) = record
+                    .messages
+                    .iter_mut()
+                    .find(|target| target.id == message)
+                {
+                    append(target);
+                    record.revision =
+                        oxideterm_ai::AiChatPersistenceStore::next_projection_persist_at();
+                }
+            }
+            self.history_stream_text_changed(conversation, message);
+            self.schedule_history_stream_save();
+            return;
+        }
+        self.chat_ui
+            .message_signature_cache
+            .borrow_mut()
+            .invalidate_message(message);
+        self.conversation_state
+            .update_message(conversation, message, append);
+        self.history_stream_text_changed(conversation, message);
+        self.schedule_history_stream_save();
     }
 
     pub(in crate::workspace) fn chat_is_loading(&self) -> bool {
@@ -1596,50 +1669,67 @@ impl AiWorkspaceEntity {
     pub(in crate::workspace) fn ensure_chat_initialized(
         &mut self,
         path: PathBuf,
-    ) -> AiChatInitializationOutcome {
+        cx: &mut Context<Self>,
+    ) {
         if self.chat_initialized {
-            return AiChatInitializationOutcome::AlreadyInitialized;
+            return;
         }
         self.chat_initialized = true;
-        self.load_chat_store(path)
+        self.initialize_history(path, cx);
     }
 
     pub(in crate::workspace) fn retry_chat_initialization(
         &mut self,
         path: PathBuf,
-    ) -> AiChatInitializationOutcome {
+        cx: &mut Context<Self>,
+    ) {
         self.chat_initialized = true;
-        self.load_chat_store(path)
-    }
-
-    fn load_chat_store(&mut self, path: PathBuf) -> AiChatInitializationOutcome {
-        self.chat_ui
-            .message_signature_cache
-            .borrow_mut()
-            .invalidate_all();
-        match oxideterm_ai::AiChatPersistenceStore::load(path) {
-            Ok((store, state)) => {
-                self.persistence_store = Some(store);
-                self.conversation_state = state;
-                if let Some(id) = self.conversation_state.active_conversation_id.clone() {
-                    self.load_agent_summaries(&id);
-                }
-                self.chat_initialization_error = None;
-                AiChatInitializationOutcome::Loaded
+        self.chat_initialization_error = None;
+        if self.history.store.is_some() {
+            if let Some(id) = self.conversation_state.active_conversation_id.clone() {
+                self.request_history_conversation(id);
             }
-            Err(error) => {
-                // Database errors can contain local paths or serialized data;
-                // retain only the stable presentation category.
-                self.conversation_state = oxideterm_ai::AiChatState::default();
-                self.persistence_store = None;
-                self.chat_initialization_error = Some(ai_chat_initialization_error(&error));
-                AiChatInitializationOutcome::Failed
-            }
+            self.retry_history_write();
+        } else {
+            self.initialize_history(path, cx);
         }
     }
 
     pub(in crate::workspace) fn select_conversation(&mut self, id: String) {
+        if !self
+            .conversation_state
+            .conversations
+            .iter()
+            .any(|item| item.id == id)
+        {
+            match self
+                .history
+                .store
+                .as_ref()
+                .map(|store| store.conversation_head(&id))
+                .transpose()
+            {
+                Ok(Some(Some(head))) => {
+                    self.history.branches.insert(id.clone(), head.active_branch);
+                    self.conversation_state
+                        .conversations
+                        .push(head.conversation);
+                }
+                Err(_) => {
+                    self.history_load_failed();
+                    return;
+                }
+                _ => return,
+            }
+        }
         if self.conversation_state.active_conversation_id.as_ref() != Some(&id) {
+            self.cancel_history_page_loads();
+            if self.history.edit_load.take().is_some() {
+                if let Some(previous) = self.conversation_state.active_conversation_id.clone() {
+                    self.set_conversation_loading(&previous, false);
+                }
+            }
+            self.clear_message_edit();
             self.stash_active_chat_draft();
             let draft = self
                 .chat_drafts
@@ -1648,7 +1738,8 @@ impl AiWorkspaceEntity {
                 .unwrap_or_default();
             self.set_chat_draft(draft);
         }
-        self.agents.detail = None;
+        self.close_agent_detail();
+        self.history.archives.clear();
         self.load_agent_summaries(&id);
         // Selecting can reload a previously unloaded conversation with the same
         // identifier, so identity comparison alone cannot prove cached rows valid.
@@ -1671,31 +1762,28 @@ impl AiWorkspaceEntity {
             !self
                 .loading_conversations
                 .contains(&self.conversation_state.conversations[*index].id)
+                && !self
+                    .history_has_unsaved_messages(&self.conversation_state.conversations[*index].id)
         }) {
             let previous = &mut self.conversation_state.conversations[previous_index];
             previous.messages.clear();
             previous.messages_loaded = false;
+            self.history.pages.remove(&previous.id);
         }
-        if let Some(conversation) = self
+        let needs_loading = self
             .conversation_state
             .conversations
             .iter()
-            .find(|conversation| conversation.id == id)
-            && !conversation.messages_loaded
-            && let Some(store) = self.persistence_store.as_ref()
-            && let Ok(Some(loaded)) = store.load_conversation(&id)
-            && let Some(slot) = self
-                .conversation_state
-                .conversations
-                .iter_mut()
-                .find(|conversation| conversation.id == id)
-        {
-            *slot = loaded;
+            .any(|conversation| conversation.id == id && !conversation.messages_loaded);
+        self.conversation_state.set_active_conversation(id.clone());
+        if needs_loading {
+            self.request_history_conversation(id);
         }
-        self.conversation_state.set_active_conversation(id);
     }
 
     pub(in crate::workspace) fn delete_conversation(&mut self, id: &str) -> bool {
+        self.history.deleted_conversations.insert(id.to_owned());
+        self.history_deleted(id);
         self.queued_chat_turns.remove(id);
         self.chat_launches.remove(id);
         self.chat_drafts.remove(id);
@@ -1711,9 +1799,7 @@ impl AiWorkspaceEntity {
         self.agents
             .message_runs
             .retain(|_, run| !removed.contains(run));
-        self.agents
-            .details_loaded
-            .retain(|run| !removed.contains(run));
+        self.remove_agent_history_views(&removed);
         self.agents
             .details_loading
             .retain(|run| !removed.contains(run));
@@ -1733,7 +1819,7 @@ impl AiWorkspaceEntity {
             .as_ref()
             .is_some_and(|run| removed.contains(run))
         {
-            self.agents.detail = None;
+            self.close_agent_detail();
         }
         let active_deleted = self.conversation_state.active_conversation_id.as_deref() == Some(id);
         self.conversation_state.delete_conversation(id);
@@ -1754,6 +1840,46 @@ impl AiWorkspaceEntity {
         !self.conversation_state.conversations.is_empty()
     }
 
+    pub(in crate::workspace) fn show_archived_conversations(&mut self, archived: bool) {
+        self.close_chat_popovers();
+        if !self.conversation_list_page(archived).initialized {
+            self.request_conversation_list_page(archived);
+        }
+        self.chat_ui.show_archived_conversations = archived;
+        self.chat_ui.conversation_list_open = true;
+    }
+
+    pub(in crate::workspace) fn set_conversation_archived(&mut self, id: &str, archived: bool) {
+        let Some(conversation) = self
+            .conversation_state
+            .conversations
+            .iter_mut()
+            .find(|item| item.id == id)
+        else {
+            return;
+        };
+        conversation.archived = archived;
+        self.history_metadata_changed(id);
+        if archived && self.conversation_state.active_conversation_id.as_deref() == Some(id) {
+            let next = self
+                .conversation_state
+                .conversations
+                .iter()
+                .find(|item| !item.archived)
+                .map(|item| item.id.clone());
+            if let Some(next) = next {
+                self.select_conversation(next);
+            } else {
+                self.stash_active_chat_draft();
+                self.cancel_history_page_loads();
+                self.conversation_state.active_conversation_id = None;
+                self.set_chat_draft(String::new());
+            }
+            self.reset_chat_for_conversation_selection();
+        }
+        self.persist_chat_state();
+    }
+
     pub(in crate::workspace) fn rename_conversation(
         &mut self,
         id: &str,
@@ -1762,10 +1888,14 @@ impl AiWorkspaceEntity {
     ) {
         self.conversation_state
             .rename_conversation(id, title, now_ms);
+        self.history_title_changed(id);
         self.clear_conversation_rename();
     }
 
     pub(in crate::workspace) fn clear_conversations(&mut self) {
+        for conversation in &self.conversation_state.conversations {
+            self.history_deleted(&conversation.id);
+        }
         self.conversation_state.clear_conversations();
         self.safety_modes_by_conversation.clear();
         self.clear_conversation_rename();
@@ -1789,33 +1919,8 @@ impl AiWorkspaceEntity {
     }
 
     pub(in crate::workspace) fn persist_chat_state(&self) {
-        let Some(store) = self.persistence_store.as_ref().cloned() else {
-            return;
-        };
-        // The blocking persistence task needs an owned point-in-time projection.
-        // Keep this as the only full conversation-state clone at the boundary.
-        let state = self.conversation_state.clone();
-        let agent_records: Vec<_> = self
-            .agents
-            .details_loaded
-            .iter()
-            .filter_map(|id| self.agents.records.get(id).cloned())
-            .collect();
-        let projection_updated_at =
-            oxideterm_ai::AiChatPersistenceStore::next_projection_persist_at();
-        self.task_runtime.spawn_blocking(move || {
-            if store
-                .save_state_with_projection_updated_at(state, projection_updated_at)
-                .is_err()
-            {
-                // Persistence errors may include local paths or serialized data.
-                eprintln!("[AiChatStore] Failed to persist conversation");
-                return;
-            }
-            if store.save_agent_records(agent_records).is_err() {
-                eprintln!("[AiChatStore] Failed to persist agent records");
-            }
-        });
+        self.persist_agent_records();
+        self.request_history_save();
     }
 
     pub(in crate::workspace) fn persist_transcript_entries(
@@ -1823,21 +1928,15 @@ impl AiWorkspaceEntity {
         conversation_id: String,
         entries: Vec<oxideterm_ai::PersistedTranscriptEntry>,
     ) {
-        if entries.is_empty() {
-            return;
+        for entry in entries {
+            let id = entry.id.clone();
+            self.queue_history_event(
+                &conversation_id,
+                "transcript",
+                &id,
+                history::HistoryEvent::Transcript(entry),
+            );
         }
-        let Some(store) = self.persistence_store.as_ref().cloned() else {
-            return;
-        };
-        // The store is a shared handle; only the owned entries cross the worker boundary.
-        self.task_runtime.spawn_blocking(move || {
-            if store
-                .append_transcript_entries(&conversation_id, entries)
-                .is_err()
-            {
-                eprintln!("[AiChatStore] Failed to persist transcript entries");
-            }
-        });
     }
 
     pub(in crate::workspace) fn persist_diagnostic_events(
@@ -1845,21 +1944,15 @@ impl AiWorkspaceEntity {
         conversation_id: String,
         events: Vec<oxideterm_ai::PersistedDiagnosticEvent>,
     ) {
-        if events.is_empty() {
-            return;
+        for event in events {
+            let id = event.id.clone();
+            self.queue_history_event(
+                &conversation_id,
+                "diagnostic",
+                &id,
+                history::HistoryEvent::Diagnostic(event),
+            );
         }
-        let Some(store) = self.persistence_store.as_ref().cloned() else {
-            return;
-        };
-        // The store is a shared handle; only the owned events cross the worker boundary.
-        self.task_runtime.spawn_blocking(move || {
-            if store
-                .append_diagnostic_events(&conversation_id, events)
-                .is_err()
-            {
-                eprintln!("[AiChatStore] Failed to persist diagnostic events");
-            }
-        });
     }
 
     pub(in crate::workspace) fn cancel_chat_conversation_state(
@@ -1881,12 +1974,21 @@ impl AiWorkspaceEntity {
             .active_conversation_mut()
             .map(oxideterm_ai::stream_state::finalize_streaming_ai_messages_on_cancel)
             .unwrap_or_default();
+        if let Some(id) = &conversation_id {
+            for turn in &stopped_turns {
+                if turn.retained {
+                    self.history_message_changed(id, &turn.message_id);
+                } else {
+                    self.history_message_deleted(id, &turn.message_id);
+                }
+            }
+        }
+        self.persist_chat_state();
         (conversation_id, stopped_turns)
     }
 
-    pub(in crate::workspace) fn next_chat_id(&mut self, now_ms: i64) -> String {
-        self.next_chat_sequence = self.next_chat_sequence.saturating_add(1);
-        format!("chat-{now_ms}-{}", self.next_chat_sequence)
+    pub(in crate::workspace) fn next_chat_id(&mut self, _now_ms: i64) -> String {
+        format!("chat-{}", uuid::Uuid::new_v4())
     }
 
     pub(in crate::workspace) fn request_model_refresh(
@@ -3452,6 +3554,12 @@ impl AiWorkspaceEntity {
     }
 
     pub(in crate::workspace) fn cancel_chat_stream_for(&mut self, conversation_id: &str) {
+        self.finish_compaction(conversation_id);
+        self.history.compaction_loads.remove(conversation_id);
+        self.history.compaction_sources.remove(conversation_id);
+        self.agents
+            .local_commands
+            .retain(|(id, _, _), _| id != conversation_id);
         self.chat_launches.remove(conversation_id);
         let mut runs: Vec<_> = self
             .chat_stream_runs
@@ -3494,7 +3602,7 @@ impl AiWorkspaceEntity {
                 for call in &mut message.tool_calls {
                     if matches!(
                         call.get("status").and_then(serde_json::Value::as_str),
-                        Some("running" | "pending" | "pending_user_approval")
+                        Some("running" | "pending" | "pending_user_approval" | "waiting_user")
                     ) {
                         call["status"] = serde_json::json!("cancelled");
                     }
@@ -3534,6 +3642,16 @@ impl AiWorkspaceEntity {
     }
 
     fn reject_run_tool_interactions(&mut self, generation: u64) {
+        self.history.answers.retain(|(run, _), task| {
+            if *run == generation {
+                task.abort();
+                false
+            } else {
+                true
+            }
+        });
+        self.pending_user_questions
+            .retain(|(run, _), _| *run != generation);
         let approvals: Vec<_> = self
             .pending_tool_approvals
             .keys()
@@ -3579,6 +3697,60 @@ impl AiWorkspaceEntity {
                 self.chat_ui.footer_focus = selection.footer_focus;
             }
         }
+    }
+
+    pub(in crate::workspace) fn active_user_question(&self) -> Option<(u64, String)> {
+        let conversation = self
+            .conversation_state()
+            .active_conversation_id
+            .as_deref()?;
+        self.pending_user_questions
+            .iter()
+            .find(|((generation, _), question)| {
+                question.conversation_id == conversation
+                    && question.active()
+                    && self.run_accepts_tools(*generation)
+            })
+            .map(|(key, _)| key.clone())
+    }
+
+    pub(in crate::workspace) fn resolve_user_question(
+        &mut self,
+        generation: u64,
+        id: &str,
+        answer: zeroize::Zeroizing<String>,
+    ) -> bool {
+        if answer.trim().is_empty() || !self.run_accepts_tools(generation) {
+            return false;
+        }
+        let key = (generation, id.to_owned());
+        if !self
+            .pending_user_questions
+            .get(&key)
+            .is_some_and(AiPendingUserQuestion::active)
+        {
+            return false;
+        }
+        let Some(question) = self.pending_user_questions.remove(&key) else {
+            return false;
+        };
+        self.history_event(
+            &question.conversation_id,
+            "user_answer",
+            &format!("{generation}:{id}"),
+            serde_json::json!({"toolCallId":id,"answer":answer.as_str()}),
+        );
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        self.history_barrier(sender);
+        let task = self.task_runtime.spawn(async move {
+            if receiver.await == Ok(true) && question.active() {
+                let _ = question.sender.send(answer);
+            }
+        });
+        if let Some(previous) = self.history.answers.insert(key, task) {
+            previous.abort();
+        }
+        true
     }
 
     pub(in crate::workspace) fn register_tool_approval(
@@ -3654,6 +3826,7 @@ impl AiWorkspaceEntity {
     }
 
     fn reject_all_tool_approvals(&mut self) {
+        self.pending_user_questions.clear();
         for (_, sender) in self.pending_tool_approvals.drain() {
             let _ = sender.send(false);
         }
@@ -3801,12 +3974,30 @@ impl AiWorkspaceEntity {
     }
 
     pub(in crate::workspace) fn begin_compaction(&mut self, conversation_id: &str) -> bool {
-        self.compacting_conversations
+        if !self
+            .compacting_conversations
             .insert(conversation_id.to_string())
+        {
+            return false;
+        }
+        self.history.compaction_generation += 1;
+        self.history.compaction_runs.insert(
+            conversation_id.into(),
+            (self.history.compaction_generation, None),
+        );
+        true
+    }
+
+    pub(in crate::workspace) fn compaction_in_progress(&self, conversation_id: &str) -> bool {
+        self.compacting_conversations.contains(conversation_id)
     }
 
     pub(in crate::workspace) fn finish_compaction(&mut self, conversation_id: &str) {
         self.compacting_conversations.remove(conversation_id);
+        self.history.compaction_key_loads.remove(conversation_id);
+        if let Some((_, Some(task))) = self.history.compaction_runs.remove(conversation_id) {
+            task.abort();
+        }
     }
 
     pub(in crate::workspace) fn compaction_notice(&self) -> Option<&AiCompactionNotice> {
@@ -4570,10 +4761,10 @@ pub(super) struct AiChatWorkspaceState {
     pub(super) message_list_state: ListState,
     pub(super) message_list_cache: RefCell<VirtualListSignatureCache>,
     pub(super) message_signature_cache: RefCell<AiChatMessageSignatureCache>,
-    pub(super) markdown_cache: RefCell<AiMarkdownDocumentCache>,
     pub(super) context_token_cache: RefCell<AiContextTokenBreakdownCache>,
     pub(super) prepared_prompt_usage: Option<AiPreparedPromptUsage>,
     pub(super) conversation_list_open: bool,
+    pub(super) show_archived_conversations: bool,
     pub(super) menu_open: bool,
     pub(super) reasoning_menu_open: bool,
     pub(super) safety_menu_open: bool,
@@ -4637,10 +4828,10 @@ impl AiChatWorkspaceState {
             ),
             message_list_cache: RefCell::new(VirtualListSignatureCache::default()),
             message_signature_cache: RefCell::new(AiChatMessageSignatureCache::default()),
-            markdown_cache: RefCell::new(AiMarkdownDocumentCache::default()),
             context_token_cache: RefCell::new(AiContextTokenBreakdownCache::default()),
             prepared_prompt_usage: None,
             conversation_list_open: false,
+            show_archived_conversations: false,
             menu_open: false,
             reasoning_menu_open: false,
             safety_menu_open: false,
@@ -4714,17 +4905,18 @@ impl AiModelWorkspaceState {
 }
 
 #[cfg(test)]
-mod entity_tests {
+pub(in crate::workspace) mod entity_tests {
     use super::*;
     use gpui::TestAppContext;
     use std::sync::atomic::AtomicUsize;
 
-    fn queued_turn(id: &str) -> AiQueuedChatTurn {
+    pub(in crate::workspace) fn queued_turn(id: &str) -> AiQueuedChatTurn {
         AiQueuedChatTurn {
             id: id.into(),
             content: zeroize::Zeroizing::new(id.into()),
             context: None,
             config: oxideterm_ai::AiChatStreamConfig {
+                api_protocol: oxideterm_ai::AiApiProtocol::default(),
                 execution_backend: Default::default(),
                 provider_id: Some("provider".into()),
                 acp_agent_id: None,
@@ -4752,6 +4944,190 @@ mod entity_tests {
     }
 
     #[gpui::test]
+    fn quitting_flushes_history_without_a_foreground_tokio_runtime(cx: &mut TestAppContext) {
+        use oxideterm_ai::{ConversationStore, HistoryWriter};
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConversationStore::open(directory.path().join("history.redb")).unwrap();
+        let entity = cx.new(|cx| {
+            AiWorkspaceEntity::new(
+                test_worker_runtime(),
+                oxideterm_ai::AiProviderKeyStore::new(),
+                cx,
+            )
+        });
+        entity.update(cx, |ai, _| {
+            ai.history.writer = Some(HistoryWriter::new(store.clone()).unwrap());
+            ai.history.store = Some(store.clone());
+            ai.conversation_state.create_conversation(
+                "quit-test".into(),
+                Some("Saved at quit".into()),
+                1,
+                None,
+            );
+            ai.history_created("quit-test");
+        });
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        // Quit must wait for a real writer thread rather than exhaust simulated ticks.
+        cx.background_executor.allow_parking();
+        cx.background_executor.set_block_on_ticks(100_000..=100_000);
+        cx.update(|app| app.shutdown());
+        assert_eq!(
+            store
+                .conversation_head("quit-test")
+                .unwrap()
+                .unwrap()
+                .conversation
+                .title,
+            "Saved at quit"
+        );
+    }
+
+    #[gpui::test]
+    fn conversation_lists_load_active_first_and_archived_on_demand(cx: &mut TestAppContext) {
+        use oxideterm_ai::{AiChatState, ConversationStore, HistoryMutation};
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConversationStore::open(directory.path().join("chat_history.v4.redb")).unwrap();
+        let mut state = AiChatState::default();
+        for index in 0..120 {
+            let id = format!("chat-{index:03}");
+            state.create_conversation(id, None, index, None);
+            let mut conversation = state.conversations.remove(0);
+            conversation.archived = index % 2 == 0;
+            store
+                .apply(vec![HistoryMutation::Create {
+                    conversation,
+                    revision: index as u64 + 1,
+                }])
+                .unwrap();
+        }
+        let runtime = test_runtime();
+        let entity = cx.new(|cx| {
+            AiWorkspaceEntity::new(runtime.clone(), oxideterm_ai::AiProviderKeyStore::new(), cx)
+        });
+        entity.update(cx, |ai, cx| {
+            ai.initialize_history(directory.path().join("chat_history.redb"), cx)
+        });
+        let settle = |cx: &mut TestAppContext, archived: bool| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                runtime.block_on(tokio::task::yield_now());
+                cx.run_until_parked();
+                if entity.read_with(cx, |ai, _| {
+                    let page = ai.conversation_list_page(archived);
+                    page.initialized && !page.loading()
+                }) {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "conversation list did not arrive"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        };
+        settle(cx, false);
+        entity.update(cx, |ai, _| {
+            assert_eq!(
+                ai.conversation_state
+                    .conversations
+                    .iter()
+                    .map(|c| c.id.clone())
+                    .collect::<Vec<_>>(),
+                (0..50)
+                    .map(|i| format!("chat-{:03}", 119 - i * 2))
+                    .collect::<Vec<_>>()
+            );
+            assert!(!ai.conversation_list_page(true).initialized);
+            assert!(!ai.conversation_list_page(true).loading());
+            ai.request_conversation_list_page(false);
+        });
+        settle(cx, false);
+        entity.update(cx, |ai, _| {
+            assert_eq!(
+                ai.conversation_state
+                    .conversations
+                    .iter()
+                    .map(|c| c.id.clone())
+                    .collect::<Vec<_>>(),
+                (0..60)
+                    .map(|i| format!("chat-{:03}", 119 - i * 2))
+                    .collect::<Vec<_>>()
+            );
+            assert!(!ai.conversation_list_page(false).has_more);
+            ai.show_archived_conversations(true);
+        });
+        settle(cx, true);
+        entity.update(cx, |ai, _| {
+            assert_eq!(
+                ai.conversation_state
+                    .conversations
+                    .iter()
+                    .filter(|c| c.archived)
+                    .map(|c| c.id.clone())
+                    .collect::<Vec<_>>(),
+                (0..50)
+                    .map(|i| format!("chat-{:03}", 118 - i * 2))
+                    .collect::<Vec<_>>()
+            );
+            assert!(ai.conversation_list_page(true).has_more);
+            ai.request_conversation_list_page(true);
+        });
+        settle(cx, true);
+        entity.read_with(cx, |ai, _| {
+            assert_eq!(
+                ai.conversation_state
+                    .conversations
+                    .iter()
+                    .filter(|c| c.archived)
+                    .map(|c| c.id.clone())
+                    .collect::<Vec<_>>(),
+                (0..60)
+                    .map(|i| format!("chat-{:03}", 118 - i * 2))
+                    .collect::<Vec<_>>()
+            );
+            assert!(!ai.conversation_list_page(true).has_more);
+        });
+    }
+
+    #[gpui::test]
+    fn archiving_switches_active_chat_and_restoring_retains_draft(cx: &mut TestAppContext) {
+        let entity = cx.new(|cx| {
+            AiWorkspaceEntity::new(test_runtime(), oxideterm_ai::AiProviderKeyStore::new(), cx)
+        });
+        entity.update(cx, |ai, _| {
+            ai.conversation_state
+                .create_conversation("a".into(), None, 1, None);
+            ai.conversation_state
+                .create_conversation("b".into(), None, 2, None);
+            ai.set_chat_draft("unfinished draft".into());
+            ai.set_conversation_archived("b", true);
+            assert_eq!(
+                ai.conversation_state.active_conversation_id.as_deref(),
+                Some("a")
+            );
+            assert!(
+                ai.conversation_state
+                    .conversations
+                    .iter()
+                    .find(|c| c.id == "b")
+                    .unwrap()
+                    .archived
+            );
+            ai.set_conversation_archived("a", true);
+            assert_eq!(ai.conversation_state.active_conversation_id, None);
+            ai.set_conversation_archived("b", false);
+            ai.select_conversation("b".into());
+            assert!(
+                !ai.conversation_state
+                    .active_conversation()
+                    .unwrap()
+                    .archived
+            );
+            assert_eq!(ai.chat_ui.draft.as_str(), "unfinished draft");
+        });
+    }
+
+    #[gpui::test]
     fn message_queue_is_fifo_scoped_and_retained_on_stop(cx: &mut TestAppContext) {
         let entity = cx.new(|cx| {
             AiWorkspaceEntity::new(test_runtime(), oxideterm_ai::AiProviderKeyStore::new(), cx)
@@ -4761,9 +5137,11 @@ mod entity_tests {
                 .create_conversation("a".into(), None, 1, None);
             ai.conversation_state
                 .create_conversation("b".into(), None, 2, None);
+            let mut responses_turn = queued_turn("a1");
+            responses_turn.config.api_protocol = oxideterm_ai::AiApiProtocol::Responses;
             ai.queued_chat_turns.insert(
                 "a".into(),
-                VecDeque::from([queued_turn("a1"), queued_turn("a2")]),
+                VecDeque::from([responses_turn, queued_turn("a2")]),
             );
             ai.queued_chat_turns
                 .insert("b".into(), VecDeque::from([queued_turn("b1")]));
@@ -4774,8 +5152,12 @@ mod entity_tests {
             ai.cancel_chat_stream_for("a");
             let first = ai.take_queued_chat_turn("a").unwrap();
             assert_eq!(
-                (first.id.as_str(), first.config.model.as_str()),
-                ("a1", "queued-model")
+                (
+                    first.id.as_str(),
+                    first.config.model.as_str(),
+                    first.config.api_protocol
+                ),
+                ("a1", "queued-model", oxideterm_ai::AiApiProtocol::Responses)
             );
             assert_eq!(ai.take_queued_chat_turn("a").unwrap().id, "a2");
             assert!(ai.take_queued_chat_turn("a").is_none());
@@ -5309,6 +5691,7 @@ mod entity_tests {
             assert!(entity.provider_key_status_pending.is_empty());
             assert!(!entity.request_selector_provider_probe(
                 oxideterm_ai::AiProviderView {
+                    api_protocol: oxideterm_ai::AiApiProtocol::default(),
                     id: "provider-a".to_string(),
                     provider_type: "ollama".to_string(),
                     name: "Provider A".to_string(),
@@ -5758,6 +6141,406 @@ mod entity_tests {
         cx.run_until_parked();
 
         assert_eq!(release_receiver.try_recv(), Ok(false));
+    }
+
+    #[gpui::test]
+    fn history_description_pages_bound_loaded_rows_and_preserve_scroll_anchor(
+        cx: &mut TestAppContext,
+    ) {
+        use oxideterm_ai::{AiChatMessage, AiChatState, ConversationStore, HistoryMutation};
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConversationStore::open(directory.path().join("chat_history.v4.redb")).unwrap();
+        let mut state = AiChatState::default();
+        state.create_conversation("paged".into(), None, 1, None);
+        store
+            .apply(vec![HistoryMutation::Create {
+                conversation: state.conversations.remove(0),
+                revision: 1,
+            }])
+            .unwrap();
+        let message = |index: usize| {
+            serde_json::from_value::<AiChatMessage>(serde_json::json!({
+                "id":format!("message-{index}"), "role":"user", "timestamp_ms":index,
+                "content":format!("message {index}\n{}", "body text ".repeat(200)),
+            }))
+            .unwrap()
+        };
+        store
+            .apply(
+                (0..1000)
+                    .map(|index| HistoryMutation::PutMessage {
+                        conversation_id: "paged".into(),
+                        branch_id: "main".into(),
+                        message: message(index),
+                        revision: index as u64 + 2,
+                    })
+                    .collect(),
+            )
+            .unwrap();
+        let runtime = test_runtime();
+        let entity = cx.new(|cx| {
+            AiWorkspaceEntity::new(runtime.clone(), oxideterm_ai::AiProviderKeyStore::new(), cx)
+        });
+        entity.update(cx, |ai, cx| {
+            ai.initialize_history(directory.path().join("chat_history.redb"), cx)
+        });
+        let settle = |cx: &mut TestAppContext, first: &str, count: usize| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                runtime.block_on(tokio::task::yield_now());
+                cx.run_until_parked();
+                if entity.read_with(cx, |ai, _| {
+                    ai.history
+                        .pages
+                        .get("paged")
+                        .is_some_and(|page| !page.loading)
+                        && ai
+                            .conversation_state
+                            .active_conversation()
+                            .is_some_and(|conversation| {
+                                conversation.messages.len() == count
+                                    && conversation
+                                        .messages
+                                        .first()
+                                        .is_some_and(|message| message.id == first)
+                            })
+                }) {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "requested history page did not arrive"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        };
+        settle(cx, "message-950", 50);
+        assert_eq!(
+            store.cached_bytes(),
+            0,
+            "description loading must not decode bodies"
+        );
+        entity.update(cx, |ai, _| {
+            let conversation = ai.conversation_state.active_conversation().unwrap();
+            assert_eq!(
+                conversation
+                    .messages
+                    .iter()
+                    .map(|message| message.id.clone())
+                    .collect::<Vec<_>>(),
+                (950..1000)
+                    .map(|index| format!("message-{index}"))
+                    .collect::<Vec<_>>()
+            );
+            assert!(
+                conversation
+                    .messages
+                    .iter()
+                    .all(|message| message.content.chars().count() <= 256)
+            );
+            ai.sync_chat_message_list(
+                "paged",
+                &(0..52).collect::<Vec<_>>(),
+                ai_chat_virtual_list_spec(),
+            );
+            ai.chat_ui.message_list_state.scroll_to(gpui::ListOffset {
+                item_ix: 1,
+                offset_in_item: gpui::px(13.0),
+            });
+            ai.request_history_page("paged".into(), true);
+        });
+        settle(cx, "message-900", 100);
+        entity.update(cx, |ai, _| {
+            ai.sync_chat_message_list(
+                "paged",
+                &(0..102).collect::<Vec<_>>(),
+                ai_chat_virtual_list_spec(),
+            );
+            ai.restore_history_scroll_anchor("paged");
+            let top = ai.chat_ui.message_list_state.logical_scroll_top();
+            assert_eq!((top.item_ix, top.offset_in_item), (51, gpui::px(13.0)));
+            ai.chat_ui.message_list_state.scroll_to(gpui::ListOffset {
+                item_ix: 1,
+                offset_in_item: gpui::px(7.0),
+            });
+            ai.request_history_page("paged".into(), true);
+        });
+        settle(cx, "message-850", 100);
+        entity.update(cx, |ai, _| {
+            let page = &ai.history.pages["paged"];
+            assert_eq!(page.descriptions.len(), 100);
+            assert_eq!(page.after.as_ref().unwrap().before_sequence, 949);
+            ai.request_history_page("paged".into(), false);
+        });
+        settle(cx, "message-900", 100);
+        entity.update(cx, |ai, _| {
+            assert_eq!(
+                ai.conversation_state
+                    .active_conversation()
+                    .unwrap()
+                    .messages
+                    .last()
+                    .unwrap()
+                    .id,
+                "message-999"
+            );
+            assert!(ai.history.pages["paged"].after.is_none());
+            ai.request_history_body("paged".into(), "message-999".into(), None, false);
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            runtime.block_on(tokio::task::yield_now());
+            cx.run_until_parked();
+            if let Some(view) = entity.read_with(cx, |ai, _| {
+                ai.history.pages["paged"]
+                    .bodies
+                    .get("message-999")
+                    .and_then(std::sync::Weak::upgrade)
+            }) {
+                assert_eq!(
+                    view.message.content,
+                    format!("message 999\n{}", "body text ".repeat(200))
+                );
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "visible message body did not arrive"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let cached_main = entity.read_with(cx, |ai, _| {
+            ai.history.pages["paged"].bodies["message-999"]
+                .upgrade()
+                .unwrap()
+        });
+        let archive_owner = history::HistoryViewOwner::Archive("paged".into(), "archive".into());
+        entity.update(cx, |ai, _| {
+            let description = ai.history.pages["paged"].descriptions["message-999"].clone();
+            ai.history
+                .auxiliary_pages
+                .entry(archive_owner.clone())
+                .or_default()
+                .descriptions
+                .insert(description.id.clone(), description);
+            ai.request_history_owned_body(archive_owner.clone(), "message-999".into(), None, false);
+            // A main-list refresh must not invalidate an independent visible archive query.
+            ai.request_history_conversation("paged".into());
+        });
+        settle(cx, "message-950", 50);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            runtime.block_on(tokio::task::yield_now());
+            cx.run_until_parked();
+            if let Some(view) = entity.read_with(cx, |ai, _| {
+                ai.history_view(&archive_owner)
+                    .and_then(|page| page.bodies.get("message-999"))
+                    .and_then(std::sync::Weak::upgrade)
+            }) {
+                assert_eq!(
+                    view.message.content,
+                    format!("message 999\n{}", "body text ".repeat(200))
+                );
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "main page refresh stranded the archive body query"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        settle(cx, "message-950", 50);
+        entity.read_with(cx, |ai, _| {
+            let refreshed = ai.history.pages["paged"].bodies["message-999"]
+                .upgrade()
+                .unwrap();
+            assert!(
+                Arc::ptr_eq(&cached_main, &refreshed),
+                "unchanged history refresh must retain the decoded row"
+            );
+        });
+        struct HistoryPageRow {
+            ai: Entity<AiWorkspaceEntity>,
+            state: gpui::ListState,
+        }
+        impl gpui::Render for HistoryPageRow {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let ai = self.ai.clone();
+                let list = gpui::list(self.state.clone(), move |_, _, cx| {
+                    ai.update(cx, |ai, cx| {
+                        ai.request_visible_history_page("paged".into(), true, cx)
+                    });
+                    div().h(gpui::px(20.0)).w_full().into_any_element()
+                })
+                .size_full();
+                div()
+                    .relative()
+                    .size_full()
+                    .child(list)
+                    .child(oxideterm_gpui_ui::scroll::Scrollbar::for_list(&self.state))
+            }
+        }
+        let list_state = entity.read_with(cx, |ai, _| ai.chat_ui.message_list_state.clone());
+        list_state.reset(1);
+        for mode in [gpui::FollowMode::Tail, gpui::FollowMode::Normal] {
+            list_state.set_follow_mode(mode);
+            let view = cx.new(|_| HistoryPageRow {
+                ai: entity.clone(),
+                state: list_state.clone(),
+            });
+            cx.add_empty_window().draw(
+                gpui::point(gpui::px(0.0), gpui::px(0.0)),
+                gpui::size(gpui::px(200.0), gpui::px(100.0)),
+                move |_, _| view.clone().into_any_element(),
+            );
+            if matches!(mode, gpui::FollowMode::Tail) {
+                cx.run_until_parked();
+                assert_eq!(
+                    entity.read_with(cx, |ai, _| ai
+                        .conversation_state
+                        .active_conversation()
+                        .unwrap()
+                        .messages
+                        .first()
+                        .unwrap()
+                        .id
+                        .clone()),
+                    "message-950"
+                );
+            } else {
+                settle(cx, "message-900", 100);
+            }
+        }
+        assert!(store.cached_bytes() <= oxideterm_ai::HISTORY_CACHE_BYTES);
+        let owner = history::HistoryViewOwner::Main("paged".into());
+        let held = entity.update(cx, |ai, cx| {
+            let mut body = message(999);
+            body.content = "visible payload".into();
+            let body = Arc::new(oxideterm_ai::live_message_view(&body, "paged", 1, None).unwrap());
+            let weak = Arc::downgrade(&body);
+            ai.history
+                .pages
+                .get_mut("paged")
+                .unwrap()
+                .bodies
+                .insert("message-999".into(), weak.clone());
+            ai.retain_visible_history_body(owner.clone(), "message-999".into(), cx);
+            weak
+        });
+        cx.run_until_parked();
+        assert_eq!(held.upgrade().unwrap().message.content, "visible payload");
+        entity.update(cx, |ai, cx| {
+            ai.retain_visible_history_body(owner, "message-998".into(), cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            held.upgrade().is_none(),
+            "scrolling away must release uncached body ownership"
+        );
+    }
+
+    #[gpui::test]
+    fn user_question_answers_are_scoped_to_the_live_conversation_run(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().unwrap();
+        let store =
+            oxideterm_ai::ConversationStore::open(directory.path().join("history.redb")).unwrap();
+        let writer = oxideterm_ai::HistoryWriter::new(store.clone()).unwrap();
+        let runtime = test_runtime();
+        let entity = cx.new(|cx| {
+            AiWorkspaceEntity::new(runtime.clone(), oxideterm_ai::AiProviderKeyStore::new(), cx)
+        });
+        let (first_tx, mut first_rx) = tokio::sync::oneshot::channel();
+        let (second_tx, mut second_rx) = tokio::sync::oneshot::channel();
+        entity.update(cx, |ai, _| {
+            ai.history.store = Some(store.clone());
+            ai.history.writer = Some(writer);
+            ai.history.status = HistoryStatus::Ready;
+            ai.create_conversation("first".into(), None, 1, None);
+            ai.create_conversation("second".into(), None, 2, None);
+            let first = ai.begin_chat_stream("first".into(), "reply-first".into()).0;
+            let second = ai
+                .begin_chat_stream("second".into(), "reply-second".into())
+                .0;
+            ai.pending_user_questions.insert(
+                (first, "question".into()),
+                AiPendingUserQuestion {
+                    conversation_id: "first".into(),
+                    dispatch: None,
+                    sender: first_tx,
+                },
+            );
+            ai.pending_user_questions.insert(
+                (second, "question".into()),
+                AiPendingUserQuestion {
+                    conversation_id: "second".into(),
+                    dispatch: None,
+                    sender: second_tx,
+                },
+            );
+            ai.cancel_chat_stream_for("first");
+            assert!(!ai.resolve_user_question(
+                first,
+                "question",
+                zeroize::Zeroizing::new("stale answer".into())
+            ));
+            assert!(!ai.resolve_user_question(
+                second,
+                "question",
+                zeroize::Zeroizing::new("  ".into())
+            ));
+            assert!(ai.resolve_user_question(
+                second,
+                "question",
+                zeroize::Zeroizing::new("Staging".into())
+            ));
+            assert!(!ai.resolve_user_question(
+                second,
+                "question",
+                zeroize::Zeroizing::new("duplicate".into())
+            ));
+        });
+        assert!(matches!(
+            first_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+        ));
+        assert!(
+            matches!(
+                second_rx.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ),
+            "the answer waits for the UI's commit acknowledgement"
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let answer = loop {
+            runtime.block_on(tokio::task::yield_now());
+            cx.run_until_parked();
+            match second_rx.try_recv() {
+                Ok(answer) => break answer,
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "answer must resume after the write commits"
+                    );
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(error) => panic!("answer was lost: {error}"),
+            }
+        };
+        assert_eq!(answer.as_str(), "Staging");
+        let events = store.events("second", "user_answer", None, 10).unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .map(|(_, event)| (event["toolCallId"].as_str(), event["answer"].as_str()))
+                .collect::<Vec<_>>(),
+            vec![(Some("question"), Some("Staging"))]
+        );
+        assert!(
+            store
+                .events("first", "user_answer", None, 10)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[gpui::test]

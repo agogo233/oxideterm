@@ -45,7 +45,9 @@ impl IdeSurface {
         let buffer = active_tab_id.and_then(|tab_id| self.workspace.buffer(tab_id));
         let is_dirty = buffer.is_some_and(|buffer| buffer.is_dirty());
         let active_language = active_tab
-            .and_then(|tab| buffer.and_then(|buffer| language_for_location(&tab.location, &buffer.text)))
+            .and_then(|tab| {
+                buffer.and_then(|buffer| language_for_location(&tab.location, &buffer.text))
+            })
             .map(|language| format!("{language:?}"));
         let (code_snippet, snippet_start_line) = buffer
             .map(|buffer| ai_code_snippet_around_start(&buffer.text))
@@ -270,7 +272,7 @@ impl IdeSurface {
         self.editors.clear();
         self.loading_file_tabs.clear();
         for buffer in buffers {
-            self.create_editor(buffer.tab_id, &buffer.location, buffer.text, cx);
+            self.create_editor(buffer.tab_id, &buffer.location, buffer.text.clone(), cx);
         }
         self.resume_agent_sampling(cx);
         cx.notify();
@@ -781,11 +783,17 @@ impl IdeSurface {
 
     fn handle_editor_find_shortcut(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
         let modifiers = event.keystroke.modifiers;
-        if modifiers.secondary()
-            && !modifiers.alt
-            && !modifiers.shift
-            && event.keystroke.key.eq_ignore_ascii_case("f")
+        let matches = if let Some(bindings) =
+            cx.try_global::<oxideterm_gpui_editor::EditorKeybindings>()
         {
+            bindings.resolve(&event.keystroke) == Some(oxideterm_gpui_editor::EditorShortcut::Find)
+        } else {
+            modifiers.secondary()
+                && !modifiers.alt
+                && !modifiers.shift
+                && event.keystroke.key.eq_ignore_ascii_case("f")
+        };
+        if matches {
             self.open_editor_search(cx);
             cx.stop_propagation();
         }
@@ -911,7 +919,9 @@ impl IdeSurface {
     fn replace_all_editor_search_matches(&mut self, cx: &mut Context<Self>) {
         if let Some(editor) = self.active_editor() {
             let replacement = self.editor_search.replacement.clone();
-            editor.update(cx, |editor, cx| editor.replace_all_find_matches(replacement, cx));
+            editor.update(cx, |editor, cx| {
+                editor.replace_all_find_matches(replacement, cx)
+            });
         }
     }
 
@@ -1141,12 +1151,11 @@ impl IdeSurface {
                         }
                         let dirty_text = remote_path(&result.location)
                             .and_then(|path| this.pending_restore_dirty_contents.remove(path));
-                        let _ = this
-                            .workspace
-                            .replace_buffer_text(tab_id, result.text.clone());
+                        let text: Arc<str> = result.text.into();
+                        let _ = this.workspace.replace_buffer_text(tab_id, text.clone());
                         let _ = this.workspace.set_file_format(tab_id, result.format);
                         let _ = this.workspace.mark_saved(tab_id, result.version);
-                        this.create_editor(tab_id, &result.location, result.text, cx);
+                        this.create_editor(tab_id, &result.location, text, cx);
                         if let Some(dirty_text) = dirty_text {
                             this.apply_reconnect_dirty_text(tab_id, dirty_text, cx);
                         }
@@ -1175,13 +1184,14 @@ impl IdeSurface {
         &mut self,
         tab_id: EditorTabId,
         location: &IdeLocation,
-        text: String,
+        text: Arc<str>,
         cx: &mut Context<Self>,
     ) {
         let tokens = self.tokens;
         let runtime_settings = self.runtime_settings.clone();
         let language = language_for_location(location, &text);
-        let surface = cx.entity();
+        // The IDE owns this editor; callbacks must not retain the IDE in return.
+        let surface = cx.weak_entity();
         let save_surface = surface.clone();
         let symbol_surface = surface;
         let editor = cx.new(|cx| {
@@ -1194,7 +1204,9 @@ impl IdeSurface {
             });
             editor.apply_ide_runtime_settings(
                 &tokens,
-                runtime_settings.editor_font_fallback.clone(),
+                runtime_settings.editor_font_family.clone(),
+            runtime_settings.editor_font_weight,
+            runtime_settings.editor_font_fallback.clone(),
                 runtime_settings.editor_font_size,
                 runtime_settings.editor_line_height,
                 runtime_settings.word_wrap,
@@ -1203,7 +1215,6 @@ impl IdeSurface {
             );
             editor.set_language(language, cx);
             editor.set_on_save(Box::new(move |text, _window, cx| {
-                let text = text.to_string();
                 let _ = save_surface.update(cx, |surface, cx| {
                     surface.save_tab_with_text(tab_id, text, cx);
                 });
@@ -1255,7 +1266,7 @@ impl IdeSurface {
         {
             let _ = self.workspace.set_file_format(tab_id, format);
         }
-        if dirty_text == buffer.saved_text {
+        if dirty_text.as_str() == buffer.saved_text.as_ref() {
             return;
         }
 
@@ -1263,7 +1274,7 @@ impl IdeSurface {
         // keeps the same user-intent rule so edits made after the snapshot win.
         let _ = self
             .workspace
-            .replace_buffer_text(tab_id, dirty_text.clone());
+            .replace_buffer_text(tab_id, dirty_text.as_str());
         if let Some(editor) = self.editors.get(&tab_id) {
             editor.update(cx, |editor, cx| {
                 editor.replace_text_external(dirty_text, cx);
@@ -1571,11 +1582,10 @@ impl IdeSurface {
             let result = await_ide_backend(backend_runtime.spawn({
                 async move {
                     match input.kind {
-                        TreeNameInputKind::NewFile => {
-                            fs.create_file(node_id_for_task, new_path_for_task.clone())
-                                .await
-                                .map(|_| ())
-                        }
+                        TreeNameInputKind::NewFile => fs
+                            .create_file(node_id_for_task, new_path_for_task.clone())
+                            .await
+                            .map(|_| ()),
                         TreeNameInputKind::NewFolder => {
                             fs.create_folder(node_id_for_task, new_path_for_task).await
                         }
@@ -1916,12 +1926,7 @@ impl IdeSurface {
         self.save_tab_current(tab_id, cx);
     }
 
-    fn save_tab_with_text(
-        &mut self,
-        tab_id: EditorTabId,
-        text: String,
-        cx: &mut Context<Self>,
-    ) {
+    fn save_tab_with_text(&mut self, tab_id: EditorTabId, text: Arc<str>, cx: &mut Context<Self>) {
         let _ = self.workspace.replace_buffer_text(tab_id, text);
         self.save_tab_current(tab_id, cx);
     }
@@ -2235,9 +2240,10 @@ impl IdeSurface {
             .await;
             let _ = weak.update(cx, |this, cx| {
                 if this.generation != generation
-                    || this.workspace.buffer(conflict.tab_id).is_none_or(|current| {
-                        current.location != conflict_location
-                    })
+                    || this
+                        .workspace
+                        .buffer(conflict.tab_id)
+                        .is_none_or(|current| current.location != conflict_location)
                 {
                     return;
                 }
@@ -2246,7 +2252,7 @@ impl IdeSurface {
                         this.conflict_state = None;
                         let _ = this
                             .workspace
-                            .replace_buffer_text(conflict.tab_id, data.text.clone());
+                            .replace_buffer_text(conflict.tab_id, data.text.as_str());
                         let _ = this.workspace.set_file_format(conflict.tab_id, data.format);
                         let _ = this.workspace.mark_saved(conflict.tab_id, data.version);
                         if let Some(editor) = this.editors.get(&conflict.tab_id) {
@@ -2271,7 +2277,7 @@ impl IdeSurface {
         let Some(editor) = self.editors.get(&tab_id) else {
             return;
         };
-        let text = editor.read(cx).buffer().text();
+        let text = editor.read(cx).buffer().text_snapshot();
         let _ = self.workspace.replace_buffer_text(tab_id, text);
     }
 
@@ -2799,5 +2805,146 @@ fn ide_plugin_file_path(location: &IdeLocation) -> String {
     match location {
         IdeLocation::Remote { path, .. } => path.clone(),
         IdeLocation::Local { path } => path.to_string_lossy().into_owned(),
+    }
+}
+
+#[cfg(test)]
+mod shared_text_tests {
+    use super::*;
+    use gpui::TestAppContext;
+
+    #[gpui::test]
+    fn editor_and_workspace_share_versions_without_overwriting_saved_text(cx: &mut TestAppContext) {
+        let router =
+            oxideterm_ssh::NodeRouter::new(oxideterm_ssh::SshConnectionRegistry::default());
+        let backend = Arc::new(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap(),
+        );
+        let surface = cx.new(|cx| {
+            IdeSurface::new(
+                NodeAgentIdeFileSystem::new(router, NodeAgentMode::Disabled),
+                oxideterm_theme::default_tokens(),
+                IdeLabels::default(),
+                IdeRuntimeSettings::default(),
+                backend,
+                cx,
+            )
+        });
+        let editor = surface.update(cx, |surface, cx| {
+            let location = IdeLocation::remote("sharing-test", "/repo/file.txt");
+            surface
+                .workspace
+                .open_project(IdeLocation::remote("sharing-test", "/repo"), "repo");
+            surface
+                .workspace
+                .open_file(location.clone(), "saved\n中文", SavedFileVersion::unknown())
+                .unwrap();
+            let tab = surface.workspace.active_tab().unwrap();
+            let saved = surface.workspace.buffer(tab).unwrap().text.clone();
+            surface.create_editor(tab, &location, saved.clone(), cx);
+            let editor = surface.editors[&tab].clone();
+            assert!(Arc::ptr_eq(
+                &saved,
+                &editor.read(cx).buffer().text_snapshot()
+            ));
+            editor.update(cx, |editor, cx| editor.insert_text("new\n", cx));
+            surface.sync_editor_to_workspace(tab, cx);
+            let buffer = surface.workspace.buffer(tab).unwrap();
+            assert_eq!(buffer.text.as_ref(), "new\nsaved\n中文");
+            assert_eq!(buffer.saved_text.as_ref(), "saved\n中文");
+            assert!(buffer.is_dirty());
+            assert!(Arc::ptr_eq(
+                &buffer.text,
+                &editor.read(cx).buffer().text_snapshot()
+            ));
+            let snapshot = surface.workspace.snapshot().unwrap();
+            assert!(Arc::ptr_eq(&snapshot.buffers[0].text, &buffer.text));
+            editor.update(cx, |editor, cx| editor.insert_text("later", cx));
+            surface.sync_editor_to_workspace(tab, cx);
+            assert_eq!(snapshot.buffers[0].text.as_ref(), "new\nsaved\n中文");
+            assert_eq!(
+                surface.workspace.buffer(tab).unwrap().text.as_ref(),
+                "new\nlatersaved\n中文"
+            );
+            editor.downgrade()
+        });
+        let weak = surface.downgrade();
+        drop(surface);
+        cx.update(|_| {});
+        cx.run_until_parked();
+        assert!(
+            weak.upgrade().is_none(),
+            "editor callbacks retained the IDE"
+        );
+        assert!(editor.upgrade().is_none(), "closed IDE retained the editor");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    #[ignore = "manual IDE and editor live-allocation benchmark"]
+    fn ide_editor_memory(cx: &mut TestAppContext) {
+        #[repr(C)]
+        #[derive(Default)]
+        struct Statistics {
+            blocks: u32,
+            live: usize,
+            peak: usize,
+            allocated: usize,
+        }
+        unsafe extern "C" {
+            fn malloc_zone_statistics(zone: *mut std::ffi::c_void, stats: *mut Statistics);
+        }
+        let allocated = || {
+            let mut stats = Statistics::default();
+            // A null zone measures all allocator zones, not process RSS.
+            unsafe { malloc_zone_statistics(std::ptr::null_mut(), &mut stats) };
+            stats.live
+        };
+        for bytes in [16 * 1024 * 1024, 64 * 1024 * 1024] {
+            let baseline = allocated();
+            let router =
+                oxideterm_ssh::NodeRouter::new(oxideterm_ssh::SshConnectionRegistry::default());
+            let backend = Arc::new(
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap(),
+            );
+            let surface = cx.new(|cx| {
+                IdeSurface::new(
+                    NodeAgentIdeFileSystem::new(router, NodeAgentMode::Disabled),
+                    oxideterm_theme::default_tokens(),
+                    IdeLabels::default(),
+                    IdeRuntimeSettings::default(),
+                    backend,
+                    cx,
+                )
+            });
+            surface.update(cx, |surface, cx| {
+                let location = IdeLocation::remote("memory-test", "/repo/file.txt");
+                surface.workspace.open_project(IdeLocation::remote("memory-test", "/repo"), "repo");
+                surface.workspace.open_file(location.clone(), "x".repeat(bytes), SavedFileVersion::unknown()).unwrap();
+                let tab = surface.workspace.active_tab().unwrap();
+                let text = surface.workspace.buffer(tab).unwrap().text.clone();
+                surface.create_editor(tab, &location, text, cx);
+                let opened = allocated();
+                surface.sync_editor_to_workspace(tab, cx);
+                let snapshot = surface.workspace.snapshot().unwrap();
+                let synchronized = allocated();
+                assert_eq!(snapshot.buffers[0].text.len(), bytes);
+                assert!(snapshot.buffers[0].text.bytes().all(|byte| byte == b'x'));
+                eprintln!("IDE_EDITOR_MEMORY bytes={bytes} baseline={baseline} opened={opened} synchronized={synchronized}");
+                std::hint::black_box(snapshot);
+            });
+            let weak = surface.downgrade();
+            drop(surface);
+            cx.update(|_| {});
+            cx.run_until_parked();
+            assert!(weak.upgrade().is_none(), "closed IDE was retained");
+            eprintln!("IDE_EDITOR_CLOSED bytes={bytes} closed={}", allocated());
+        }
     }
 }

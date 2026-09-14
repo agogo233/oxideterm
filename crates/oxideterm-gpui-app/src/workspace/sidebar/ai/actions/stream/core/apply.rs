@@ -154,6 +154,7 @@ impl AiWorkspaceEntity {
         }
         // Advance only after the ACP prompt completed successfully. Failed or
         // cancelled turns retain the previous cursor so context is never lost.
+        self.history_metadata_changed(conversation_id);
         self.persist_chat_state();
         true
     }
@@ -174,6 +175,7 @@ impl AiWorkspaceEntity {
         let Some(mut state) = ai_acp_session_state(conversation) else {
             return false;
         };
+        let title_changed = matches!(&update, oxideterm_ai::AcpSessionStateUpdate::SessionInfo { title: Some(title), .. } if !title.trim().is_empty());
         match update {
             oxideterm_ai::AcpSessionStateUpdate::ConfigOptions(config_options) => {
                 synchronize_ai_acp_config_selections(
@@ -213,6 +215,8 @@ impl AiWorkspaceEntity {
             return false;
         };
         metadata.insert(AI_ACP_SESSION_METADATA_KEY.to_string(), value);
+        self.history_metadata_changed(conversation_id);
+        if title_changed { self.history_title_changed(conversation_id); }
         self.persist_chat_state();
         true
     }
@@ -240,6 +244,7 @@ impl AiWorkspaceEntity {
             agent_id,
         );
         if applied {
+            self.history_metadata_changed(conversation_id);
             self.persist_chat_state();
         }
         applied
@@ -259,25 +264,20 @@ impl AiWorkspaceEntity {
         match event {
             AiStreamEvent::Usage { .. } => AiStreamApplyOutcome::Applied,
             AiStreamEvent::Content(chunk) => {
-                self.update_chat_message(conversation_id, message_id, |message| {
-                    message.content.push_str(&chunk);
-                    append_ai_turn_text_part(message, "text", &chunk, false);
-                });
+                self.append_chat_stream_text(conversation_id, message_id, &chunk, false);
                 AiStreamApplyOutcome::Applied
             }
             AiStreamEvent::Thinking(chunk) => {
-                self.update_chat_message(conversation_id, message_id, |message| {
-                    message
-                        .thinking_content
-                        .get_or_insert_with(String::new)
-                        .push_str(&chunk);
-                    append_ai_turn_text_part(message, "thinking", &chunk, true);
-                });
+                self.append_chat_stream_text(conversation_id, message_id, &chunk, true);
                 AiStreamApplyOutcome::Applied
             }
-            AiStreamEvent::ProviderResponsePart { .. } => {
-                // The live tool loop consumes provider replay metadata before
-                // UI delivery; other stream surfaces intentionally ignore it.
+            AiStreamEvent::ProviderResponsePart {
+                provider_type,
+                part,
+            } => {
+                self.update_chat_message(conversation_id, message_id, |message| {
+                    oxideterm_ai::append_responses_round(message, &provider_type, part);
+                });
                 AiStreamApplyOutcome::Applied
             }
             AiStreamEvent::ToolCall {
@@ -443,8 +443,13 @@ impl WorkspaceApp {
         event: AiStreamEvent,
         cx: &mut Context<Self>,
     ) {
-        let safe_error = matches!(&event, AiStreamEvent::Error(_))
-            .then(|| self.i18n.t("settings_view.ai.acp_agent_error_unknown"));
+        let safe_error = match &event {
+            AiStreamEvent::Error(error) => Some(
+                self.i18n.t(oxideterm_ai::stream_error_label(error)
+                    .unwrap_or("settings_view.ai.acp_agent_error_unknown")),
+            ),
+            _ => None,
+        };
         let child_message = self.ai_entity.read(cx).is_agent_message(message_id);
         let outcome = self.ai_entity.update(cx, |ai, _cx| {
             ai.apply_stream_event_state(
@@ -666,6 +671,9 @@ impl WorkspaceApp {
             .is_chat_stream_generation(generation)
         {
             return;
+        }
+        if name == "ask_user" && matches!(status, "completed" | "error" | "rejected") {
+            self.ai_entity.update(cx, |ai, _| { ai.pending_user_questions.remove(&(generation, tool_call_id.to_owned())); });
         }
         let persisted_arguments = sanitize_ai_tool_arguments_for_persistence(arguments);
         if status == "pending_user_approval" { self.notify_ai_agent_attention(conversation_id, message_id, "ai.agents.approval", cx); }

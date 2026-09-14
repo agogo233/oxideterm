@@ -453,7 +453,6 @@ pub(in crate::workspace) struct SettingsWorkspaceEntity {
     settings_search_open: bool,
     settings_search_query: String,
     keybinding_scope_filter: SettingsKeybindingScopeFilter,
-    previous_keybinding_scope_filter: SettingsKeybindingScopeFilter,
     keybinding_search_query: String,
     keybinding_recording_action_id: Option<String>,
     keybinding_conflict_action_ids: Vec<String>,
@@ -590,7 +589,6 @@ impl SettingsWorkspaceEntity {
             settings_search_open: false,
             settings_search_query: String::new(),
             keybinding_scope_filter: SettingsKeybindingScopeFilter::All,
-            previous_keybinding_scope_filter: SettingsKeybindingScopeFilter::All,
             keybinding_search_query: String::new(),
             keybinding_recording_action_id: None,
             keybinding_conflict_action_ids: Vec::new(),
@@ -839,12 +837,6 @@ impl SettingsWorkspaceEntity {
         self.keybinding_scope_filter
     }
 
-    pub(in crate::workspace) fn previous_keybinding_scope_filter(
-        &self,
-    ) -> SettingsKeybindingScopeFilter {
-        self.previous_keybinding_scope_filter
-    }
-
     pub(in crate::workspace) fn set_keybinding_scope_filter(
         &mut self,
         filter: SettingsKeybindingScopeFilter,
@@ -853,7 +845,6 @@ impl SettingsWorkspaceEntity {
         if self.keybinding_scope_filter == filter {
             return false;
         }
-        self.previous_keybinding_scope_filter = self.keybinding_scope_filter;
         self.keybinding_scope_filter = filter;
         cx.notify();
         true
@@ -910,6 +901,7 @@ impl SettingsWorkspaceEntity {
         &mut self,
         event: &KeyDownEvent,
         overrides: &serde_json::Map<String, serde_json::Value>,
+        definitions: &[crate::keybindings::ActionDefinition],
         cx: &mut Context<Self>,
     ) -> Option<KeybindingRecordingKeyAction> {
         if self.keybinding_recording_action_id.is_none() {
@@ -970,11 +962,16 @@ impl SettingsWorkspaceEntity {
             .expect("recording presence checked above");
         let combo = crate::keybindings::combo_from_keystroke(&event.keystroke)?;
         let side = crate::keybindings::KeybindingSide::current();
-        self.keybinding_conflict_action_ids =
-            crate::keybindings::conflicts_for_combo(action_id, &combo, overrides, side)
-                .into_iter()
-                .map(|definition| definition.id.to_string())
-                .collect();
+        self.keybinding_conflict_action_ids = crate::keybindings::conflicts_in_definitions(
+            action_id,
+            &combo,
+            overrides,
+            side,
+            definitions,
+        )
+        .into_iter()
+        .map(|definition| definition.id.to_string())
+        .collect();
         self.keybinding_recording_combo = Some(combo);
         self.keybinding_recording_footer_focus = None;
         cx.notify();

@@ -558,6 +558,9 @@ fn settings_search_specs() -> Vec<SettingsSearchEntrySpec> {
             1,
             "settings_view.ide.editor_typography",
             &[
+                "settings_view.ide.font_family",
+                "settings_view.ide.cjk_font_family",
+                "settings_view.ide.font_weight",
                 "settings_view.ide.font_size",
                 "settings_view.ide.line_height",
             ],
@@ -620,8 +623,7 @@ fn settings_search_specs() -> Vec<SettingsSearchEntrySpec> {
                 "settings_view.ai.context_sources",
                 "settings_view.ai.context_source_ide",
                 "settings_view.ai.context_source_sftp",
-                "settings_view.ai.buffer_history",
-                "settings_view.ai.max_response_tokens",
+                "settings_view.ai.context_automatic_hint",
             ],
         ),
         ai_search_entry(
@@ -643,10 +645,7 @@ fn settings_search_specs() -> Vec<SettingsSearchEntrySpec> {
             AiSettingsPage::Context,
             4,
             "settings_view.ai.model_context_windows",
-            &[
-                "settings_view.ai.model_context_windows_hint",
-                "settings_view.ai.max_response_tokens",
-            ],
+            &["settings_view.ai.model_context_windows_hint"],
         ),
         ai_search_entry(
             AiSettingsPage::Tools,

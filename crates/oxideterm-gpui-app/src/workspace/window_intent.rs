@@ -427,8 +427,7 @@ impl WorkspaceApp {
                 cx.dispatch_action(&crate::OpenSettings);
             }
             WindowIntentAction::Quit => {
-                oxideterm_desktop_presence::request_quit();
-                cx.quit();
+                super::request_app_quit(cx);
             }
             WindowIntentAction::OpenNativeConnection(launch) => {
                 oxideterm_desktop_presence::show_main_window();

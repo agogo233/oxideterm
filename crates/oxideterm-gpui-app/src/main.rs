@@ -278,6 +278,7 @@ fn main() {
         cx.activate(true);
         cx.on_action(quit);
         cx.bind_keys(platform::app_key_bindings(&startup_settings));
+        keybindings::install_context_keybindings(&startup_settings.keybindings.overrides, cx);
         cx.set_menus(platform::app_menus(&I18n::default()));
 
         let desktop_presence_menu = desktop_presence_menu(&I18n::new(locale_from_settings(
@@ -491,8 +492,7 @@ fn relaunch_after_restart_wait(args: &[OsString]) {
 }
 
 fn quit(_: &Quit, cx: &mut App) {
-    oxideterm_desktop_presence::request_quit();
-    cx.quit();
+    workspace::request_app_quit(cx);
 }
 
 fn desktop_presence_menu(i18n: &I18n) -> oxideterm_desktop_presence::DesktopPresenceMenu {

@@ -29,8 +29,6 @@
       "communication": "Communication",
       "received": "Received",
       "consumed": "Consumed",
-      "remote_unknown": "The agent has stopped. Remote command termination has not been confirmed.",
-      "return_control": "Return terminal control to AI",
       "usage_unknown": "Token usage unavailable",
       "message_not_sent": "Could not send the additional instructions.",
       "supplement": "Additional instructions",
@@ -79,6 +77,14 @@
       "load_failed_generic": "OxideSens could not load chat history from the local database.",
       "database_locked": "Another OxideTerm instance is using the chat database. Close the other instance, then retry.",
       "database_upgrade_required": "This chat database requires a newer migration path and could not be opened safely.",
+      "conversations": "Conversations",
+      "archive_conversation": "Archive conversation",
+      "restore_conversation": "Restore conversation",
+      "archived_conversations": "Archived conversations",
+      "show_active": "Back to conversations",
+      "no_archived_conversations": "No archived conversations",
+      "list_more": "Load more conversations",
+      "list_retry": "Loading failed. Retry",
       "no_conversations": "No conversations yet",
       "start_conversation": "Start a conversation",
       "start_conversation_hint": "Ask questions about shell commands, scripts, or get help with terminal operations.",
@@ -351,7 +357,8 @@
         "manage_telnet_session": "Manage Telnet Session",
         "open_transport_profile": "Open Transport Profile",
         "read_skill_resource": "Read Skill Resource",
-        "wait_terminal_output": "Wait for Terminal Output"
+        "wait_terminal_output": "Wait for Terminal Output",
+        "ask_user": "Ask user"
       },
       "risk_labels": {
         "read": "Read",
@@ -544,6 +551,21 @@
       "draft_not_empty": "Send or clear the current draft before editing a queued message.",
       "steer_unavailable": "This turn cannot accept steering right now. Your message has been kept.",
       "client_command_busy": "Wait for the current task to finish before using this command."
+    },
+    "questions": {
+      "waiting": "Waiting for your answer",
+      "answer": "Send answer",
+      "hint": "Choose an option, or type your answer below. The task will continue after you answer."
+    },
+    "history": {
+      "loading": "Loading chat history…",
+      "unsaved": "Unsaved changes. New requests and tool calls are paused.",
+      "quit_title": "Chat history has not finished saving",
+      "quit_detail": "Retry saving, cancel quitting, or quit and discard only the changes that have not been saved.",
+      "cancel_quit": "Cancel quit",
+      "discard_quit": "Quit without saving",
+      "older": "Earlier messages",
+      "newer": "Later messages"
     }
   }
 }

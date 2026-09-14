@@ -64,6 +64,8 @@ pub enum SelectAnchorId {
     SettingsAppearanceBackgroundBlurSlider,
     SettingsAppearanceBackgroundFit,
     SettingsCustomThemeDuplicate,
+    SettingsIdeFontFamily,
+    SettingsIdeCjkFontFamily,
     SettingsTerminalFontFamily,
     SettingsTerminalCjkFontFamily,
     SettingsTerminalFontSizeSlider,
@@ -91,8 +93,6 @@ pub enum SelectAnchorId {
     SettingsNetworkProxyProtocol,
     SettingsNetworkProxyAuth,
     SettingsAiProviderTemplate,
-    SettingsAiContextMaxChars,
-    SettingsAiContextVisibleLines,
     SettingsAiEmbeddingProvider,
     SettingsKnowledgeCollectionScope,
     SettingsKnowledgeDocumentFormat,
@@ -185,6 +185,8 @@ impl SelectAnchorId {
                 | Self::SettingsAppearanceBackgroundFit
                 | Self::SettingsCustomThemeDuplicate
                 | Self::SettingsTerminalFontFamily
+                | Self::SettingsIdeFontFamily
+                | Self::SettingsIdeCjkFontFamily
                 | Self::SettingsTerminalCjkFontFamily
                 | Self::SettingsTerminalEncoding
                 | Self::SettingsTerminalBackspaceSequence
@@ -209,8 +211,6 @@ impl SelectAnchorId {
                 | Self::SettingsNetworkProxyProtocol
                 | Self::SettingsNetworkProxyAuth
                 | Self::SettingsAiProviderTemplate
-                | Self::SettingsAiContextMaxChars
-                | Self::SettingsAiContextVisibleLines
                 | Self::SettingsAiEmbeddingProvider
                 | Self::SettingsKnowledgeCollectionScope
                 | Self::SettingsKnowledgeDocumentFormat

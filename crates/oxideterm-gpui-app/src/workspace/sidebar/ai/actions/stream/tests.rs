@@ -56,6 +56,38 @@ mod ai_turn_order_tests {
         });
     }
 
+    #[gpui::test]
+    fn responses_history_delivery_ignores_cancelled_generations(cx: &mut gpui::TestAppContext) {
+        let runtime = Arc::new(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap(),
+        );
+        let entity = cx.new(|cx| {
+            crate::workspace::ai_state::AiWorkspaceEntity::new(
+                runtime,
+                oxideterm_ai::AiProviderKeyStore::new(),
+                cx,
+            )
+        });
+        entity.update(cx, |ai, _| {
+            let conversation = ai.create_conversation("responses-conversation".into(), None, 1, None);
+            ai.add_message(&conversation, test_message("assistant", AiChatRole::Assistant, "visible".into()));
+            let (generation, _) = ai.begin_chat_stream(conversation.clone(), "assistant".into());
+            let part = serde_json::json!({"output":[{"type":"reasoning","id":"rs_1","summary":[],"encrypted_content":"opaque"}],"results":[],"callIds":{}});
+            let event = AiStreamEvent::ProviderResponsePart {provider_type:"responses:scope".into(),part:part.clone()};
+            ai.apply_stream_event_state(generation, &conversation, "assistant", event.clone(), None);
+            ai.cancel_chat_stream_for(&conversation);
+            let (next, _) = ai.begin_chat_stream(conversation.clone(), "assistant".into());
+            ai.apply_stream_event_state(generation, &conversation, "assistant", event, None);
+            ai.apply_stream_event_state(next, &conversation, "assistant", AiStreamEvent::Content(" next".into()), None);
+            let message = &ai.conversation_state().conversations[0].messages[0];
+            assert_eq!(message.content, "visible next");
+            assert_eq!(oxideterm_ai::ai_provider_parts(message,"responses:scope"),Some([part].as_slice()));
+        });
+    }
+
     #[test]
     fn persisted_tool_arguments_drop_secret_capable_execution_payloads() {
         let arguments = serde_json::json!({
@@ -359,6 +391,7 @@ mod ai_turn_order_tests {
     #[test]
     fn acp_session_started_ignores_stale_generation_and_persists_current_metadata() {
         let mut conversations = vec![AiConversation {
+        archived: false,
             id: "conv-1".to_string(),
             title: "Conversation".to_string(),
             messages: Vec::new(),
@@ -480,6 +513,7 @@ mod ai_turn_order_tests {
     #[test]
     fn acp_handoff_cursor_advances_only_for_the_matching_agent() {
         let mut conversation = AiConversation {
+        archived: false,
             id: "conv-1".to_string(),
             title: "Conversation".to_string(),
             messages: vec![AiChatMessage {
@@ -697,6 +731,7 @@ mod ai_turn_order_tests {
                 kind: "compaction-anchor".to_string(),
                 original_count: Some(compacted.len()),
                 compacted_at_ms: Some(1),
+                original_ref: None,
                 original_messages: Some(compacted),
                 original_user_count: Some(2),
             }),

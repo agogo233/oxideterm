@@ -29,8 +29,6 @@
       "communication": "Comunicazione tra agenti",
       "received": "Ricevuto",
       "consumed": "Elaborato",
-      "remote_unknown": "L’agente è stato fermato. La fine del comando remoto non è confermata.",
-      "return_control": "Restituisci il controllo del terminale all’IA",
       "usage_unknown": "Utilizzo dei token sconosciuto",
       "message_not_sent": "Impossibile inviare le istruzioni aggiuntive.",
       "supplement": "Istruzioni aggiuntive",
@@ -79,6 +77,14 @@
       "load_failed_generic": "OxideSens non è riuscito a caricare la cronologia della chat dal database locale.",
       "database_locked": "Un'altra istanza di OxideTerm sta usando il database della chat. Chiudi l'altra istanza e riprova.",
       "database_upgrade_required": "Questo database della chat richiede un percorso di migrazione più recente e non è stato possibile aprirlo in modo sicuro.",
+      "conversations": "Conversazioni",
+      "archive_conversation": "Archivia conversazione",
+      "restore_conversation": "Ripristina conversazione",
+      "archived_conversations": "Conversazioni archiviate",
+      "show_active": "Torna alle conversazioni",
+      "no_archived_conversations": "Nessuna conversazione archiviata",
+      "list_more": "Carica altre conversazioni",
+      "list_retry": "Caricamento non riuscito. Riprova",
       "no_conversations": "Nessuna conversazione",
       "start_conversation": "Inizia una conversazione",
       "start_conversation_hint": "Fai domande sui comandi shell, script o ottieni aiuto con le operazioni del terminale.",
@@ -351,7 +357,8 @@
         "manage_telnet_session": "Gestisci sessione Telnet",
         "open_transport_profile": "Apri profilo di trasporto",
         "read_skill_resource": "Leggi risorsa skill",
-        "wait_terminal_output": "Attendi output del terminale"
+        "wait_terminal_output": "Attendi output del terminale",
+        "ask_user": "Chiedi all’utente"
       },
       "risk_labels": {
         "read": "Lettura",
@@ -544,6 +551,21 @@
       "draft_not_empty": "Invia o cancella la bozza attuale prima di modificare un messaggio in coda.",
       "steer_unavailable": "Questo turno non può essere riorientato al momento. Il messaggio è stato conservato.",
       "client_command_busy": "Attendi la fine dell’attività attuale prima di usare questo comando."
+    },
+    "questions": {
+      "waiting": "In attesa della tua risposta",
+      "answer": "Invia risposta",
+      "hint": "Scegli un’opzione o scrivi la risposta qui sotto. L’attività riprenderà dopo la risposta."
+    },
+    "history": {
+      "loading": "Caricamento della cronologia…",
+      "unsaved": "Modifiche non salvate. Le nuove richieste e chiamate agli strumenti sono in pausa.",
+      "quit_title": "Il salvataggio della cronologia non è terminato",
+      "quit_detail": "Riprova a salvare, annulla l’uscita o esci scartando solo le modifiche non salvate.",
+      "cancel_quit": "Annulla uscita",
+      "discard_quit": "Esci senza salvare",
+      "older": "Messaggi precedenti",
+      "newer": "Messaggi successivi"
     }
   }
 }
