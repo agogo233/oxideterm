@@ -506,6 +506,14 @@ impl WorkspaceApp {
             // A pre-gallery GPUI setting may still point directly at a user file.
             background_images.insert(0, active_path.clone());
         }
+        // Purge any full-resolution decode the pre-downscale background renderer
+        // may have pinned in the GPUI asset system during an earlier version's
+        // process. Harmless and idempotent when nothing is cached.
+        if let Some(background_image) = settings.terminal.background_image.as_deref() {
+            cx.remove_asset::<gpui::ImgResourceLoader>(&gpui::Resource::from(
+                std::path::PathBuf::from(background_image),
+            ));
+        }
         settings_workspace.update(cx, |settings, _cx| {
             settings.initialize_background_gallery(background_images);
         });
