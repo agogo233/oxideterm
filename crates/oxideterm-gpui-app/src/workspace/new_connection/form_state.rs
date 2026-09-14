@@ -371,6 +371,7 @@ pub(in crate::workspace) struct NewConnectionProxyHop {
     pub(in crate::workspace) username: String,
     pub(in crate::workspace) auth_tab: SshAuthTab,
     pub(in crate::workspace) password: String,
+    pub(in crate::workspace) empty_password: bool,
     pub(in crate::workspace) key_path: String,
     pub(in crate::workspace) managed_key_id: String,
     pub(in crate::workspace) cert_path: String,
@@ -433,6 +434,7 @@ impl NewConnectionProxyHop {
             username: String::new(),
             auth_tab: SshAuthTab::SshKey,
             password: String::new(),
+            empty_password: false,
             key_path: String::new(),
             managed_key_id: String::new(),
             cert_path: String::new(),
@@ -461,6 +463,7 @@ impl NewConnectionProxyHop {
             username: hop.username.clone(),
             auth_tab: ssh_auth_tab_from_saved_auth(&hop.auth),
             password: String::new(),
+            empty_password: hop.auth.uses_empty_password(),
             key_path: hop.auth.key_path().unwrap_or_default().to_string(),
             managed_key_id: hop.auth.managed_key_id().unwrap_or_default().to_string(),
             cert_path: hop.auth.cert_path().unwrap_or_default().to_string(),
@@ -489,7 +492,7 @@ impl NewConnectionProxyHop {
 
     pub(in crate::workspace) fn has_explicit_secret_draft(&self) -> bool {
         match self.auth_tab {
-            SshAuthTab::Password => !self.password.is_empty(),
+            SshAuthTab::Password => self.empty_password || !self.password.is_empty(),
             SshAuthTab::DefaultKey
             | SshAuthTab::SshKey
             | SshAuthTab::ManagedKey
@@ -509,6 +512,7 @@ impl NewConnectionProxyHop {
             && self.port.trim().parse::<u16>().ok() == Some(connection.port)
             && self.username.trim() == connection.username
             && self.auth_tab == ssh_auth_tab_from_saved_auth(&connection.auth)
+            && self.empty_password == connection.auth.uses_empty_password()
             && self.key_path.trim() == connection.auth.key_path().unwrap_or_default()
             && self.cert_path.trim() == connection.auth.cert_path().unwrap_or_default()
             && self.managed_key_id.trim() == connection.auth.managed_key_id().unwrap_or_default()
@@ -532,6 +536,7 @@ impl NewConnectionProxyHop {
 
     pub(in crate::workspace) fn apply_saved_connection(&mut self, connection: &ConnectionInfo) {
         self.saved_connection_id = connection.id.clone();
+        self.empty_password = connection.empty_password;
         self.persisted_proxy_hop_index = None;
         self.host = connection.host.clone();
         self.port = connection.port.to_string();
@@ -600,6 +605,7 @@ pub(in crate::workspace) struct StandaloneSftpSecondaryForm {
     pub(in crate::workspace) username: String,
     pub(in crate::workspace) auth_tab: SshAuthTab,
     pub(in crate::workspace) password: String,
+    pub(in crate::workspace) empty_password: bool,
     pub(in crate::workspace) password_keychain_id: Option<String>,
     pub(in crate::workspace) password_visible: bool,
     pub(in crate::workspace) key_path: String,
@@ -644,6 +650,7 @@ impl Default for StandaloneSftpSecondaryForm {
             username: "root".to_string(),
             auth_tab: SshAuthTab::Password,
             password: String::new(),
+            empty_password: false,
             password_keychain_id: None,
             password_visible: false,
             key_path: String::new(),
@@ -770,6 +777,7 @@ pub(in crate::workspace) struct NewConnectionForm {
     pub(in crate::workspace) gssapi_credentials_available: Option<bool>,
     pub(in crate::workspace) gssapi_credentials_check_pending: bool,
     pub(in crate::workspace) password: String,
+    pub(in crate::workspace) empty_password: bool,
     pub(in crate::workspace) remote_desktop_session_options: RemoteDesktopSessionOptions,
     /// Identifies an existing RDP/VNC asset without overloading SSH edit state.
     pub(in crate::workspace) remote_desktop_profile_id: Option<String>,
@@ -852,6 +860,8 @@ pub(in crate::workspace) struct NewConnectionForm {
     pub(in crate::workspace) legacy_ssh_compatibility: bool,
     pub(in crate::workspace) ssh_algorithms: SshAlgorithmPreferences,
     pub(in crate::workspace) ssh_algorithm_editor_open: bool,
+    pub(in crate::workspace) ssh_algorithm_selected: Option<String>,
+    pub(in crate::workspace) ssh_algorithm_menu: Option<(String, gpui::Point<gpui::Pixels>)>,
     pub(in crate::workspace) ssh_algorithm_editor_category: oxideterm_ssh::SshAlgorithmCategory,
     pub(in crate::workspace) connect_timeout_seconds: u64,
     /// Preserves transient invalid input while the numeric value fails closed at zero.
@@ -1076,6 +1086,7 @@ impl Default for NewConnectionForm {
             gssapi_credentials_available: None,
             gssapi_credentials_check_pending: false,
             password: String::new(),
+            empty_password: false,
             remote_desktop_session_options: RemoteDesktopSessionOptions::default(),
             remote_desktop_profile_id: None,
             remote_desktop_ssh_gateway_connection_id: None,
@@ -1145,6 +1156,8 @@ impl Default for NewConnectionForm {
             legacy_ssh_compatibility: false,
             ssh_algorithms: oxideterm_connections::SshAlgorithmPreferences::default(),
             ssh_algorithm_editor_open: false,
+            ssh_algorithm_selected: None,
+            ssh_algorithm_menu: None,
             ssh_algorithm_editor_category: oxideterm_ssh::SshAlgorithmCategory::Kex,
             connect_timeout_seconds: DEFAULT_SSH_CONNECT_TIMEOUT_SECONDS,
             connect_timeout_seconds_text: DEFAULT_SSH_CONNECT_TIMEOUT_SECONDS.to_string(),
@@ -1551,6 +1564,7 @@ pub(in crate::workspace) fn next_connection_field(
     transport: NewConnectionTransport,
     upstream_proxy_policy: NewConnectionUpstreamProxyPolicy,
     upstream_proxy_auth: NewConnectionUpstreamProxyAuth,
+    empty_password: bool,
     forward: bool,
 ) -> NewConnectionField {
     if transport == NewConnectionTransport::LocalTerminal {
@@ -1741,6 +1755,9 @@ pub(in crate::workspace) fn next_connection_field(
             ]);
         }
     }
+    if empty_password {
+        fields.retain(|field| *field != NewConnectionField::Password);
+    }
     let index = fields
         .iter()
         .position(|candidate| *candidate == field)
@@ -1759,6 +1776,7 @@ pub(in crate::workspace) fn next_jump_connection_field(
     field: NewConnectionField,
     auth_tab: SshAuthTab,
     gssapi_enabled: bool,
+    empty_password: bool,
     forward: bool,
 ) -> NewConnectionField {
     let mut fields: Vec<NewConnectionField> = match auth_tab {
@@ -1809,6 +1827,9 @@ pub(in crate::workspace) fn next_jump_connection_field(
     };
     if gssapi_enabled {
         fields.insert(3, NewConnectionField::JumpGssapiServerIdentity);
+    }
+    if empty_password {
+        fields.retain(|field| *field != NewConnectionField::JumpPassword);
     }
     let index = fields
         .iter()
@@ -1909,6 +1930,13 @@ pub(in crate::workspace) fn next_standalone_sftp_field(
         fields.push(NewConnectionField::StandaloneSftpSecondaryInitialRemotePath);
         fields.push(NewConnectionField::StandaloneSftpSecondaryConnectTimeoutSeconds);
     }
+    fields.retain(|field| match field {
+        NewConnectionField::Password => !form.empty_password,
+        NewConnectionField::StandaloneSftpSecondaryPassword => {
+            !form.standalone_sftp_secondary.empty_password
+        }
+        _ => true,
+    });
     let index = fields
         .iter()
         .position(|candidate| *candidate == form.focused_field)
@@ -2601,6 +2629,8 @@ mod tests {
             2222,
             "operator",
             SavedAuth::Password {
+                empty_password: false,
+
                 keychain_id: Some("mosh-password-owner".to_string()),
                 plaintext_password: None,
             },
@@ -2842,6 +2872,7 @@ mod tests {
     #[test]
     fn jump_hop_uses_saved_connection_metadata_without_secrets() {
         let connection = ConnectionInfo {
+            empty_password: false,
             id: "conn-1".to_string(),
             name: "Bastion".to_string(),
             group: Some("Prod".to_string()),

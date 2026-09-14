@@ -319,6 +319,19 @@ impl WorkspaceApp {
                     this.close_terminal_command_overlays(cx);
                 }),
             )
+            .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                let target = ime::WorkspaceImeTarget::ActiveSessionSearch;
+                let owns_selection = this.active_ime_target(cx) == Some(target);
+                if owns_selection
+                    && this
+                        .text_input_anchors
+                        .get(target.anchor_id())
+                        .is_none_or(|anchor| !anchor.bounds.contains(&event.position))
+                {
+                    this.clear_ime_selection();
+                    cx.notify();
+                }
+            }))
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 // The top rendered blocking portal owns every key before
                 // background IME, terminal, and shortcut routing can observe it.
@@ -1007,8 +1020,14 @@ impl WorkspaceApp {
                     .is_some_and(browser_behavior::pointer_capture_needs_workspace_overlay),
                 |root| root.child(self.render_workspace_pointer_capture_overlay(cx)),
             )
+            .when_some(self.render_session_sort_menu(cx), |root, menu| {
+                root.child(menu)
+            })
             .when(self.connection_form_state(cx).form.is_some(), |root| {
                 root.child(self.render_new_connection_modal(window, cx))
+            })
+            .when_some(self.render_ssh_algorithm_context_menu(cx), |root, menu| {
+                root.child(menu)
             })
             .when_some(self.render_sftp_presentation_dialog(cx), |root, dialog| {
                 root.child(dialog)

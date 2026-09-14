@@ -1,5 +1,17 @@
 {
   "sidebar": {
+    "search": {
+      "title": "搜尋工作階段",
+      "placeholder": "搜尋工作階段…",
+      "empty": "沒有相符的工作階段"
+    },
+    "sort": {
+      "title": "工作階段排序",
+      "default": "預設順序",
+      "name_ascending": "名稱升冪",
+      "name_descending": "名稱降冪",
+      "connected_first": "已連線優先"
+    },
     "actions": {
       "expand": "展開側邊欄",
       "collapse": "收合側邊欄",

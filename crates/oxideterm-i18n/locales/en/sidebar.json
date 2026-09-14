@@ -1,5 +1,17 @@
 {
   "sidebar": {
+    "search": {
+      "title": "Search sessions",
+      "placeholder": "Search sessions…",
+      "empty": "No matching sessions"
+    },
+    "sort": {
+      "title": "Sort sessions",
+      "default": "Default order",
+      "name_ascending": "Name: A–Z",
+      "name_descending": "Name: Z–A",
+      "connected_first": "Connected first"
+    },
     "actions": {
       "expand": "Expand Sidebar",
       "collapse": "Collapse Sidebar",

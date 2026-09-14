@@ -1,5 +1,7 @@
 use super::*;
+use gpui::point;
 use oxideterm_remote_desktop::RemoteDesktopSessionStatus;
+use oxideterm_settings::SessionSortOrder;
 
 impl standalone_connections::StandaloneConnectionKind {
     fn icon(self) -> LucideIcon {
@@ -70,7 +72,313 @@ fn session_status_can_remove_from_sidebar(status: ActiveSessionStatus) -> bool {
     )
 }
 
+const SESSION_SORT_OPTIONS: [(SessionSortOrder, &str); 4] = [
+    (SessionSortOrder::Default, "sidebar.sort.default"),
+    (
+        SessionSortOrder::NameAscending,
+        "sidebar.sort.name_ascending",
+    ),
+    (
+        SessionSortOrder::NameDescending,
+        "sidebar.sort.name_descending",
+    ),
+    (
+        SessionSortOrder::ConnectedFirst,
+        "sidebar.sort.connected_first",
+    ),
+];
+
+fn sort_active_session_rows(
+    rows: Vec<ActiveSessionSidebarRow>,
+    order: SessionSortOrder,
+) -> Vec<ActiveSessionSidebarRow> {
+    if order == SessionSortOrder::Default {
+        return rows;
+    }
+    let known: HashSet<_> = rows.iter().map(|row| row.node_id.clone()).collect();
+    let names: Vec<_> = rows.iter().map(|row| row.title.to_lowercase()).collect();
+    let mut siblings: HashMap<Option<NodeId>, Vec<usize>> = HashMap::new();
+    for (index, row) in rows.iter().enumerate() {
+        let parent = row
+            .parent_id
+            .as_ref()
+            .filter(|id| known.contains(id))
+            .cloned();
+        siblings.entry(parent).or_default().push(index);
+    }
+    let readiness = |row: &ActiveSessionSidebarRow| match row.node_view.readiness {
+        ActiveSessionReadiness::Ready => 0,
+        ActiveSessionReadiness::Connecting => 1,
+        ActiveSessionReadiness::Error => 2,
+        ActiveSessionReadiness::Disconnected => 3,
+    };
+    for group in siblings.values_mut() {
+        group.sort_by(|a, b| match order {
+            SessionSortOrder::NameAscending => names[*a].cmp(&names[*b]),
+            SessionSortOrder::NameDescending => names[*b].cmp(&names[*a]),
+            SessionSortOrder::ConnectedFirst => readiness(&rows[*a])
+                .cmp(&readiness(&rows[*b]))
+                .then_with(|| names[*a].cmp(&names[*b])),
+            SessionSortOrder::Default => std::cmp::Ordering::Equal,
+        });
+    }
+    let roots = siblings.remove(&None).unwrap_or_default();
+    let mut pending: Vec<_> = roots
+        .iter()
+        .enumerate()
+        .rev()
+        .map(|(position, index)| (*index, 0, position + 1 == roots.len()))
+        .collect();
+    let mut output = Vec::with_capacity(rows.len());
+    let mut rows: Vec<_> = rows.into_iter().map(Some).collect();
+    // Walk sorted sibling groups in preorder so descendants always follow their parent.
+    while let Some((index, depth, is_last)) = pending.pop() {
+        let mut row = rows[index].take().unwrap();
+        row.depth = depth;
+        row.is_last = is_last;
+        if let Some(children) = siblings.remove(&Some(row.node_id.clone())) {
+            pending.extend(
+                children
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .map(|(position, index)| (*index, depth + 1, position + 1 == children.len())),
+            );
+        }
+        output.push(row);
+    }
+    output
+}
+
+fn filter_active_session_rows(
+    mut rows: Vec<ActiveSessionSidebarRow>,
+    query: &str,
+) -> Vec<ActiveSessionSidebarRow> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return rows;
+    }
+    let parents: HashMap<_, _> = rows
+        .iter()
+        .map(|row| (row.node_id.clone(), row.parent_id.clone()))
+        .collect();
+    let mut retained = HashSet::new();
+    for row in &rows {
+        let protocol = row
+            .standalone_session
+            .as_ref()
+            .map(|session| format!("{:?}", session.kind))
+            .unwrap_or_else(|| "ssh".into());
+        let text = format!(
+            "{} {} {} {} {}",
+            row.title, row.host, row.username, row.port, protocol
+        )
+        .to_lowercase();
+        if query.split_whitespace().all(|term| text.contains(term)) {
+            let mut next = Some(row.node_id.clone());
+            while let Some(id) = next {
+                if !retained.insert(id.clone()) {
+                    break;
+                }
+                next = parents.get(&id).cloned().flatten();
+            }
+        }
+    }
+    rows.retain(|row| retained.contains(&row.node_id));
+    let last_children: HashMap<_, _> = rows
+        .iter()
+        .map(|row| (row.parent_id.clone(), row.node_id.clone()))
+        .collect();
+    for row in &mut rows {
+        row.is_last = last_children.get(&row.parent_id) == Some(&row.node_id);
+        row.has_children = last_children.contains_key(&Some(row.node_id.clone()));
+    }
+    rows
+}
+
 impl WorkspaceApp {
+    pub(in crate::workspace) fn render_session_search_button(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.workspace_tooltip_icon_button(
+            LucideIcon::Search,
+            self.tokens.metrics.sidebar_action_icon_size,
+            rgb(self.tokens.ui.text),
+            IconButtonOptions {
+                has_background: self.session_search_open,
+                background: self
+                    .session_search_open
+                    .then_some(rgb(self.tokens.ui.bg_hover)),
+                hover_background: Some(rgb(self.tokens.ui.bg_hover)),
+                ..IconButtonOptions::opaque_toolbar(
+                    self.tokens.metrics.sidebar_action_size,
+                    ButtonRadius::Md,
+                )
+            },
+            self.i18n.t("sidebar.search.title"),
+            "session-search",
+            false,
+            cx.listener(|this, _, window, cx| {
+                this.prepare_modal_interaction_boundary(cx);
+                this.session_search_open = !this.session_search_open;
+                this.clear_ime_selection();
+                if this.session_search_open {
+                    this.selected_ime_target = Some(ime::WorkspaceImeTarget::ActiveSessionSearch);
+                    window.focus(&this.focus_handle, cx);
+                    this.show_active_input_caret(cx);
+                } else {
+                    this.session_search_query.clear();
+                }
+                cx.stop_propagation();
+                cx.notify();
+            }),
+            cx.entity(),
+        )
+        .into_any_element()
+    }
+
+    pub(in crate::workspace) fn render_session_search_input(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .w_full()
+            .flex_none()
+            .h(px(36.0))
+            .px_3()
+            .flex()
+            .items_center()
+            .border_b_1()
+            .border_color(rgb(self.tokens.ui.border))
+            .bg(rgb(self.tokens.ui.bg))
+            .child(self.render_overlay_query_input(
+                ime::WorkspaceImeTarget::ActiveSessionSearch,
+                self.session_search_query.clone(),
+                self.i18n.t("sidebar.search.placeholder"),
+                self.tokens.metrics.sidebar_title_font_size,
+                20.0,
+                cx,
+            ))
+            .into_any_element()
+    }
+
+    pub(in crate::workspace) fn render_session_sort_button(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let button = self.workspace_tooltip_icon_button(
+            LucideIcon::ArrowDownAZ,
+            self.tokens.metrics.sidebar_action_icon_size,
+            rgb(self.tokens.ui.text),
+            IconButtonOptions {
+                has_background: self.session_sort_menu_open,
+                background: self
+                    .session_sort_menu_open
+                    .then_some(rgb(self.tokens.ui.bg_hover)),
+                hover_background: Some(rgb(self.tokens.ui.bg_hover)),
+                ..IconButtonOptions::opaque_toolbar(
+                    self.tokens.metrics.sidebar_action_size,
+                    ButtonRadius::Md,
+                )
+            },
+            self.i18n.t("sidebar.sort.title"),
+            "session-sort",
+            false,
+            cx.listener(|this, _, window, cx| {
+                let open = !this.session_sort_menu_open;
+                this.prepare_modal_interaction_boundary(cx);
+                this.session_sort_menu_open = open;
+                window.focus(&this.focus_handle, cx);
+                cx.stop_propagation();
+                cx.notify();
+            }),
+            cx.entity(),
+        );
+        let workspace = cx.entity();
+        div()
+            .ml_1()
+            .child(oxideterm_gpui_ui::select::select_anchor_probe(
+                SelectAnchorId::ActiveSessionSort,
+                button,
+                move |anchor, window, cx| {
+                    window.defer(cx, move |_, cx| {
+                        workspace.update(cx, |this, cx| this.update_select_anchor(anchor, cx));
+                    })
+                },
+            ))
+            .into_any_element()
+    }
+
+    pub(in crate::workspace) fn render_session_sort_menu(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if !self.session_sort_menu_open
+            || self.sidebar_collapsed
+            || self.effective_sidebar_panel_section() != SidebarSection::Sessions
+        {
+            return None;
+        }
+        let anchor = self
+            .select_anchors
+            .get(&SelectAnchorId::ActiveSessionSort)?;
+        let selected = self.settings_store.settings().sidebar_ui.session_sort_order;
+        let mut popup = oxideterm_gpui_ui::select::select_overlay_popup(&self.tokens, 220.0);
+        for (order, label) in SESSION_SORT_OPTIONS {
+            popup = popup.child(oxideterm_gpui_ui::select::select_option_action(
+                oxideterm_gpui_ui::select::select_option(
+                    &self.tokens,
+                    self.i18n.t(label),
+                    order == selected,
+                ),
+                false,
+                false,
+                cx.listener(move |this, _, _, cx| {
+                    this.settings_store
+                        .settings_mut()
+                        .sidebar_ui
+                        .session_sort_order = order;
+                    this.session_sort_menu_open = false;
+                    this.persist_sidebar_settings(cx);
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            ));
+        }
+        Some(
+            popover_backdrop()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.session_sort_menu_open = false;
+                        cx.stop_propagation();
+                        cx.notify();
+                    }),
+                )
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(|this, _, _, cx| {
+                        this.session_sort_menu_open = false;
+                        cx.stop_propagation();
+                        cx.notify();
+                    }),
+                )
+                .child(
+                    deferred(
+                        anchored()
+                            .anchor(Corner::TopRight)
+                            .position(anchor.bounds.bottom_right())
+                            .offset(point(px(0.0), px(4.0)))
+                            .position_mode(AnchoredPositionMode::Window)
+                            .child(popup),
+                    )
+                    .with_priority(oxideterm_gpui_ui::modal::TAURI_SELECT_LAYER_PRIORITY),
+                )
+                .into_any_element(),
+        )
+    }
+
     /// Keeps clickable session labels from competing with their control's pointer interaction.
     fn render_session_control_label(
         &self,
@@ -130,12 +438,22 @@ impl WorkspaceApp {
         &mut self,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        if self.active_session_sidebar_view_mode == ActiveSessionSidebarViewMode::Focus {
+        if self.active_session_sidebar_view_mode == ActiveSessionSidebarViewMode::Focus
+            && self.session_search_query.trim().is_empty()
+        {
             return self.render_active_sessions_focus_sidebar_content(cx);
         }
 
         let rows = self.active_session_sidebar_rows(cx);
         if rows.is_empty() {
+            if !self.session_search_query.trim().is_empty() {
+                return div()
+                    .p_4()
+                    .text_size(px(self.tokens.metrics.sidebar_title_font_size))
+                    .text_color(rgb(self.tokens.ui.text_muted))
+                    .child(self.i18n.t("sidebar.search.empty"))
+                    .into_any_element();
+            }
             return self.render_empty_sessions_sidebar_content(cx);
         }
 
@@ -266,7 +584,13 @@ impl WorkspaceApp {
                 .iter()
                 .map(|record| self.standalone_active_session_sidebar_row(record, cx)),
         );
-        rows
+        filter_active_session_rows(
+            sort_active_session_rows(
+                rows,
+                self.settings_store.settings().sidebar_ui.session_sort_order,
+            ),
+            &self.session_search_query,
+        )
     }
 
     fn standalone_active_session_sidebar_row(
@@ -2109,5 +2433,124 @@ impl WorkspaceApp {
                 ring: false,
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod sorting_tests {
+    use super::*;
+
+    fn row(id: &str, title: &str, parent: Option<&str>, ready: bool) -> ActiveSessionSidebarRow {
+        ActiveSessionSidebarRow {
+            node_id: NodeId::new(id),
+            parent_id: parent.map(NodeId::new),
+            saved_connection_id: None,
+            title: title.into(),
+            host: String::new(),
+            username: String::new(),
+            port: 22,
+            node_view: ActiveSessionNode {
+                id: id.into(),
+                title: title.into(),
+                port: 22,
+                terminal_ids: Vec::new(),
+                readiness: if ready {
+                    ActiveSessionReadiness::Ready
+                } else {
+                    ActiveSessionReadiness::Disconnected
+                },
+            },
+            depth: usize::from(parent.is_some()),
+            is_last: false,
+            has_children: false,
+            standalone_session: None,
+        }
+    }
+
+    #[test]
+    fn session_search_retains_ancestors_and_respects_sort_order() {
+        let mut a = row("a", "Alpha", Some("parent"), true);
+        a.host = "prod.example".into();
+        a.username = "ops".into();
+        let mut z = row("z", "Zulu", Some("parent"), false);
+        z.host = "prod.example".into();
+        z.username = "ops".into();
+        let rows = vec![
+            row("parent", "Gateway", None, true),
+            z,
+            a,
+            row("other", "Unrelated", None, true),
+        ];
+        for (order, expected) in [
+            (SessionSortOrder::NameAscending, vec!["parent", "a", "z"]),
+            (SessionSortOrder::NameDescending, vec!["parent", "z", "a"]),
+        ] {
+            let sorted = sort_active_session_rows(rows.clone(), order);
+            let filtered = filter_active_session_rows(sorted, " PROD ops ");
+            assert_eq!(
+                filtered
+                    .iter()
+                    .map(|row| row.node_id.0.as_str())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            assert!(filtered[0].has_children);
+            assert!(!filtered[1].is_last);
+            assert!(filtered[2].is_last);
+        }
+        assert_eq!(
+            filter_active_session_rows(rows.clone(), " ")
+                .iter()
+                .map(|row| row.node_id.0.as_str())
+                .collect::<Vec<_>>(),
+            vec!["parent", "z", "a", "other"]
+        );
+        assert!(filter_active_session_rows(rows, "missing").is_empty());
+    }
+
+    #[test]
+    fn session_sort_preserves_subtrees_and_updates_branch_ends() {
+        let rows = vec![
+            row("parent", "Zulu", None, true),
+            row("z", "zeta", Some("parent"), false),
+            row("a", "Alpha", Some("parent"), true),
+            row("other", "Beta", None, false),
+        ];
+        let ids = |rows: &[ActiveSessionSidebarRow]| {
+            rows.iter()
+                .map(|row| row.node_id.0.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        assert_eq!(
+            ids(&sort_active_session_rows(
+                rows.clone(),
+                SessionSortOrder::Default
+            )),
+            "parent,z,a,other"
+        );
+        let sorted = sort_active_session_rows(rows.clone(), SessionSortOrder::NameAscending);
+        assert_eq!(ids(&sorted), "other,parent,a,z");
+        assert_eq!(
+            sorted
+                .iter()
+                .map(|row| (row.depth, row.is_last))
+                .collect::<Vec<_>>(),
+            [(0, false), (0, true), (1, false), (1, true)]
+        );
+        assert_eq!(
+            ids(&sort_active_session_rows(
+                rows.clone(),
+                SessionSortOrder::NameDescending
+            )),
+            "parent,z,a,other"
+        );
+        assert_eq!(
+            ids(&sort_active_session_rows(
+                rows,
+                SessionSortOrder::ConnectedFirst
+            )),
+            "parent,a,z,other"
+        );
     }
 }

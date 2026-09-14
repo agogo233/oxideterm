@@ -1,5 +1,17 @@
 {
   "sidebar": {
+    "search": {
+      "title": "Cerca sessioni",
+      "placeholder": "Cerca sessioni…",
+      "empty": "Nessuna sessione corrispondente"
+    },
+    "sort": {
+      "title": "Ordina sessioni",
+      "default": "Ordine predefinito",
+      "name_ascending": "Nome: A–Z",
+      "name_descending": "Nome: Z–A",
+      "connected_first": "Connesse per prime"
+    },
     "actions": {
       "expand": "Espandi Barra Laterale",
       "collapse": "Comprimi Barra Laterale",

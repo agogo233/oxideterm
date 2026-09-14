@@ -618,6 +618,15 @@ impl WorkspaceApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.session_sort_menu_open {
+            if event.keystroke.key == "escape" {
+                self.session_sort_menu_open = false;
+                cx.notify();
+            }
+            cx.stop_propagation();
+            return;
+        }
+
         if self.terminal_command_sender_editor_focused(window, cx) {
             // Child editor handlers own the bubble path while focused.
             return;
@@ -630,6 +639,17 @@ impl WorkspaceApp {
             // The capture handler deliberately lets platform text input own text
             // and IME composition keys; the bubble fallback must follow the same
             // rule so inputs do not append or activate once per key path.
+            return;
+        }
+
+        if self.active_ime_target(cx) == Some(ime::WorkspaceImeTarget::ActiveSessionSearch) {
+            if event.keystroke.key == "escape" {
+                self.session_search_query.clear();
+                self.session_search_open = false;
+                self.clear_ime_selection();
+                cx.notify();
+            }
+            cx.stop_propagation();
             return;
         }
 

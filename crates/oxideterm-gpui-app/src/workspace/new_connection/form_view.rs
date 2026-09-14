@@ -3,6 +3,7 @@ use gpui::{
     MouseMoveEvent, ParentElement, PathPromptOptions, SharedString, Styled, Window, anchored,
     deferred, div, point, prelude::*, px, rgb, rgba,
 };
+use zeroize::Zeroize;
 
 use super::{
     ConnectionFormState,
@@ -164,6 +165,9 @@ impl WorkspaceApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if self.handle_ssh_algorithm_key(event, cx) {
+            return true;
+        }
         let saved_connection_form_uses_unloaded_secret =
             self.saved_connection_form_uses_unloaded_secret(cx);
         let key = event.keystroke.key.as_str();
@@ -294,6 +298,7 @@ impl WorkspaceApp {
                             form.focused_field,
                             jump_form.auth_tab,
                             jump_form.gssapi_enabled,
+                            jump_form.empty_password,
                             !modifiers.shift,
                         )
                     } else if form.transport == NewConnectionTransport::StandaloneSftp {
@@ -306,6 +311,7 @@ impl WorkspaceApp {
                             form.transport,
                             form.upstream_proxy_policy,
                             form.upstream_proxy_auth,
+                            form.empty_password,
                             !modifiers.shift,
                         )
                     };

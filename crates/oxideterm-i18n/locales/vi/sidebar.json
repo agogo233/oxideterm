@@ -1,5 +1,17 @@
 {
   "sidebar": {
+    "search": {
+      "title": "Tìm phiên",
+      "placeholder": "Tìm phiên…",
+      "empty": "Không có phiên phù hợp"
+    },
+    "sort": {
+      "title": "Sắp xếp phiên",
+      "default": "Thứ tự mặc định",
+      "name_ascending": "Tên: A–Z",
+      "name_descending": "Tên: Z–A",
+      "connected_first": "Ưu tiên đã kết nối"
+    },
     "actions": {
       "expand": "Mở rộng thanh bên",
       "collapse": "Thu gọn thanh bên",
