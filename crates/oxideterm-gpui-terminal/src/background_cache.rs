@@ -6,7 +6,7 @@ use std::{
 };
 
 use gpui::{RenderImage, Size};
-use image::{Frame, RgbaImage};
+use image::{Frame, GenericImageView, RgbaImage};
 
 use crate::image_budget::{release_image_bytes, try_reserve_image_bytes};
 use crate::terminal_ui::{TerminalBackgroundFit, TerminalBackgroundPreferences};
@@ -33,7 +33,7 @@ impl BackgroundImageTargetSize {
 /// Quantizes a logical display size to an aligned device-pixel target so the
 /// background cache key stays stable during incremental window resizes.
 pub fn background_display_target(size: Size<gpui::Pixels>, scale_factor: f32) -> BackgroundImageTargetSize {
-    let device = |logical: gpui::Pixels| ((logical.as_f32() * scale_factor).ceil().max(1.0) as u32);
+    let device = |logical: gpui::Pixels| (logical.as_f32() * scale_factor).ceil().max(1.0) as u32;
     BackgroundImageTargetSize {
         width: align_up(device(size.width)),
         height: align_up(device(size.height)),
