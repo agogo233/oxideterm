@@ -2860,7 +2860,7 @@ impl WorkspaceApp {
                             }
                             apply_transport_default_port(form, previous_transport, transport);
                             apply_transport_default_username(form, previous_transport, transport);
-                            if transport == NewConnectionTransport::Rdp && previous_transport != transport {
+                            if matches!(transport, NewConnectionTransport::Rdp | NewConnectionTransport::Telnet) && previous_transport != transport {
                                 form.upstream_proxy_policy = NewConnectionUpstreamProxyPolicy::Direct;
                                 form.upstream_proxy_protocol = SavedUpstreamProxyProtocol::Socks5;
                             }
@@ -3184,7 +3184,6 @@ impl WorkspaceApp {
                 cx,
             ))
             .child(self.render_connection_group_select(self.i18n.t("ssh.form.group"), &group, cx))
-            .child(self.render_connection_notes_fields(&notes, cx))
             .child(
                 div()
                     .flex()
@@ -3218,6 +3217,7 @@ impl WorkspaceApp {
                     ),
                 )
             })
+            .child(self.render_connection_notes_fields(&notes, cx))
             .into_any_element();
         let username_placeholder =
             if protocol == oxideterm_remote_desktop::RemoteDesktopProtocol::Rdp {
@@ -3645,7 +3645,6 @@ impl WorkspaceApp {
                     cx,
                 ),
             )
-            .child(self.render_connection_notes_fields(&notes, cx))
             .child(
                 div()
                     .flex()
@@ -3676,12 +3675,14 @@ impl WorkspaceApp {
                     self.tokens.ui.error,
                 ))
             })
+            .child(self.render_connection_notes_fields(&notes, cx))
             .into_any_element();
         div()
             .flex()
             .flex_col()
             .gap(px(self.tokens.metrics.modal_section_gap))
             .child(self.render_connection_form_section(ConnectionFormSection::Basic, basic, cx))
+            .child(self.render_upstream_proxy_policy_section(false, cx))
             .child(self.render_connection_form_section(
                 ConnectionFormSection::Terminal,
                 self.render_connection_terminal_options(cx),

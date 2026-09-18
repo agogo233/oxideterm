@@ -199,6 +199,7 @@ impl TerminalPane {
         }
 
         if key == "end" && modifiers.platform {
+            self.pending_search_reveal = false;
             let snapshot = {
                 let mut terminal = self.terminal.lock();
                 terminal.scroll_to_bottom();
@@ -211,6 +212,7 @@ impl TerminalPane {
         }
 
         if key == "home" && modifiers.platform {
+            self.pending_search_reveal = false;
             let snapshot = {
                 let mut terminal = self.terminal.lock();
                 terminal.scroll_to_top();
@@ -256,6 +258,20 @@ impl TerminalPane {
             && self.copy_selection_to_clipboard_if_present(cx)
         {
             return true;
+        }
+
+        // Shells may enable application cursor mode too; only alternate-screen applications
+        // and negotiated keyboard protocols bypass these shell editing shortcuts.
+        if !mode.intersects(TermMode::ALT_SCREEN | TermMode::KITTY_KEYBOARD_PROTOCOL) {
+            let sequence: Option<&[u8]> = match configured {
+                Some(TerminalShortcut::WordBackward) => Some(b"\x1bb"),
+                Some(TerminalShortcut::WordForward) => Some(b"\x1bf"),
+                _ => None,
+            };
+            if let Some(sequence) = sequence {
+                self.send_user_protocol_bytes(sequence, cx);
+                return true;
+            }
         }
 
         let scroll = match configured {
@@ -452,6 +468,7 @@ impl TerminalPane {
         let Some(scroll_delta) = self.determine_scroll_delta(event, scroll_multiplier) else {
             return;
         };
+        self.pending_search_reveal = false;
 
         if mouse_mode(mode, event.modifiers.shift) {
             self.clear_smooth_scroll_remainder();
@@ -1165,9 +1182,11 @@ impl TerminalPane {
             return;
         };
 
+        self.pending_search_reveal = false;
+
         let available = (geometry.track_height - geometry.height).max(px(1.0));
         let y = (position.y - geometry.y - thumb_offset_y).clamp(px(0.0), available);
-        let scroll_fraction = f32::from(y / available);
+        let scroll_fraction = y / available;
         let history = self.snapshot.scrollback_lines;
         let offset = ((1.0 - scroll_fraction) * history as f32).round() as usize;
         let snapshot = {
@@ -1318,6 +1337,8 @@ impl TerminalPane {
             return;
         }
 
+        self.pending_search_reveal = false;
+
         let snapshot = {
             let mut terminal = self.terminal.lock();
             terminal.scroll_to_display_offset(target_offset);
@@ -1337,6 +1358,7 @@ impl TerminalPane {
     }
 
     fn apply_scroll_action(&mut self, action: TerminalScrollAction, cx: &mut Context<Self>) {
+        self.pending_search_reveal = false;
         let snapshot = {
             let mut terminal = self.terminal.lock();
             match action {
@@ -1355,6 +1377,7 @@ impl TerminalPane {
     }
 
     pub(super) fn select_next_search_match(&mut self, forward: bool, cx: &mut Context<Self>) {
+        self.pending_search_reveal = false;
         let matches = self.current_search_matches();
         if matches.is_empty() {
             self.selected_search_match = None;
@@ -3221,9 +3244,10 @@ fn privilege_prompt_text_from_snapshot(snapshot: &TerminalSnapshot) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
+    use std::{rc::Rc, sync::Arc};
 
     use crate::SharedTerminalCommandHistory;
+    use crate::app::TERMINAL_SEARCH_DEBOUNCE;
     use gpui::{AppContext, IntoElement, Render, ScrollDelta, TestAppContext, Window, div, point};
     #[cfg(unix)]
     use oxideterm_terminal::{
@@ -3268,8 +3292,8 @@ mod tests {
         pane.update(cx, |pane, cx| {
             pane.test_accepts_input = true;
             pane.snapshot.lines[pane.snapshot.cursor_row].active_input = true;
-            pane.observe_autosuggest_input_bytes(b"ls", cx);
             pane.autosuggest_prompt_active = true;
+            pane.observe_autosuggest_input_bytes(b"ls", cx);
 
             assert!(pane.handle_terminal_autosuggest_key(
                 "down",
@@ -3285,6 +3309,82 @@ mod tests {
             assert_eq!(pane.autosuggest_selected_index, None);
             assert_eq!(pane.autosuggest_dismissed_query.as_deref(), Some("ls"));
         });
+    }
+
+    #[gpui::test]
+    fn word_shortcuts_send_shell_movement_but_preserve_application_keys(cx: &mut TestAppContext) {
+        let (_, cx) = cx.add_window_view(|_, _| TerminalScrollTestRoot);
+        let pane = cx.update(|window, cx| {
+            cx.set_global(TerminalKeybindings {
+                bindings: vec![
+                    (
+                        gpui::KeyBinding::new("alt-left", gpui::NoAction {}, None),
+                        TerminalShortcut::WordBackward,
+                    ),
+                    (
+                        gpui::KeyBinding::new("alt-right", gpui::NoAction {}, None),
+                        TerminalShortcut::WordForward,
+                    ),
+                ],
+                normalize: |key| Some(key.clone()),
+            });
+            cx.new(|cx| {
+                TerminalPane::new_recording_playback(
+                    20,
+                    2,
+                    TerminalUiPreferences::default(),
+                    window,
+                    cx,
+                )
+                .unwrap()
+            })
+        });
+        let delivered = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let output = delivered.clone();
+        pane.update(cx, |pane, cx| {
+            pane.test_accepts_input = true;
+            pane.set_input_broadcaster(Some(Rc::new(move |_, bytes, _| {
+                output.borrow_mut().push(bytes.to_vec());
+            })));
+            let event = |key, is_held| KeyDownEvent {
+                keystroke: gpui::Keystroke::parse(key).unwrap(),
+                is_held,
+                prefer_character_input: false,
+            };
+            pane.handle_key(&event("alt-left", false), cx);
+            pane.handle_key(&event("alt-right", true), cx);
+            for (enter, exit) in [
+                (b"\x1b[?1049h".as_slice(), b"\x1b[?1049l".as_slice()),
+                (b"\x1b[?1h".as_slice(), b"\x1b[?1l".as_slice()),
+                (b"\x1b[>1u".as_slice(), b"\x1b[<u".as_slice()),
+            ] {
+                pane.terminal.lock().feed_recording_output(enter);
+                pane.handle_key(&event("alt-left", false), cx);
+                pane.handle_key(&event("alt-right", false), cx);
+                pane.terminal.lock().feed_recording_output(exit);
+            }
+            pane.handle_key(&event("alt-left", true), cx);
+            cx.set_global(TerminalKeybindings {
+                bindings: Vec::new(),
+                normalize: |key| Some(key.clone()),
+            });
+            pane.handle_key(&event("alt-right", false), cx);
+        });
+        assert_eq!(
+            delivered.borrow().as_slice(),
+            [
+                b"\x1bb".to_vec(),
+                b"\x1bf".to_vec(),
+                b"\x1b[1;3D".to_vec(),
+                b"\x1b[1;3C".to_vec(),
+                b"\x1bb".to_vec(),
+                b"\x1bf".to_vec(),
+                b"\x1b[1;3D".to_vec(),
+                b"\x1b[1;3C".to_vec(),
+                b"\x1bb".to_vec(),
+                b"\x1b[1;3C".to_vec(),
+            ]
+        );
     }
 
     #[gpui::test]
@@ -3340,6 +3440,117 @@ mod tests {
             pane.handle_key(&event("ctrl-u"), cx);
             assert_eq!(pane.snapshot.display_offset, 0);
         });
+    }
+
+    #[gpui::test]
+    fn search_refresh_preserves_manual_scroll(cx: &mut TestAppContext) {
+        let (_, cx) = cx.add_window_view(|_, _| TerminalScrollTestRoot);
+        for pending in [false, true] {
+            for input in ["wheel", "scrollbar", "keyboard"] {
+                let pane = cx.update(|window, cx| {
+                    cx.new(|cx| {
+                        TerminalPane::new_recording_playback(
+                            20,
+                            3,
+                            TerminalUiPreferences::default(),
+                            window,
+                            cx,
+                        )
+                        .unwrap()
+                    })
+                });
+                pane.update(cx, |pane, cx| {
+                    let output = (0..20)
+                        .map(|row| {
+                            if row == 0 || row == 10 {
+                                format!("needle {row}")
+                            } else {
+                                format!("row {row}")
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\r\n");
+                    pane.terminal
+                        .lock()
+                        .feed_recording_output(output.as_bytes());
+                    let snapshot = pane.terminal.lock().snapshot();
+                    pane.snapshot = pane.stamp_snapshot(snapshot);
+                    pane.apply_scroll_action(TerminalScrollAction::Top, cx);
+                    pane.tick(cx);
+                    pane.set_search_query(Some("needle".into()), None, cx);
+                });
+                if !pending {
+                    cx.run_until_parked();
+                    cx.executor().advance_clock(TERMINAL_SEARCH_DEBOUNCE);
+                    cx.run_until_parked();
+                    pane.update(cx, |pane, _| {
+                        assert_eq!(pane.search_status().match_count, 2);
+                        assert_eq!(pane.snapshot.display_offset, 17);
+                    });
+                }
+                let offset = pane.update(cx, |pane, cx| {
+                    match input {
+                        "wheel" => pane.handle_scroll(
+                            &ScrollWheelEvent {
+                                delta: ScrollDelta::Lines(point(0.0, -2.0)),
+                                ..Default::default()
+                            },
+                            cx,
+                        ),
+                        "scrollbar" => {
+                            let geometry = pane.scrollbar_geometry().unwrap();
+                            pane.set_scrollbar_position(
+                                point(geometry.x, geometry.y + geometry.track_height),
+                                px(0.0),
+                                cx,
+                            );
+                        }
+                        _ => pane.apply_scroll_action(TerminalScrollAction::Bottom, cx),
+                    }
+                    let offset = pane.snapshot.display_offset;
+                    assert!(offset < 17, "{input} must move away from the match");
+                    pane.tick(cx);
+                    offset
+                });
+                cx.run_until_parked();
+                cx.executor().advance_clock(TERMINAL_SEARCH_DEBOUNCE);
+                cx.run_until_parked();
+                pane.update(cx, |pane, cx| {
+                    assert_eq!(pane.search_status().match_count, 2);
+                    assert_eq!(
+                        pane.snapshot.display_offset, offset,
+                        "{input}, pending={pending}"
+                    );
+                    pane.select_next_search_result(true, cx);
+                    assert_eq!(pane.search_status().active_match, Some(1));
+                    assert!(pane.visible_text_snapshot().contains("needle 10"));
+                });
+                let output_offset = pane.update(cx, |pane, cx| {
+                    pane.terminal.lock().feed_recording_output(b"\r\nneedle 20");
+                    pane.tick(cx);
+                    pane.snapshot.display_offset
+                });
+                cx.run_until_parked();
+                cx.executor().advance_clock(TERMINAL_SEARCH_DEBOUNCE);
+                cx.run_until_parked();
+                pane.update(cx, |pane, cx| {
+                    assert_eq!(pane.search_status().match_count, 3);
+                    assert_eq!(pane.snapshot.display_offset, output_offset);
+                    pane.select_next_search_result(false, cx);
+                    assert_eq!(pane.search_status().active_match, Some(0));
+                    assert!(pane.visible_text_snapshot().contains("needle 0"));
+                    pane.tick(cx);
+                    pane.set_search_query(Some("row 5".into()), None, cx);
+                });
+                cx.run_until_parked();
+                cx.executor().advance_clock(TERMINAL_SEARCH_DEBOUNCE);
+                cx.run_until_parked();
+                pane.update(cx, |pane, _| {
+                    assert_eq!(pane.search_status().match_count, 1);
+                    assert!(pane.visible_text_snapshot().contains("row 5"));
+                });
+            }
+        }
     }
 
     #[gpui::test]

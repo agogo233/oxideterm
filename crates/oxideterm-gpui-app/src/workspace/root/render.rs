@@ -16,6 +16,11 @@ impl WorkspaceApp {
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let mut modals = Vec::new();
+        let window_id = window.window_handle().window_id();
+        let document_dialog_owned_by_window = self
+            .ai_entity
+            .read(cx)
+            .knowledge_document_dialog_owned_by(window_id);
         match tab_kind {
             TabKind::Settings => {
                 if let Some(modal) = self.render_settings_navigation_editor(cx) {
@@ -27,7 +32,9 @@ impl WorkspaceApp {
                 if let Some(modal) = self.render_knowledge_create_collection_dialog(cx) {
                     modals.push(modal);
                 }
-                if let Some(modal) = self.render_knowledge_new_document_dialog(cx) {
+                if document_dialog_owned_by_window
+                    && let Some(modal) = self.render_knowledge_new_document_dialog(cx)
+                {
                     modals.push(modal);
                 }
                 if let Some(modal) = self.render_knowledge_delete_confirm_dialog(cx) {
@@ -45,6 +52,19 @@ impl WorkspaceApp {
                     modals.push(modal);
                 }
                 if let Some(modal) = self.render_portable_password_change_dialog(cx) {
+                    modals.push(modal);
+                }
+            }
+            TabKind::Knowledge => {
+                if let Some(modal) = self.render_knowledge_create_collection_dialog(cx) {
+                    modals.push(modal);
+                }
+                if document_dialog_owned_by_window
+                    && let Some(modal) = self.render_knowledge_new_document_dialog(cx)
+                {
+                    modals.push(modal);
+                }
+                if let Some(modal) = self.render_knowledge_delete_confirm_dialog(cx) {
                     modals.push(modal);
                 }
             }
@@ -126,7 +146,8 @@ impl WorkspaceApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let active_ime_target = self.active_ime_target(cx);
+        let window_id = window.window_handle().window_id();
+        let active_ime_target = self.active_ime_target_for_window(window_id, cx);
         self.workspace_input.update(cx, |input, cx| {
             input.sync_active_target(active_ime_target, cx);
         });
@@ -174,6 +195,7 @@ impl WorkspaceApp {
                         | TabKind::PluginManager
                         | TabKind::Plugin { .. }
                         | TabKind::CloudSync
+                        | TabKind::Knowledge
                         | TabKind::RemoteDesktop
                 )
             })
@@ -215,6 +237,11 @@ impl WorkspaceApp {
                     self.render_native_plugin_tab_surface(&plugin_id, &tab_id, cx)
                 }
                 (TabKind::CloudSync, _) => self.render_cloud_sync_surface(cx),
+                (TabKind::Knowledge, _) => self.render_knowledge_workspace_surface(
+                    KnowledgeWorkspaceLayout::MainWindow,
+                    window,
+                    cx,
+                ),
                 (TabKind::RemoteDesktop, _) => {
                     self.render_remote_desktop_surface(*tab_id, window, cx)
                 }
@@ -241,6 +268,9 @@ impl WorkspaceApp {
             .as_ref()
             .map(|(tab_id, kind, _)| self.render_tab_window_modals(*tab_id, kind, window, cx))
             .unwrap_or_default();
+        // Settings and Knowledge share one root-mounted select portal. Keeping it
+        // above tab-owned modals lets both surfaces use the same anchored control.
+        let settings_select_overlay = self.render_settings_select_overlay(window, cx);
         let window_background_layer =
             self.render_workspace_window_background(window_background, window, cx);
         let has_window_background = window_background_layer.is_some();
@@ -310,6 +340,17 @@ impl WorkspaceApp {
                     cx.stop_propagation();
                 }),
             )
+            .on_action(cx.listener(|this, _: &Quit, _window, cx| {
+                if this.guard_dirty_knowledge_app_quit(cx) {
+                    // The global listener terminates the process, so retain this action until the
+                    // user has explicitly saved or discarded the Knowledge draft.
+                    cx.stop_propagation();
+                } else {
+                    // GPUI actions stop during the bubble phase by default. A clean workspace must
+                    // explicitly continue to the application-level quit handler.
+                    cx.propagate();
+                }
+            }))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _event: &MouseDownEvent, _window, cx| {
@@ -320,8 +361,14 @@ impl WorkspaceApp {
                 }),
             )
             .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, _window, cx| {
-                let target = ime::WorkspaceImeTarget::ActiveSessionSearch;
-                let owns_selection = this.active_ime_target(cx) == Some(target);
+                let Some(target) = this.active_ime_target(cx) else {
+                    return;
+                };
+                let owns_selection = matches!(
+                    target,
+                    ime::WorkspaceImeTarget::ActiveSessionSearch
+                        | ime::WorkspaceImeTarget::KnowledgeSearch
+                );
                 if owns_selection
                     && this
                         .text_input_anchors
@@ -340,7 +387,7 @@ impl WorkspaceApp {
                     cx.stop_propagation();
                     return;
                 }
-                // The find bar is a workspace text input rather than editor
+// The find bar is a workspace text input rather than editor
                 // content, so its printable and composition keys must enter the
                 // shared platform-text pipeline before the editor owns the key.
                 if this.normalize_sftp_preview_find_ownership(
@@ -350,14 +397,18 @@ impl WorkspaceApp {
                 ) {
                     return;
                 }
-                if this.active_sftp_editor_owns_key(event.keystroke.key.as_str(), cx) {
+                if this.active_sftp_editor_owns_key(event.keystroke.key.as_str(), cx)
+                    || this.quick_command_text_editor_focused(window, cx)
+                {
                     // Windows emits committed characters only after an unhandled
                     // keydown. Do not let pane-level capture override the modal
                     // route that gives document keys to the focused editor.
                     return;
                 }
-                let active_ime_should_receive_key =
-                    this.defer_active_ime_key(&event.keystroke, window, cx);
+                let active_ime_target =
+                    this.active_ime_target_for_window(window.window_handle().window_id(), cx);
+                let active_ime_should_receive_key = active_ime_target.is_some()
+                    && this.defer_active_ime_key(&event.keystroke, window, cx);
                 if active_ime_should_receive_key {
                     // Tauri DOM inputs let printable keydown bubble while the
                     // browser performs the actual text mutation through the
@@ -366,16 +417,24 @@ impl WorkspaceApp {
                     // may not receive the character or IME candidate control.
                     return;
                 }
-                if this.handle_active_text_input_edit_shortcut(&event.keystroke, cx) {
+                if active_ime_target.is_some()
+                    && this.handle_active_text_input_edit_shortcut(&event.keystroke, cx)
+                {
                     window.prevent_default();
                     cx.stop_propagation();
-                } else if this.handle_active_text_input_delete_selection(&event.keystroke, cx) {
+                } else if active_ime_target.is_some()
+                    && this.handle_active_text_input_delete_selection(&event.keystroke, cx)
+                {
                     window.prevent_default();
                     cx.stop_propagation();
-                } else if this.handle_active_text_input_newline(&event.keystroke, cx) {
+                } else if active_ime_target.is_some()
+                    && this.handle_active_text_input_newline(&event.keystroke, cx)
+                {
                     window.prevent_default();
                     cx.stop_propagation();
-                } else if this.handle_active_text_input_transpose(&event.keystroke, cx) {
+                } else if active_ime_target.is_some()
+                    && this.handle_active_text_input_transpose(&event.keystroke, cx)
+                {
                     window.prevent_default();
                     cx.stop_propagation();
                 } else if this.handle_terminal_git_branch_picker_key(event, cx) {
@@ -384,7 +443,9 @@ impl WorkspaceApp {
                 } else if this.handle_compact_terminal_command_sender_key(event, window, cx) {
                     window.prevent_default();
                     cx.stop_propagation();
-                } else if this.handle_active_text_input_navigation(&event.keystroke, cx) {
+                } else if active_ime_target.is_some()
+                    && this.handle_active_text_input_navigation(&event.keystroke, cx)
+                {
                     window.prevent_default();
                     cx.stop_propagation();
                 } else if this.handle_host_process_search_key(event, cx) {
@@ -429,7 +490,7 @@ impl WorkspaceApp {
                         &this.settings_store.settings().keybindings.overrides,
                     )
                 {
-                    this.open_command_palette(cx);
+                    this.open_command_palette(window, cx);
                     window.prevent_default();
                     cx.stop_propagation();
                 } else if this
@@ -448,7 +509,7 @@ impl WorkspaceApp {
                     let quick_commands = &this.terminal.read(cx).quick_commands;
                     quick_commands.is_open() && quick_commands.focused_input().is_some()
                 } {
-                    this.handle_quick_commands_key(event, cx);
+                    this.handle_quick_commands_key(event, window, cx);
                     window.prevent_default();
                     cx.stop_propagation();
                 } else if this.handle_terminal_git_branch_picker_key(event, cx) {
@@ -484,6 +545,12 @@ impl WorkspaceApp {
                 {
                     // The editor owns its complete key model, including Tab and
                     // navigation keys that otherwise fall through to the pane.
+                } else if this.handle_knowledge_workspace_key(event, window, cx) {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                } else if this.knowledge_text_editor_focused(window, cx) {
+                    // Notes editors and menus own their keys instead of falling through
+                    // to terminal shortcuts.
                 } else if this.forward_remote_desktop_key_from_capture(event, cx) {
                     window.prevent_default();
                     cx.stop_propagation();
@@ -602,6 +669,7 @@ impl WorkspaceApp {
             ))
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
                 this.update_sidebar_resize(event, window, cx);
+                this.update_knowledge_resize(event, window, cx);
                 this.update_embedded_sftp_sidebar_resize(event, window, cx);
                 this.update_ai_sidebar_resize(event, window, cx);
                 this.update_sftp_pane_resize(event, window, cx);
@@ -706,8 +774,8 @@ impl WorkspaceApp {
             .on_action(cx.listener(|this, _: &ToggleSidebar, _window, cx| {
                 this.toggle_sidebar(cx);
             }))
-            .on_action(cx.listener(|this, _: &CommandPalette, _window, cx| {
-                this.open_command_palette(cx);
+            .on_action(cx.listener(|this, _: &CommandPalette, window, cx| {
+                this.open_command_palette(window, cx);
             }))
             .on_action(cx.listener(|this, _: &ZenMode, _window, cx| {
                 this.toggle_zen_mode(cx);
@@ -859,43 +927,45 @@ impl WorkspaceApp {
             .on_action(cx.listener(|this, _: &PaletteCleanupDead, _window, cx| {
                 this.cleanup_dead_local_terminal_sessions_from_palette(cx);
             }))
-            .on_action(cx.listener(|this, _: &SwitchLocaleEnglish, window, cx| {
-                this.switch_locale(Locale::En, window, cx);
+            .on_action(cx.listener(|this, _: &SwitchLocaleEnglish, _window, cx| {
+                this.switch_locale(Locale::En, cx);
             }))
-            .on_action(cx.listener(|this, _: &SwitchLocaleChinese, window, cx| {
-                this.switch_locale(Locale::ZhCn, window, cx);
-            }))
-            .on_action(
-                cx.listener(|this, _: &SwitchLocaleTraditionalChinese, window, cx| {
-                    this.switch_locale(Locale::ZhTw, window, cx);
-                }),
-            )
-            .on_action(cx.listener(|this, _: &SwitchLocaleGerman, window, cx| {
-                this.switch_locale(Locale::De, window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &SwitchLocaleSpanish, window, cx| {
-                this.switch_locale(Locale::EsEs, window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &SwitchLocaleFrench, window, cx| {
-                this.switch_locale(Locale::FrFr, window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &SwitchLocaleItalian, window, cx| {
-                this.switch_locale(Locale::It, window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &SwitchLocaleJapanese, window, cx| {
-                this.switch_locale(Locale::Ja, window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &SwitchLocaleKorean, window, cx| {
-                this.switch_locale(Locale::Ko, window, cx);
+            .on_action(cx.listener(|this, _: &SwitchLocaleChinese, _window, cx| {
+                this.switch_locale(Locale::ZhCn, cx);
             }))
             .on_action(
-                cx.listener(|this, _: &SwitchLocalePortugueseBrazil, window, cx| {
-                    this.switch_locale(Locale::PtBr, window, cx);
+                cx.listener(|this, _: &SwitchLocaleTraditionalChinese, _window, cx| {
+                    this.switch_locale(Locale::ZhTw, cx);
                 }),
             )
-            .on_action(cx.listener(|this, _: &SwitchLocaleVietnamese, window, cx| {
-                this.switch_locale(Locale::Vi, window, cx);
+            .on_action(cx.listener(|this, _: &SwitchLocaleGerman, _window, cx| {
+                this.switch_locale(Locale::De, cx);
             }))
+            .on_action(cx.listener(|this, _: &SwitchLocaleSpanish, _window, cx| {
+                this.switch_locale(Locale::EsEs, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SwitchLocaleFrench, _window, cx| {
+                this.switch_locale(Locale::FrFr, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SwitchLocaleItalian, _window, cx| {
+                this.switch_locale(Locale::It, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SwitchLocaleJapanese, _window, cx| {
+                this.switch_locale(Locale::Ja, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SwitchLocaleKorean, _window, cx| {
+                this.switch_locale(Locale::Ko, cx);
+            }))
+            .on_action(
+                cx.listener(|this, _: &SwitchLocalePortugueseBrazil, _window, cx| {
+                    this.switch_locale(Locale::PtBr, cx);
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &SwitchLocaleVietnamese, _window, cx| {
+                    this.switch_locale(Locale::Vi, cx);
+                }),
+            )
             .on_action(cx.listener(|this, _: &GoToTab1, window, cx| {
                 this.go_to_tab(0, window, cx);
             }))
@@ -1170,6 +1240,7 @@ impl WorkspaceApp {
             })
             // Tab-owned dialogs are portaled here so their backdrops cover all window chrome.
             .children(active_tab_window_modals)
+            .when_some(settings_select_overlay, |root, overlay| root.child(overlay))
             .when_some(
                 self.render_ai_sidebar_floating_overlay(window, cx),
                 |root, overlay| root.child(overlay),
@@ -1277,6 +1348,7 @@ impl WorkspaceApp {
             .child(WorkspaceImeElement::new(
                 cx.entity(),
                 self.focus_handle.clone(),
+                window.window_handle().window_id(),
             ))
             .into_any_element()
     }
@@ -1313,6 +1385,7 @@ impl WorkspaceApp {
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
                 this.update_sidebar_resize(event, window, cx);
                 this.update_embedded_sftp_sidebar_resize(event, window, cx);
+                this.update_knowledge_resize(event, window, cx);
                 this.update_ai_sidebar_resize(event, window, cx);
                 this.update_sftp_pane_resize(event, window, cx);
                 this.update_sftp_queue_resize(event, window, cx);
@@ -1339,6 +1412,7 @@ impl WorkspaceApp {
         let capture_owner = self.browser_pointer_capture_owner(cx);
         let was_read_only_dragging = self.read_only_selection_drag_active();
         self.finish_sidebar_resize(cx);
+        self.finish_knowledge_resize(cx);
         self.finish_embedded_sftp_sidebar_resize(cx);
         self.finish_ai_sidebar_resize(cx);
         self.finish_sftp_pane_resize(cx);
@@ -1366,7 +1440,11 @@ impl WorkspaceApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let Some(state) = self.mermaid_zoom.as_ref() else {
+        let Some(state) = self
+            .mermaid_zoom
+            .as_ref()
+            .filter(|state| state.window_id == window.window_handle().window_id())
+        else {
             return div().into_any_element();
         };
         let viewport = window.viewport_size();
@@ -1404,6 +1482,18 @@ impl WorkspaceApp {
                             title,
                             subtitle,
                         ))
+                        .when_some(state.render_error.as_ref(), |modal, error| {
+                            modal.child(
+                                div()
+                                    .px_3()
+                                    .text_size(px(self.tokens.metrics.ui_text_sm))
+                                    .text_color(rgb(self.tokens.ui.error))
+                                    .child(format!(
+                                        "{}: {error}",
+                                        self.i18n.t("markdown.mermaid_unsupported")
+                                    )),
+                            )
+                        })
                         .child(
                             oxideterm_gpui_ui::modal_body(&self.tokens)
                                 .id("mermaid-zoom-modal-body-scroll")

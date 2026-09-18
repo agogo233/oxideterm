@@ -2044,8 +2044,7 @@ impl WorkspaceApp {
             .as_ref()
             .is_some_and(|chain| !chain.is_empty())
         {
-            match self.expand_saved_connection_tree(&connection_id, config, connection.name.clone())
-            {
+            match self.expand_saved_connection_tree(&connection_id, config, connection.name) {
                 Ok(expansion) => expansion.target_node_id,
                 Err(_) => {
                     request.finish(ToolEnvelope::failed(
@@ -2055,11 +2054,7 @@ impl WorkspaceApp {
                 }
             }
         } else {
-            self.materialize_ssh_root_node(
-                config,
-                connection.name.clone(),
-                Some(connection_id.clone()),
-            )
+            self.materialize_ssh_root_node(config, connection.name, Some(connection_id.clone()))
         };
         if !self.ensure_node_connection_started(&node_id, cx) {
             request.finish(ToolEnvelope::failed(

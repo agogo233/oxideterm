@@ -986,14 +986,20 @@ impl WorkspaceApp {
             host: profile.host.clone(),
             port: profile.port,
         };
-        match self.create_telnet_terminal_tab(config, profile.terminal, window, cx) {
+        match self.create_telnet_terminal_tab(
+            config,
+            profile.upstream_proxy,
+            profile.terminal,
+            window,
+            cx,
+        ) {
             Ok(session_id) => {
                 self.telnet_terminal_profile_ids
                     .insert(session_id, profile.id.clone());
                 self.register_terminal_saved_connection(
                     session_id,
                     oxideterm_terminal_triggers::SavedConnectionKind::Telnet,
-                    profile.id.clone(),
+                    profile.id,
                     cx,
                 );
                 let _ = self.connection_store.mark_telnet_profile_used(id);

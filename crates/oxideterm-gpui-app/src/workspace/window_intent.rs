@@ -427,7 +427,9 @@ impl WorkspaceApp {
                 cx.dispatch_action(&crate::OpenSettings);
             }
             WindowIntentAction::Quit => {
-                super::request_app_quit(cx);
+                // Tray events may arrive while every window is hidden, so they cannot rely on
+                // focused action bubbling to protect a dirty Knowledge draft.
+                self.request_application_quit(cx);
             }
             WindowIntentAction::OpenNativeConnection(launch) => {
                 oxideterm_desktop_presence::show_main_window();

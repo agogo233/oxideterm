@@ -1,12 +1,13 @@
 use super::*;
 use crate::workspace::new_connection::{MoshConnectionOptions, SshTerminalConnectionOptions};
 use crate::workspace::root::init::terminal_preference_overrides;
-use oxideterm_connections::SshChannelStrategy;
+use oxideterm_connections::{SavedUpstreamProxyPolicy, SshChannelStrategy};
 use oxideterm_remote_desktop::{
     RemoteDesktopConnectionProfile, RemoteDesktopEndpoint, RemoteDesktopProtocol,
     RemoteDesktopSecret,
 };
 use oxideterm_session_adapter::managed_key_resolver_from_store;
+use oxideterm_session_adapter::upstream_proxy_config_from_saved_policy;
 use oxideterm_ssh_launch::{RemoteDesktopLaunchProtocol, TemporaryRemoteDesktopLaunch};
 
 const SSH_ROOT_NODE_ID_PREFIX: &str = "ssh";
@@ -382,17 +383,26 @@ impl WorkspaceApp {
     pub(in crate::workspace) fn create_telnet_terminal_tab(
         &mut self,
         config: TelnetSessionConfig,
+        upstream_proxy: SavedUpstreamProxyPolicy,
         terminal_options: ConnectionTerminalOptions,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<TerminalSessionId> {
         let title = format!("Telnet {}", config.endpoint_label());
-        self.create_telnet_terminal_tab_with_title(config, terminal_options, title, window, cx)
+        self.create_telnet_terminal_tab_with_title(
+            config,
+            upstream_proxy,
+            terminal_options,
+            title,
+            window,
+            cx,
+        )
     }
 
     pub(in crate::workspace) fn create_telnet_terminal_tab_with_title(
         &mut self,
         config: TelnetSessionConfig,
+        upstream_proxy: SavedUpstreamProxyPolicy,
         terminal_options: ConnectionTerminalOptions,
         title: String,
         window: &mut Window,
@@ -400,6 +410,7 @@ impl WorkspaceApp {
     ) -> Result<TerminalSessionId> {
         self.create_telnet_terminal_tab_with_login(
             config,
+            upstream_proxy,
             None,
             terminal_options,
             title,
@@ -411,6 +422,7 @@ impl WorkspaceApp {
     fn create_telnet_terminal_tab_with_login(
         &mut self,
         config: TelnetSessionConfig,
+        upstream_proxy: SavedUpstreamProxyPolicy,
         login: Option<oxideterm_terminal::TelnetLoginCredentials>,
         terminal_options: ConnectionTerminalOptions,
         title: String,
@@ -419,6 +431,7 @@ impl WorkspaceApp {
     ) -> Result<TerminalSessionId> {
         self.create_telnet_terminal_tab_for_connection(
             config,
+            upstream_proxy,
             login,
             terminal_options,
             title,
@@ -431,6 +444,7 @@ impl WorkspaceApp {
     pub(in crate::workspace) fn create_telnet_terminal_tab_for_connection(
         &mut self,
         config: TelnetSessionConfig,
+        upstream_proxy: SavedUpstreamProxyPolicy,
         login: Option<oxideterm_terminal::TelnetLoginCredentials>,
         terminal_options: ConnectionTerminalOptions,
         title: String,
@@ -438,6 +452,12 @@ impl WorkspaceApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<TerminalSessionId> {
+        let runtime_proxy = upstream_proxy_config_from_saved_policy(
+            &self.connection_store,
+            self.settings_store.settings(),
+            &upstream_proxy,
+        )
+        .map_err(anyhow::Error::msg)?;
         let tab_id = self.alloc_tab_id(cx);
         let pane_id = self.alloc_pane_id(cx);
         let session_id = self.alloc_session_id(cx);
@@ -449,6 +469,7 @@ impl WorkspaceApp {
                 title.clone(),
                 standalone_connections::StandaloneConnectionLaunch::Telnet {
                     config: reconnect_config,
+                    upstream_proxy,
                     terminal_options: reconnect_terminal_options,
                 },
             )
@@ -471,6 +492,7 @@ impl WorkspaceApp {
             TerminalPane::new_telnet_with_login_preferences(
                 pane_config,
                 login,
+                runtime_proxy,
                 preferences,
                 window,
                 cx,
@@ -487,7 +509,7 @@ impl WorkspaceApp {
             Tab {
                 id: tab_id,
                 kind: TabKind::LocalTerminal,
-                title: title.clone(),
+                title: title,
                 title_source: TabTitleSource::Static,
                 root_pane: Some(PaneNode::leaf(pane_id, session_id)),
                 active_pane_id: Some(pane_id),
@@ -600,14 +622,13 @@ impl WorkspaceApp {
 
         // Serial owns no SSH node and must not expose SFTP, forwarding, or ProxyJump.
         self.register_terminal_pane(pane_id, session_id, pane.clone(), window, cx);
-        self.serial_terminal_configs
-            .insert(session_id, config.clone());
+        self.serial_terminal_configs.insert(session_id, config);
         self.refresh_native_plugin_terminal_hooks(cx);
         self.insert_tab(
             Tab {
                 id: tab_id,
                 kind: TabKind::LocalTerminal,
-                title: title.clone(),
+                title: title,
                 title_source: TabTitleSource::Static,
                 root_pane: Some(PaneNode::leaf(pane_id, session_id)),
                 active_pane_id: Some(pane_id),
@@ -667,7 +688,7 @@ impl WorkspaceApp {
             Tab {
                 id: tab_id,
                 kind: TabKind::MoshTerminal,
-                title: title.clone(),
+                title: title,
                 title_source: TabTitleSource::Static,
                 root_pane: Some(PaneNode::leaf(pane_id, session_id)),
                 active_pane_id: Some(pane_id),
@@ -873,7 +894,7 @@ impl WorkspaceApp {
                 Some(saved_connection_id.clone()),
             );
             if let Some(node) = self.ssh_nodes.get_mut(&node_id) {
-                node.terminal_options = saved_terminal_options.clone();
+                node.terminal_options = saved_terminal_options;
                 node.dedicated_new_terminal_connection = saved_dedicated_new_terminal_connection;
                 node.ssh_channel_strategy = saved_ssh_channel_strategy;
             }
@@ -1108,6 +1129,19 @@ impl WorkspaceApp {
             strict_host_key_checking: true,
             ..SshConfig::default()
         };
+        // CLI launches must ask for host-key trust before starting the node-owned
+        // transport, just like an unsaved connection opened from the UI.
+        self.start_ssh_preflight(config, title, SshConnectionIntent::ConnectTemporary, cx);
+        cx.notify();
+        Ok(())
+    }
+
+    pub(in crate::workspace) fn connect_verified_temporary_ssh(
+        &mut self,
+        config: SshConfig,
+        title: String,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
         let node_id = self.materialize_ssh_root_node(config, title.clone(), None);
         let queue_outcome = self.workspace_runtime.update(cx, |runtime, runtime_cx| {
             runtime.queue_ssh_terminal_open(
@@ -1125,8 +1159,6 @@ impl WorkspaceApp {
         if queue_outcome == runtime_entity::QueueSshTerminalOpenOutcome::WorkspaceShuttingDown {
             return Err(anyhow::anyhow!("workspace runtime is shutting down"));
         }
-        // The temporary launch now shares the same node-owned transport attempt
-        // and reliable completion delivery as every other first terminal.
         self.ensure_node_connection_started(&node_id, cx);
         cx.notify();
         Ok(())
@@ -1152,6 +1184,7 @@ impl WorkspaceApp {
         });
         self.create_telnet_terminal_tab_with_login(
             config,
+            SavedUpstreamProxyPolicy::Direct,
             login,
             ConnectionTerminalOptions::default(),
             title,
@@ -1531,28 +1564,6 @@ impl WorkspaceApp {
             cx,
         )?;
         Ok(())
-    }
-
-    pub(in crate::workspace) fn queue_ssh_terminal_tab_for_node(
-        &mut self,
-        node_id: NodeId,
-        config: SshConfig,
-        title: String,
-        saved_connection_id: Option<String>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Result<()> {
-        self.queue_ssh_terminal_tab_for_node_with_mark_used(
-            node_id,
-            None,
-            config,
-            title,
-            saved_connection_id,
-            None,
-            None,
-            window,
-            cx,
-        )
     }
 
     fn save_connection_after_terminal_open(

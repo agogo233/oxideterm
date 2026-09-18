@@ -151,15 +151,18 @@ enum ShortcutsModalVirtualRow {
 }
 
 impl WorkspaceApp {
-    pub(super) fn open_command_palette(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn open_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.bootstrap_native_plugin_runtime(cx);
-        self.release_active_remote_desktop_inputs(cx);
+        self.prepare_modal_interaction_boundary(cx);
         let auto_load_hosts = self.settings_store.settings().ssh_config.auto_load_hosts;
         let existing_names = self.command_palette_existing_connection_names();
         self.command_palette.update(cx, |palette, cx| {
             palette.open(auto_load_hosts, existing_names, cx);
         });
-        self.ime_marked_text = None;
+        self.clear_ime_selection();
+        self.show_active_input_caret(cx);
+        self.needs_active_pane_focus = false;
+        window.focus(&self.focus_handle, cx);
         cx.notify();
     }
 
@@ -1013,6 +1016,7 @@ impl WorkspaceApp {
                     TabKind::PluginManager => self.i18n.t("plugin.manager_title"),
                     TabKind::Plugin { .. } => self.i18n.t("sidebar.panels.plugins"),
                     TabKind::CloudSync => self.i18n.t("plugin.cloud_sync.panel_title"),
+                    TabKind::Knowledge => self.i18n.t("sidebar.panels.knowledge"),
                     TabKind::RemoteDesktop => {
                         self.i18n.t("settings_view.terminal.bg_tab_remote_desktop")
                     }
@@ -1052,13 +1056,13 @@ impl WorkspaceApp {
                 );
                 PaletteItem {
                     id: format!("conn:{}", conn.id),
-                    label: label.clone(),
+                    label: label,
                     section: PaletteSection::Connections,
                     icon: LucideIcon::Server,
-                    detail: Some(detail.clone()),
+                    detail: Some(detail),
                     shortcut: None,
                     value: conn.search_text(),
-                    action: PaletteAction::OpenSavedConnection(conn.id.clone()),
+                    action: PaletteAction::OpenSavedConnection(conn.id),
                     disabled: false,
                 }
             })
@@ -2173,6 +2177,7 @@ fn tab_kind_icon(kind: &TabKind) -> LucideIcon {
         TabKind::PluginManager => LucideIcon::Puzzle,
         TabKind::Plugin { .. } => LucideIcon::Puzzle,
         TabKind::CloudSync => LucideIcon::Cloud,
+        TabKind::Knowledge => LucideIcon::BookOpen,
         TabKind::RemoteDesktop => LucideIcon::Monitor,
         TabKind::Settings => LucideIcon::Settings,
         TabKind::SessionManager => LucideIcon::LayoutList,

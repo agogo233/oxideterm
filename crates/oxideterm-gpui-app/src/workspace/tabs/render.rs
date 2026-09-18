@@ -43,6 +43,7 @@ fn tab_kind_icon(
             .map(|contribution| LucideIcon::from_plugin_name(&contribution.definition.icon))
             .unwrap_or(LucideIcon::Puzzle),
         TabKind::CloudSync => LucideIcon::Cloud,
+        TabKind::Knowledge => LucideIcon::BookOpen,
         TabKind::Settings => LucideIcon::Settings,
     }
 }
@@ -797,9 +798,9 @@ impl WorkspaceApp {
                     return Some(node_id);
                 }
                 let mut session_ids = Vec::new();
-                tab.root_pane
-                    .as_ref()
-                    .map(|root| root.collect_session_ids(&mut session_ids));
+                if let Some(root) = tab.root_pane.as_ref() {
+                    root.collect_session_ids(&mut session_ids);
+                }
                 session_ids
                     .into_iter()
                     .filter_map(|session_id| {

@@ -147,6 +147,9 @@ impl WorkspaceApp {
                 .worker_threads(Self::WORKSPACE_ASYNC_RUNTIME_WORKER_THREADS)
                 .build()?,
         );
+        cx.set_http_client(Arc::new(
+            oxideterm_gpui_platform::http_client::AssetHttpClient::new(forwarding_runtime.clone())?,
+        ));
         // The SSH pool idle timer is long-lived backend work, matching Tauri's
         // registry-owned timeout task rather than tying disconnects to a GPUI
         // render/update turn.
@@ -396,7 +399,7 @@ impl WorkspaceApp {
                 cx.notify();
             },
         );
-        let (profiler_update_tx, profiler_update_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (profiler_update_tx, profiler_update_rx) = tokio::sync::mpsc::channel(1);
         let host_tools_messages = HostToolsMessages::from_i18n(&i18n);
         let host_tools = cx.new(|cx| {
             let mut host_tools = HostToolsEntity::new(
@@ -609,6 +612,9 @@ impl WorkspaceApp {
                 workspace.handle_ide_workspace_event(event, cx);
             },
         );
+        // The Knowledge workspace is tab-owned so its navigator and editor survive activity-bar
+        // navigation without occupying the global context sidebar.
+        let knowledge_workspace = cx.new(|_| knowledge::KnowledgeWorkspaceEntity::default());
         let mut workspace = Self {
             focus_handle,
             main_window_tabs: WorkspaceWindowTabState::new(),
@@ -728,7 +734,20 @@ impl WorkspaceApp {
             )
             .measure_all(),
             active_session_sidebar_list_cache: RefCell::new(VirtualListSignatureCache::default()),
+            // Collections and documents scroll independently so an empty document result can own
+            // the full remaining navigator region instead of becoming one short list row.
+            knowledge_workspace_list_state: ListState::new(
+                KNOWLEDGE_WORKSPACE_SECTION_COUNT,
+                ListAlignment::Top,
+                TauriVirtualListSpec::new(
+                    px(KNOWLEDGE_WORKSPACE_SECTION_ESTIMATED_HEIGHT),
+                    KNOWLEDGE_WORKSPACE_SECTION_OVERSCAN,
+                )
+                .overdraw(),
+            )
+            .measure_all(),
             open_settings_select: None,
+            open_settings_select_owner_window_id: None,
             settings_select_focus_origin: None,
             // Settings tabs are variable-height browser sections, not a single
             // flex tree. Initialize the shared GPUI ListState here and let the
@@ -747,6 +766,7 @@ impl WorkspaceApp {
             standard_confirm_focused_action: None,
             skip_future_ssh_close_confirmations: false,
             select_anchors: HashMap::new(),
+            settings_select_anchors: HashMap::new(),
             text_input_anchors: TextInputAnchorStore::default(),
             selectable_text_values: HashMap::new(),
             selectable_text_layouts: HashMap::new(),
@@ -824,6 +844,7 @@ impl WorkspaceApp {
             sftp_presentation_request: None,
             ide_workspace,
             _ide_workspace_subscription: ide_workspace_subscription,
+            knowledge_workspace,
             sftp_view,
             _sftp_observation: sftp_observation,
             _sftp_subscription: sftp_subscription,

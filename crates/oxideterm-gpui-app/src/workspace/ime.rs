@@ -117,6 +117,8 @@ pub(super) enum WorkspaceImeTarget {
     CommandPalette,
     ShortcutsModalSearch,
     ActiveSessionSearch,
+    KnowledgeSearch,
+    KnowledgeRename,
     Search,
     TerminalCommandSenderCompact,
     TerminalCwdSearch,
@@ -490,6 +492,8 @@ impl WorkspaceImeTarget {
             Self::CommandPalette => 4,
             Self::ShortcutsModalSearch => 5,
             Self::ActiveSessionSearch => 22,
+            Self::KnowledgeSearch => 23,
+            Self::KnowledgeRename => 24,
             Self::Search => 1,
             Self::TerminalCommandSenderCompact => 2,
             Self::TerminalCwdSearch => 18,
@@ -533,11 +537,20 @@ impl WorkspaceImeTarget {
 pub(super) struct WorkspaceImeElement {
     view: Entity<WorkspaceApp>,
     focus_handle: FocusHandle,
+    window_id: gpui::WindowId,
 }
 
 impl WorkspaceImeElement {
-    pub(super) fn new(view: Entity<WorkspaceApp>, focus_handle: FocusHandle) -> Self {
-        Self { view, focus_handle }
+    pub(super) fn new(
+        view: Entity<WorkspaceApp>,
+        focus_handle: FocusHandle,
+        window_id: gpui::WindowId,
+    ) -> Self {
+        Self {
+            view,
+            focus_handle,
+            window_id,
+        }
     }
 }
 
@@ -595,12 +608,18 @@ impl Element for WorkspaceImeElement {
         window: &mut Window,
         cx: &mut App,
     ) {
-        if self.view.read(cx).active_ime_target(cx).is_some() {
+        if self
+            .view
+            .read(cx)
+            .active_ime_target_for_window(self.window_id, cx)
+            .is_some()
+        {
             window.handle_input(
                 &self.focus_handle,
                 WorkspaceInputHandler {
                     view: self.view.clone(),
                     fallback_bounds: bounds,
+                    window_id: self.window_id,
                 },
                 cx,
             );
@@ -611,6 +630,15 @@ impl Element for WorkspaceImeElement {
 pub(super) struct WorkspaceInputHandler {
     view: Entity<WorkspaceApp>,
     fallback_bounds: Bounds<Pixels>,
+    window_id: gpui::WindowId,
+}
+
+impl WorkspaceInputHandler {
+    fn active_ime_target(&self, cx: &App) -> Option<WorkspaceImeTarget> {
+        self.view
+            .read(cx)
+            .active_ime_target_for_window(self.window_id, cx)
+    }
 }
 
 pub(super) fn active_ime_should_defer_input_key(
@@ -662,8 +690,8 @@ impl InputHandler for WorkspaceInputHandler {
         _window: &mut Window,
         cx: &mut App,
     ) -> Option<UTF16Selection> {
+        let target = self.active_ime_target(cx)?;
         self.view.update(cx, |view, cx| {
-            let target = view.active_ime_target(cx)?;
             view.text_for_ime_target(target, cx).map(|text| {
                 let text_len = text.encode_utf16().count();
                 let (range, reversed) =
@@ -690,8 +718,8 @@ impl InputHandler for WorkspaceInputHandler {
     }
 
     fn marked_text_range(&mut self, _window: &mut Window, cx: &mut App) -> Option<Range<usize>> {
+        let target = self.active_ime_target(cx)?;
         self.view.update(cx, |view, cx| {
-            let target = view.active_ime_target(cx)?;
             let marked = view.marked_text_state_for_target(target, cx)?;
             (!marked.text.is_empty()).then(|| marked.virtual_range())
         })
@@ -704,8 +732,9 @@ impl InputHandler for WorkspaceInputHandler {
         _window: &mut Window,
         cx: &mut App,
     ) -> Option<String> {
+        let target = self.active_ime_target(cx)?;
         self.view.update(cx, |view, cx| {
-            let text = view.active_ime_text_with_marked_text(cx)?;
+            let text = view.ime_text_with_marked_text_for_target(target, cx)?;
             let end = text.encode_utf16().count();
             let clamped = range_utf16.start.min(end)..range_utf16.end.min(end);
             *adjusted_range = Some(clamped.clone());
@@ -720,8 +749,11 @@ impl InputHandler for WorkspaceInputHandler {
         _window: &mut Window,
         cx: &mut App,
     ) {
+        let Some(target) = self.active_ime_target(cx) else {
+            return;
+        };
         let _ = self.view.update(cx, |view, cx| {
-            view.replace_active_ime_text(replacement_range, text, cx);
+            view.replace_platform_ime_text(target, replacement_range, text, cx);
         });
     }
 
@@ -733,10 +765,10 @@ impl InputHandler for WorkspaceInputHandler {
         _window: &mut Window,
         cx: &mut App,
     ) {
+        let Some(target) = self.active_ime_target(cx) else {
+            return;
+        };
         let _ = self.view.update(cx, |view, cx| {
-            let Some(target) = view.active_ime_target(cx) else {
-                return;
-            };
             if new_text.is_empty() {
                 if view.ime_marked_text.take().is_some() {
                     cx.notify();
@@ -783,8 +815,8 @@ impl InputHandler for WorkspaceInputHandler {
         _window: &mut Window,
         cx: &mut App,
     ) -> Option<Bounds<Pixels>> {
+        let target = self.active_ime_target(cx)?;
         self.view.update(cx, |view, cx| {
-            let target = view.active_ime_target(cx)?;
             let bounds = view
                 .text_input_anchors
                 .bounds(target.anchor_id())
@@ -826,8 +858,8 @@ impl InputHandler for WorkspaceInputHandler {
         window: &mut Window,
         cx: &mut App,
     ) -> Option<usize> {
+        let target = self.active_ime_target(cx)?;
         self.view.update(cx, |view, cx| {
-            let target = view.active_ime_target(cx)?;
             view.ime_index_for_position(target, point, window, cx)
         })
     }
@@ -844,7 +876,9 @@ impl WorkspaceApp {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(target) = self.active_ime_target(cx) else {
+        let Some(target) =
+            self.active_ime_target_for_window(window.window_handle().window_id(), cx)
+        else {
             return false;
         };
         if self.marked_text_state_for_target(target, cx).is_some()
@@ -971,6 +1005,9 @@ impl WorkspaceApp {
         {
             return Some(WorkspaceImeTarget::Settings(input));
         }
+        if self.knowledge_workspace.read(cx).rename.is_some() {
+            return Some(WorkspaceImeTarget::KnowledgeRename);
+        }
         if self.tab_rename_dialog.is_some() {
             // The blocking rename dialog owns text input ahead of background surfaces.
             return Some(WorkspaceImeTarget::TabRename);
@@ -999,18 +1036,44 @@ impl WorkspaceApp {
         let settings_tab_visible = self
             .active_tab(cx)
             .is_some_and(|tab| tab.kind == oxideterm_workspace::TabKind::Settings);
-        if settings_tab_visible {
-            if let Some(input) = self
+        // Knowledge dialogs may be owned by a detached Knowledge or Settings window. The focused
+        // window's WorkspaceImeElement decides which native window receives the shared draft.
+        let knowledge_dialog_visible = self.ai_entity.read(cx).knowledge_create_dialog_open()
+            || self.ai_entity.read(cx).knowledge_document_dialog_open();
+        if settings_tab_visible
+            && let Some(input) = self
                 .settings_workspace
                 .read(cx)
                 .settings_entity_focused_input()
-            {
-                return Some(WorkspaceImeTarget::Settings(input));
-            }
-
+        {
+            return Some(WorkspaceImeTarget::Settings(input));
+        }
+        if settings_tab_visible || knowledge_dialog_visible {
             if let Some(input) = self.ai_entity.read(cx).focused_settings_input() {
                 return Some(WorkspaceImeTarget::Settings(input));
             }
+        }
+
+        if (self.selected_ime_target == Some(WorkspaceImeTarget::KnowledgeSearch)
+            || self
+                .selected_ime_range
+                .as_ref()
+                .is_some_and(|selection| selection.target == WorkspaceImeTarget::KnowledgeSearch))
+            && self
+                .knowledge_workspace
+                .read(cx)
+                .navigator_search_window
+                .is_some_and(|owner| {
+                    let main = self
+                        .window_registry
+                        .handle_for_role(super::window_registry::WindowRole::Main);
+                    !main.is_some_and(|handle| handle.window_id() == owner)
+                        || self
+                            .active_tab(cx)
+                            .is_some_and(|tab| tab.kind == oxideterm_workspace::TabKind::Knowledge)
+                })
+        {
+            return Some(WorkspaceImeTarget::KnowledgeSearch);
         }
 
         if self.session_search_open
@@ -1026,6 +1089,7 @@ impl WorkspaceApp {
         }
 
         let legacy_settings_input_visible = settings_tab_visible
+            || knowledge_dialog_visible
             || self
                 .active_tab(cx)
                 .is_some_and(|tab| tab.kind == oxideterm_workspace::TabKind::CloudSync);
@@ -1051,7 +1115,9 @@ impl WorkspaceApp {
         if let Some(input) = quick_command_manager_input {
             // The workspace manager owns IME independently from the compact
             // terminal launcher, which deliberately keeps `open` false.
-            return Some(WorkspaceImeTarget::QuickCommand(input));
+            // Command text uses an entity editor with its own platform input handler.
+            return (input != QuickCommandInput::CommandText)
+                .then_some(WorkspaceImeTarget::QuickCommand(input));
         }
 
         if self.host_tools_visibility(cx).main_window_is_visible()
@@ -1219,6 +1285,51 @@ impl WorkspaceApp {
         }
 
         self.search.visible.then_some(WorkspaceImeTarget::Search)
+    }
+
+    pub(super) fn active_ime_target_for_window(
+        &self,
+        window_id: gpui::WindowId,
+        cx: &App,
+    ) -> Option<WorkspaceImeTarget> {
+        let target = self.active_ime_target(cx)?;
+        let knowledge = self.knowledge_workspace.read(cx);
+        let owner = match target {
+            WorkspaceImeTarget::KnowledgeSearch => knowledge.navigator_search_window,
+            WorkspaceImeTarget::KnowledgeRename => {
+                knowledge.rename.as_ref().map(|rename| rename.window_id)
+            }
+            _ => None,
+        };
+        if matches!(
+            target,
+            WorkspaceImeTarget::KnowledgeSearch | WorkspaceImeTarget::KnowledgeRename
+        ) {
+            if owner != Some(window_id) {
+                return None;
+            }
+            let main_window = self
+                .window_registry
+                .handle_for_role(super::window_registry::WindowRole::Main);
+            if main_window.is_some_and(|handle| handle.window_id() == window_id)
+                && !self
+                    .active_tab(cx)
+                    .is_some_and(|tab| tab.kind == oxideterm_workspace::TabKind::Knowledge)
+            {
+                return None;
+            }
+        }
+        if matches!(
+            target,
+            WorkspaceImeTarget::Settings(SettingsInput::KnowledgeDocumentTitle)
+        ) && !self
+            .ai_entity
+            .read(cx)
+            .knowledge_document_dialog_owned_by(window_id)
+        {
+            return None;
+        }
+        Some(target)
     }
 
     pub(super) fn marked_text_for_target(
@@ -1703,6 +1814,7 @@ impl WorkspaceApp {
         match target {
             WorkspaceImeTarget::AiChatInput
             | WorkspaceImeTarget::AiConversationRename
+            | WorkspaceImeTarget::KnowledgeSearch
             | WorkspaceImeTarget::AiMessageEdit
             | WorkspaceImeTarget::Sftp(_)
             | WorkspaceImeTarget::ReadOnlyText(_) => {
@@ -1764,11 +1876,6 @@ impl WorkspaceApp {
         // placement follows the visible value.
         let centered_text_left = content_left + (content_width - text_width).max(px(0.0)) * 0.5;
         position_x - centered_text_left
-    }
-
-    fn active_ime_text_with_marked_text(&self, cx: &App) -> Option<String> {
-        let target = self.active_ime_target(cx)?;
-        self.ime_text_with_marked_text_for_target(target, cx)
     }
 
     /// Builds the virtual text buffer seen by the platform while an IME
@@ -1948,6 +2055,18 @@ impl WorkspaceApp {
             }
             WorkspaceImeTarget::ShortcutsModalSearch => Some(self.shortcuts_modal.query.clone()),
             WorkspaceImeTarget::ActiveSessionSearch => Some(self.session_search_query.clone()),
+            WorkspaceImeTarget::KnowledgeSearch => Some(
+                self.knowledge_workspace
+                    .read(cx)
+                    .navigator_query
+                    .to_string(),
+            ),
+            WorkspaceImeTarget::KnowledgeRename => self
+                .knowledge_workspace
+                .read(cx)
+                .rename
+                .as_ref()
+                .map(|rename| rename.name.clone()),
             WorkspaceImeTarget::Search => Some(self.search.query.clone()),
             WorkspaceImeTarget::TerminalCommandSenderCompact => self
                 .terminal_command_sender
@@ -2181,15 +2300,13 @@ impl WorkspaceApp {
         }
     }
 
-    fn replace_active_ime_text(
+    fn replace_platform_ime_text(
         &mut self,
+        target: WorkspaceImeTarget,
         replacement_range: Option<Range<usize>>,
         text: &str,
         cx: &mut Context<Self>,
     ) {
-        let Some(target) = self.active_ime_target(cx) else {
-            return;
-        };
         if platform_text_commit_is_duplicate(&mut self.pending_platform_text_commit, target, text) {
             self.ime_marked_text = None;
             return;
@@ -2731,6 +2848,27 @@ impl WorkspaceApp {
             WorkspaceImeTarget::CommandPalette => {
                 self.command_palette.update(cx, |palette, cx| {
                     palette.replace_query_utf16(replacement_range, text, cx);
+                });
+                self.show_active_input_caret(cx);
+                cx.notify();
+            }
+            WorkspaceImeTarget::KnowledgeSearch => {
+                self.knowledge_workspace.update(cx, |state, _| {
+                    let mut query = state.navigator_query.to_string();
+                    replace_utf16(&mut query, replacement_range, text);
+                    state.navigator_query = query.into();
+                });
+                self.queue_knowledge_search(cx);
+                self.show_active_input_caret(cx);
+                cx.notify();
+            }
+            WorkspaceImeTarget::KnowledgeRename => {
+                self.knowledge_workspace.update(cx, |state, _| {
+                    if state.metadata_task.is_none()
+                        && let Some(rename) = state.rename.as_mut()
+                    {
+                        replace_utf16(&mut rename.name, replacement_range, text);
+                    }
                 });
                 self.show_active_input_caret(cx);
                 cx.notify();

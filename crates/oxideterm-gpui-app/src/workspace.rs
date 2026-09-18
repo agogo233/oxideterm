@@ -20,6 +20,7 @@ mod history_quit;
 pub(crate) use history_quit::request_app_quit;
 mod ide;
 mod ime;
+mod knowledge;
 mod local_shell_launcher;
 mod local_terminal_background;
 mod new_connection;
@@ -90,6 +91,7 @@ use std::{
 use self::{
     ai_lazy::LazyAiRagStore,
     breadcrumb_scroll::scroll_breadcrumb_by_wheel,
+    knowledge::KnowledgeWorkspaceLayout,
     path_completion::{
         PathCompletionCandidate, PathCompletionOwner, PathCompletionState,
         local_path_completion_request, remote_path_completion_request,
@@ -115,21 +117,20 @@ use oxideterm_connection_monitor::{
     GpuSnapshot, GpuSnapshotStatus, GpuUpdate, LogCommandCapability, LogPreset, MetricsSource,
     MonitorMetricKind, MonitorSectionKind, MonitorValueLevel, PackageCommandCapability,
     PackageFilter, PortCommandCapability, PortFilter, ProcessActionKind, ProcessCommandCapability,
-    ProcessFilter, ProcessSort, ProfilerRegistry, ProfilerUpdate, ResourceDockerContainer,
-    ResourceDockerStatus, ResourceFilesystemEntry, ResourceFilesystemSnapshot,
-    ResourceFilesystemStatus, ResourceLogEntry, ResourceLogSnapshot, ResourceLogStatus,
-    ResourceMetrics, ResourcePackageEntry, ResourcePackageSnapshot, ResourcePackageStatus,
-    ResourcePortEntry, ResourcePortSnapshot, ResourcePortStatus, ResourceScheduledTask,
-    ResourceScheduledTaskSnapshot, ResourceScheduledTaskStatus, ResourceService,
-    ResourceServiceStatus, ResourceTmuxPane, ResourceTmuxSession, ResourceTmuxSnapshot,
-    ResourceTmuxStatus, ResourceTmuxWindow, ResourceTopProcess, ScheduledTaskActionKind,
-    ScheduledTaskCapability, ScheduledTaskFilter, ServiceActionKind, ServiceCommandCapability,
-    TmuxActionKind, TmuxCommandCapability, build_docker_action_command,
-    build_docker_exec_shell_command, build_docker_follow_logs_command, build_docker_logs_command,
-    build_filesystem_diagnostic_command, build_filesystem_snapshot_command,
-    build_log_follow_command, build_log_snapshot_command, build_package_inspect_command,
-    build_package_snapshot_command, build_port_diagnostic_command, build_port_snapshot_command,
-    build_process_action_command, build_scheduled_task_action_command,
+    ProcessFilter, ProcessSort, ProfilerRegistry, ResourceDockerContainer, ResourceDockerStatus,
+    ResourceFilesystemEntry, ResourceFilesystemSnapshot, ResourceFilesystemStatus,
+    ResourceLogEntry, ResourceLogSnapshot, ResourceLogStatus, ResourceMetrics,
+    ResourcePackageEntry, ResourcePackageSnapshot, ResourcePackageStatus, ResourcePortEntry,
+    ResourcePortSnapshot, ResourcePortStatus, ResourceScheduledTask, ResourceScheduledTaskSnapshot,
+    ResourceScheduledTaskStatus, ResourceService, ResourceServiceStatus, ResourceTmuxPane,
+    ResourceTmuxSession, ResourceTmuxSnapshot, ResourceTmuxStatus, ResourceTmuxWindow,
+    ResourceTopProcess, ScheduledTaskActionKind, ScheduledTaskCapability, ScheduledTaskFilter,
+    ServiceActionKind, ServiceCommandCapability, TmuxActionKind, TmuxCommandCapability,
+    build_docker_action_command, build_docker_exec_shell_command, build_docker_follow_logs_command,
+    build_docker_logs_command, build_filesystem_diagnostic_command,
+    build_filesystem_snapshot_command, build_log_follow_command, build_log_snapshot_command,
+    build_package_inspect_command, build_package_snapshot_command, build_port_diagnostic_command,
+    build_port_snapshot_command, build_process_action_command, build_scheduled_task_action_command,
     build_scheduled_task_diagnostic_command, build_scheduled_task_logs_command,
     build_scheduled_task_snapshot_command, build_service_action_command,
     build_service_follow_logs_command, build_service_logs_command, build_tmux_action_command,
@@ -280,6 +281,10 @@ use self::ime::{
     WorkspaceImeElement, WorkspaceImeSelection, WorkspaceImeTarget,
     active_ime_should_defer_input_key, workspace_ime_target_for_plain_host_tools_input,
 };
+use self::knowledge::{
+    KNOWLEDGE_WORKSPACE_SECTION_COUNT, KNOWLEDGE_WORKSPACE_SECTION_ESTIMATED_HEIGHT,
+    KNOWLEDGE_WORKSPACE_SECTION_OVERSCAN,
+};
 use self::new_connection::{
     ConnectionFlowEntity, ConnectionFlowEvent, NativeSshPromptHandler, NewConnectionField,
     NewConnectionForm, SavedConnectionPromptAction, SshAuthTab, SshConnectionIntent,
@@ -311,7 +316,7 @@ use crate::{
     GoToTab5, GoToTab6, GoToTab7, GoToTab8, GoToTab9, NewConnection, NewTerminal, NextTab,
     OpenSettings, PaletteAiSidebar, PaletteBroadcast, PaletteCancelReconnect, PaletteCleanupDead,
     PaletteDetachTerminal, PaletteDisconnectAll, PaletteEventLog, PaletteHealthCheck,
-    PaletteReconnectAll, PaletteResetPanes, Paste, PrevTab, ShellLauncher, ShowShortcuts,
+    PaletteReconnectAll, PaletteResetPanes, Paste, PrevTab, Quit, ShellLauncher, ShowShortcuts,
     SplitHorizontal, SplitNavLeft, SplitNavRight, SplitVertical, SwitchLocaleChinese,
     SwitchLocaleEnglish, SwitchLocaleFrench, SwitchLocaleGerman, SwitchLocaleItalian,
     SwitchLocaleJapanese, SwitchLocaleKorean, SwitchLocalePortugueseBrazil, SwitchLocaleSpanish,
@@ -727,6 +732,7 @@ impl WorkspaceWindowTabState {
 
 #[derive(Clone)]
 pub(super) struct SelectableTextFragmentState {
+    pub join_previous: bool,
     pub group_id: u64,
     pub order: usize,
     pub generation: u64,
@@ -822,13 +828,18 @@ pub(crate) struct WorkspaceApp {
     active_session_sidebar_focused_node_id: Option<NodeId>,
     active_session_sidebar_list_state: ListState,
     active_session_sidebar_list_cache: RefCell<VirtualListSignatureCache>,
+    knowledge_workspace_list_state: ListState,
     open_settings_select: Option<SettingsSelect>,
+    // A root-mounted select portal must only use the trigger geometry from the
+    // native window that opened it.
+    open_settings_select_owner_window_id: Option<gpui::WindowId>,
     settings_select_focus_origin: Option<browser_behavior::BrowserFocusOrigin>,
     settings_section_list_state: ListState,
     settings_section_list_cache: RefCell<VirtualListSignatureCache>,
     standard_confirm_focused_action: Option<ConfirmDialogAction>,
     skip_future_ssh_close_confirmations: bool,
     select_anchors: HashMap<SelectAnchorId, OverlayAnchor>,
+    settings_select_anchors: HashMap<(gpui::WindowId, SelectAnchorId), OverlayAnchor>,
     text_input_anchors: TextInputAnchorStore,
     selectable_text_values: HashMap<u64, String>,
     selectable_text_layouts: HashMap<u64, TextLayout>,
@@ -901,6 +912,7 @@ pub(crate) struct WorkspaceApp {
     sftp_presentation_request: Option<sftp::SftpPresentationRequest>,
     ide_workspace: Entity<ide::IdeWorkspaceEntity>,
     _ide_workspace_subscription: Subscription,
+    knowledge_workspace: Entity<knowledge::KnowledgeWorkspaceEntity>,
     sftp_view: Entity<sftp::SftpWorkspaceEntity>,
     _sftp_observation: Subscription,
     _sftp_subscription: Subscription,
@@ -952,12 +964,14 @@ impl Drop for WorkspaceApp {
 
 pub(crate) use window_shell::WorkspaceWindowShell;
 
-#[derive(Clone)]
 struct MermaidZoomState {
+    window_id: gpui::WindowId,
     source: String,
     image: Arc<Image>,
     width: f32,
     height: f32,
+    render_error: Option<String>,
+    _render_task: Option<Task<()>>,
 }
 
 impl WorkspaceApp {
@@ -965,36 +979,55 @@ impl WorkspaceApp {
         let mut options = MarkdownOptions::from_theme(&self.tokens);
         options.mermaid_error_prefix = self.i18n.t("markdown.mermaid_unsupported");
         options.mermaid_expand_label = self.i18n.t("markdown.mermaid_expand");
+        options.mermaid_loading_label = self.i18n.t("markdown.mermaid_loading");
+        options.html_details_label = self.i18n.t("markdown.html_details");
         options
     }
 
     fn mermaid_zoom_handler(&self, cx: &mut Context<Self>) -> MarkdownMermaidZoomHandler {
-        let workspace = cx.entity();
+        Self::mermaid_zoom_handler_for_workspace(cx.entity())
+    }
+
+    fn mermaid_zoom_handler_for_workspace(workspace: Entity<Self>) -> MarkdownMermaidZoomHandler {
         Arc::new(move |source, image, width, height, window, cx| {
+            let window_id = window.window_handle().window_id();
             let workspace = workspace.clone();
             window.defer(cx, move |_window, cx| {
                 let _ = workspace.update(cx, |this, cx| {
-                    let rendered = oxideterm_gpui_markdown::mermaid::render_mermaid_svg_scaled(
+                    let request = oxideterm_gpui_markdown::mermaid::MermaidRenderRequest::new(
                         &source,
                         &this.tokens,
                         &this.localized_markdown_options(),
                         MERMAID_MODAL_RASTER_SCALE,
-                    )
-                    .ok();
+                    );
+                    let task = cx.spawn(async move |workspace, cx| {
+                        let result = cx
+                            .background_executor()
+                            .spawn(async move { request.render() })
+                            .await;
+                        let _ = workspace.update(cx, |workspace, cx| {
+                            if let Some(state) = workspace.mermaid_zoom.as_mut() {
+                                match result {
+                                    Ok(rendered) => {
+                                        state.image = rendered.image;
+                                        state.width = rendered.display_width;
+                                        state.height = rendered.display_height;
+                                    }
+                                    Err(error) => state.render_error = Some(error),
+                                }
+                                state._render_task = None;
+                                cx.notify();
+                            }
+                        });
+                    });
                     this.mermaid_zoom = Some(MermaidZoomState {
+                        window_id,
                         source,
-                        image: rendered
-                            .as_ref()
-                            .map(|rendered| rendered.image.clone())
-                            .unwrap_or(image),
-                        width: rendered
-                            .as_ref()
-                            .map(|rendered| rendered.display_width)
-                            .unwrap_or(width),
-                        height: rendered
-                            .as_ref()
-                            .map(|rendered| rendered.display_height)
-                            .unwrap_or(height),
+                        image,
+                        width,
+                        height,
+                        render_error: None,
+                        _render_task: Some(task),
                     });
                     cx.notify();
                 });

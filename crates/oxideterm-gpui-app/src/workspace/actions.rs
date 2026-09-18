@@ -411,7 +411,7 @@ impl WorkspaceApp {
             "app.newConnection" => self.open_new_connection_form(window, cx),
             "app.settings" => self.open_settings(window, cx),
             "app.toggleSidebar" => self.toggle_sidebar(cx),
-            "app.commandPalette" => self.open_command_palette(cx),
+            "app.commandPalette" => self.open_command_palette(window, cx),
             "app.zenMode" => self.toggle_zen_mode(cx),
             "app.nextTab" => self.next_tab(true, window, cx),
             "app.prevTab" => self.next_tab(false, window, cx),
@@ -627,7 +627,9 @@ impl WorkspaceApp {
             return;
         }
 
-        if self.terminal_command_sender_editor_focused(window, cx) {
+        if self.terminal_command_sender_editor_focused(window, cx)
+            || self.quick_command_text_editor_focused(window, cx)
+        {
             // Child editor handlers own the bubble path while focused.
             return;
         }
@@ -639,6 +641,11 @@ impl WorkspaceApp {
             // The capture handler deliberately lets platform text input own text
             // and IME composition keys; the bubble fallback must follow the same
             // rule so inputs do not append or activate once per key path.
+            return;
+        }
+
+        if self.handle_knowledge_input_key(event, window, cx) {
+            cx.stop_propagation();
             return;
         }
 
@@ -791,7 +798,7 @@ impl WorkspaceApp {
             quick_commands.is_open() && quick_commands.focused_input().is_some()
         };
         if quick_commands_focused {
-            self.handle_quick_commands_key(event, cx);
+            self.handle_quick_commands_key(event, window, cx);
             return;
         }
 
@@ -1163,10 +1170,11 @@ impl WorkspaceApp {
                     self.reset_standard_confirm_focus();
                     cx.notify();
                 } else {
-                    self.knowledge_create_blank_document(cx);
-                    self.ai_entity.update(cx, |entity, cx| {
-                        entity.close_knowledge_document_dialog(Duration::ZERO, cx);
-                    });
+                    if self.knowledge_create_blank_document(cx) {
+                        self.ai_entity.update(cx, |entity, cx| {
+                            entity.close_knowledge_document_dialog(Duration::ZERO, cx);
+                        });
+                    }
                 }
                 true
             }
@@ -2539,12 +2547,7 @@ impl WorkspaceApp {
             .any(|candidate| candidate == &command_name)
     }
 
-    pub(super) fn switch_locale(
-        &mut self,
-        locale: Locale,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(super) fn switch_locale(&mut self, locale: Locale, cx: &mut Context<Self>) {
         // Route language changes through the same settings mutation path as the
         // settings UI so native plugin language/settings subscriptions observe
         // menu-triggered locale switches too.
@@ -2552,12 +2555,6 @@ impl WorkspaceApp {
             |settings| settings.general.language = settings_language_from_locale(locale),
             cx,
         );
-
-        let menus = crate::platform::app_menus(&self.i18n);
-        let _ = cx.update_window(window.window_handle(), move |_root, _window, app| {
-            app.set_menus(menus);
-        });
-        cx.notify();
     }
 
     pub(super) fn sync_tab_titles(&mut self, cx: &mut App) {

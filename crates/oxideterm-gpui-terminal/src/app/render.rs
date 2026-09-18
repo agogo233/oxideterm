@@ -1430,10 +1430,10 @@ fn serial_parity_letter(parity: SerialParity) -> &'static str {
     }
 }
 
-fn serial_flow_label<'a>(
+fn serial_flow_label(
     flow_control: SerialFlowControl,
-    labels: &'a TerminalSerialControlLabels,
-) -> &'a str {
+    labels: &TerminalSerialControlLabels,
+) -> &str {
     match flow_control {
         SerialFlowControl::None => labels.flow_none.as_str(),
         SerialFlowControl::Software => labels.flow_software.as_str(),
@@ -1441,20 +1441,17 @@ fn serial_flow_label<'a>(
     }
 }
 
-fn serial_send_mode_label<'a>(
-    send_mode: SerialSendMode,
-    labels: &'a TerminalSerialControlLabels,
-) -> &'a str {
+fn serial_send_mode_label(send_mode: SerialSendMode, labels: &TerminalSerialControlLabels) -> &str {
     match send_mode {
         SerialSendMode::Text => labels.text_mode.as_str(),
         SerialSendMode::Hex => labels.hex_mode.as_str(),
     }
 }
 
-fn serial_display_mode_label<'a>(
+fn serial_display_mode_label(
     display_mode: SerialDisplayMode,
-    labels: &'a TerminalSerialControlLabels,
-) -> &'a str {
+    labels: &TerminalSerialControlLabels,
+) -> &str {
     match display_mode {
         SerialDisplayMode::Text => labels.text_mode.as_str(),
         SerialDisplayMode::Hex => labels.hex_mode.as_str(),
@@ -1462,10 +1459,10 @@ fn serial_display_mode_label<'a>(
     }
 }
 
-fn serial_line_ending_label<'a>(
+fn serial_line_ending_label(
     line_ending: SerialLineEnding,
-    labels: &'a TerminalSerialControlLabels,
-) -> &'a str {
+    labels: &TerminalSerialControlLabels,
+) -> &str {
     match line_ending {
         SerialLineEnding::Lf => labels.line_ending_lf.as_str(),
         SerialLineEnding::CrLf => labels.line_ending_crlf.as_str(),
@@ -2613,9 +2610,11 @@ fn terminal_background_layer(
     background: TerminalBackgroundPreferences,
     image: Option<Arc<RenderImage>>,
 ) -> AnyElement {
-    let Some(image) = image else {
-        // Pending or failed loads keep the pane fully transparent so nothing
-        // obscures the window behind it.
+let image = if background.fit == TerminalBackgroundFit::Tile && background.blur <= 0.01 {
+        gpui::img(background.path.clone()).with_fallback(|| div().size_full().into_any_element())
+    } else if let Some(image) = image {
+        gpui::img(image)
+    } else {
         return div()
             .absolute()
             .top_0()
@@ -2633,7 +2632,7 @@ fn terminal_background_layer(
         .bottom_0()
         .overflow_hidden()
         .child(
-            gpui::img(image)
+image
                 .size_full()
                 .object_fit(terminal_background_object_fit(background.fit))
                 .opacity(background.opacity.clamp(0.0, 1.0)),

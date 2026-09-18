@@ -274,7 +274,7 @@ impl WorkspaceApp {
                 .ssh_terminal_node_id(session_id)
         {
             self.active_ssh_node_id = Some(node_id.clone());
-            self.expanded_ssh_nodes.insert(node_id.clone());
+            self.expanded_ssh_nodes.insert(node_id);
         }
         self.activate_embedded_sftp_sidebar_if_visible(cx);
     }
@@ -633,6 +633,11 @@ impl WorkspaceApp {
             );
             return;
         }
+        if self.tabs(cx)[index].kind == TabKind::Knowledge
+            && self.guard_dirty_knowledge_tab_close(tab_id, window, cx)
+        {
+            return;
+        }
         self.close_tab_at_index(index, window, cx);
     }
 
@@ -941,6 +946,12 @@ impl WorkspaceApp {
     }
 
     fn close_tab_at_index(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(tab) = self.tabs(cx).get(index)
+            && tab.kind == TabKind::Knowledge
+            && self.guard_dirty_knowledge_tab_close(tab.id, window, cx)
+        {
+            return;
+        }
         let exiting_visual = self.tab_exit_visual(index, cx);
         let Some(transition) = self
             .tab_host
@@ -1022,6 +1033,8 @@ impl WorkspaceApp {
             // surface's node consumer; shared node users remain registered.
             workspace.close_surface(tab.id, ide::IdeSurfaceCloseReason::UserProjectClose, cx);
         });
+        self.knowledge_workspace
+            .update(cx, |workspace, _cx| workspace.close_tab(tab.id));
         self.forwarding
             .update(cx, |forwarding, _cx| forwarding.unmap_tab(tab.id));
         let mut pane_ids = Vec::new();

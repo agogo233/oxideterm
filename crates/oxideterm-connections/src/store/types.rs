@@ -438,7 +438,9 @@ pub enum SavedUpstreamProxyProtocol {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[derive(Default)]
 pub enum SavedUpstreamProxyAuth {
+    #[default]
     None,
     Password {
         username: String,
@@ -449,11 +451,6 @@ pub enum SavedUpstreamProxyAuth {
     },
 }
 
-impl Default for SavedUpstreamProxyAuth {
-    fn default() -> Self {
-        Self::None
-    }
-}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -471,7 +468,9 @@ pub struct SavedUpstreamProxyConfig {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
+#[derive(Default)]
 pub enum SavedUpstreamProxyPolicy {
+    #[default]
     UseGlobal,
     Direct,
     Custom { proxy: SavedUpstreamProxyConfig },
@@ -483,11 +482,6 @@ impl SavedUpstreamProxyPolicy {
     }
 }
 
-impl Default for SavedUpstreamProxyPolicy {
-    fn default() -> Self {
-        Self::UseGlobal
-    }
-}
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SavedProxyCommand {
@@ -949,6 +943,8 @@ pub struct TelnetProfile {
     pub icon_background_color: Option<String>,
     pub host: String,
     pub port: u16,
+    #[serde(default = "default_telnet_upstream_proxy")]
+    pub upstream_proxy: SavedUpstreamProxyPolicy,
     #[serde(
         default,
         skip_serializing_if = "ConnectionTerminalOptions::inherits_application_defaults"
@@ -973,6 +969,7 @@ pub struct SaveTelnetProfileRequest {
     pub icon_background_color: Option<String>,
     pub host: String,
     pub port: u16,
+    pub upstream_proxy: Option<SavedUpstreamProxyPolicy>,
     pub terminal: ConnectionTerminalOptions,
     pub connect_on_open: Option<bool>,
 }
@@ -1505,6 +1502,10 @@ impl SerialProfile {
     }
 }
 
+pub fn default_telnet_upstream_proxy() -> SavedUpstreamProxyPolicy {
+    SavedUpstreamProxyPolicy::Direct
+}
+
 impl TelnetProfile {
     pub fn new(name: impl Into<String>, host: impl Into<String>, port: u16) -> Self {
         let now = Utc::now();
@@ -1518,6 +1519,7 @@ impl TelnetProfile {
             icon_background_color: None,
             host: host.into(),
             port,
+            upstream_proxy: SavedUpstreamProxyPolicy::Direct,
             terminal: ConnectionTerminalOptions::default(),
             connect_on_open: false,
             created_at: now,
@@ -1535,6 +1537,11 @@ impl TelnetProfile {
         }
         if self.host.trim().is_empty() {
             bail!("Telnet host is required");
+        }
+        if let SavedUpstreamProxyPolicy::Custom { proxy } = &self.upstream_proxy
+            && (proxy.host.trim().is_empty() || proxy.port == 0)
+        {
+            bail!("Telnet upstream proxy requires a host and a nonzero port");
         }
         Ok(())
     }

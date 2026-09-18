@@ -184,8 +184,11 @@ pub(in crate::workspace) fn workspace_background_image_layer(
     background: TerminalBackgroundPreferences,
     image: Option<Arc<RenderImage>>,
 ) -> AnyElement {
-    let Some(image) = image else {
-        // Pending or failed loads keep the layer transparent.
+let image = if background.fit == TerminalBackgroundFit::Tile && background.blur <= 0.01 {
+        gpui::img(background.path.clone()).with_fallback(|| div().size_full().into_any_element())
+    } else if let Some(image) = image {
+        gpui::img(image)
+    } else {
         return div()
             .absolute()
             .top_0()
@@ -203,7 +206,7 @@ pub(in crate::workspace) fn workspace_background_image_layer(
         .bottom_0()
         .overflow_hidden()
         .child(
-            gpui::img(image)
+image
                 .size_full()
                 .object_fit(workspace_background_object_fit(background.fit))
                 .opacity(background.opacity.clamp(0.0, 1.0)),

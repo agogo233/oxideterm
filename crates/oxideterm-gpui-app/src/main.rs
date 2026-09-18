@@ -279,7 +279,7 @@ fn main() {
         cx.on_action(quit);
         cx.bind_keys(platform::app_key_bindings(&startup_settings));
         keybindings::install_context_keybindings(&startup_settings.keybindings.overrides, cx);
-        cx.set_menus(platform::app_menus(&I18n::default()));
+        cx.set_menus(platform::app_menus(&startup_settings));
 
         let desktop_presence_menu = desktop_presence_menu(&I18n::new(locale_from_settings(
             startup_settings.general.language,
@@ -349,6 +349,16 @@ fn open_main_workspace_window(
             {
                 eprintln!("failed to open native connection launch: {error}");
             }
+            let close_session = session.clone();
+            oxideterm_desktop_presence::install_main_window_close_guard(
+                window,
+                cx,
+                move |_window, cx| {
+                    close_session.update(cx, |workspace, cx| {
+                        !workspace.guard_dirty_knowledge_app_quit(cx)
+                    })
+                },
+            );
             cx.new(|cx| WorkspaceWindowShell::new(session, window, cx))
         },
     )
