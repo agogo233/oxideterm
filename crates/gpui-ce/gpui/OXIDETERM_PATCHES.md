@@ -335,6 +335,27 @@ ownership rules in `crates/gpui-ce/gpui/src/elements/div.rs` and
 Without this patch, one macOS trackpad event can move both a child and its scrollable ancestor,
 which makes the GPUI-CE build feel substantially more sensitive than the previous GPUI build.
 
+### SVG font sources and character fallback
+
+`crates/gpui-ce/gpui/src/svg_renderer.rs` loads only the font asset paths returned
+by `AssetSource::list("fonts")`. The application supplies JetBrainsMono and
+MapleMono regular faces through `NativeAssets`; MapleMono uses the existing
+decompression path. Do not restore hard-coded IBM Plex Sans or Lilex asset
+requirements. Missing generic families resolve to available faces, while valid
+system mappings remain intact. The enriched database is initialized once per
+renderer and shared by its clones.
+
+Emoji retain their platform-specific selection. Other missing characters search
+available system and application faces with matching text metrics preferred,
+preserving database order within each matching group. Previously tried
+fonts and fonts without the requested glyph are excluded. Successful fallback
+uses debug logging; asset listing/loading failures and usvg's unresolved-glyph
+warnings remain visible.
+
+`crates/gpui-ce/gpui_macos/src/text_system.rs` logs successful PostScript-name
+deduplication at debug level. Invalid-font and missing-required-glyph diagnostics
+remain warnings.
+
 ### Zero-area SVG paint semantics
 
 `crates/gpui-ce/gpui/src/window.rs` treats SVG bounds that become empty after device-pixel
@@ -358,6 +379,22 @@ results or entering later dispatch work:
 
 These are semantic lock-scope safeguards migrated from the previous GPUI vendor tree. Do not
 collapse the bindings back into `if let` scrutinee temporaries during cleanup.
+
+### macOS frame callbacks during window teardown
+
+`crates/gpui-ce/gpui_macos/src/window.rs` marks the window closed and disposes of its
+frame source before renderer destruction or asynchronous AppKit close. The native close
+entry point also stops the frame source immediately. Display-link startup must reject
+closed windows.
+
+Display-link ticks, layer redraws, and synchronous activation redraws share a callback
+runner that checks closure before and after invoking application code. A callback may
+remove its own window: in that case, discard it and do not access the renderer or restart
+the frame source. Deferred activation work follows the same closed-window boundary.
+Regression tests cover closure during a frame, release of callback captures, late frame
+delivery, and continued callback reuse for an open window.
+
+Preserve these teardown boundaries across vendor refreshes (see #599).
 
 ### Windows DirectWrite callback and glyph readback safety
 
@@ -511,6 +548,24 @@ WSLg is a known reason for `WAYLAND_DISPLAY` to be present without a
 `wl_seat`. Keep the fallback capability-based rather than hard-coding a WSL
 environment check, so remote, nested, kiosk, and future compositors receive the
 same behavior.
+
+### Wayland window-state restoration
+
+`gpui_linux/src/linux/wayland/window.rs` preserves the application's saved outer
+size on the first floating-window configure, using `FrameLoop::Unconfigured`
+to identify startup. Later interactive resizes use the compositor's dimensions
+and decoration insets; maximized, fullscreen, and tiled windows retain the
+compositor's sizing authority. Popup and layer-shell surfaces must not receive
+the startup-size override.
+
+Maximized/fullscreen transitions notify GPUI's bounds observer even when the
+pixel size is unchanged or an interactive resize is throttled. Release window
+state and callback borrows before invoking application callbacks.
+
+Keep these behaviors when refreshing the vendor code: losing the initial-size
+override regressed the earlier #456 fix in #597. The configure-size tests cover
+startup suggestions, unspecified sizes, unmaximize, ordinary resize, and
+compositor-constrained windows.
 
 ### Hidden system cursor
 

@@ -269,7 +269,6 @@ use oxideterm_workspace::{
     adjusted_split_sizes,
 };
 
-use self::actions::SearchBarState;
 use self::connection_monitor::{
     ConnectionRuntimeSection, HostToolsEntity, HostToolsEvent, HostToolsMessages,
     HostToolsWindowIntent, HostToolsWindowRequest,
@@ -753,7 +752,7 @@ pub(crate) struct WorkspaceApp {
     auto_close_terminal_sessions_scheduled: bool,
     tab_host: Entity<tabs::WorkspaceTabHostEntity>,
     _tab_host_subscription: Subscription,
-    search: SearchBarState,
+    search: actions::TerminalSearchState,
     terminal_recording_menu_open: bool,
     terminal_highlight_popover_open: bool,
     // Settings keep the source pane stable while editing session-only trigger overrides.
@@ -901,6 +900,7 @@ pub(crate) struct WorkspaceApp {
     sftp_tab_nodes: HashMap<TabId, NodeId>,
     standalone_sftp_tabs: HashMap<TabId, sftp::StandaloneSftpTabBinding>,
     standalone_sftp_sessions: HashMap<String, sftp::StandaloneSftpRuntime>,
+    ftp_sessions: HashMap<String, Arc<sftp::ftp::FtpRuntime>>,
     dedicated_sftp_connections:
         Arc<parking_lot::Mutex<HashMap<NodeId, sftp::DedicatedSftpConnectionSlot>>>,
     ssh_consumer_prompt_handler: Arc<dyn SshPromptHandler>,

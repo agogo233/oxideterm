@@ -280,6 +280,10 @@ impl WorkspaceApp {
     }
 
     pub(in crate::workspace) fn focus_active_pane(&mut self, window: &mut Window, cx: &mut App) {
+        if self.search.blur() {
+            self.ime_marked_text = None;
+            self.clear_ime_selection();
+        }
         self.clear_ai_sidebar_keyboard_focus(cx);
         self.terminal_command_sender.update(cx, |sender, cx| {
             sender.set_compact_focused(false, cx);
@@ -299,14 +303,11 @@ impl WorkspaceApp {
     }
 
     fn focus_active_tab_keyboard_owner(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self
-            .active_tab(cx)
-            .is_some_and(|tab| tab.kind == TabKind::RemoteDesktop)
-        {
+        if let Some(tab_id) = self.active_remote_desktop_tab_id(cx) {
             // Remote desktop tabs are keyboard owners. Activating the tab must
             // release stale Workspace input fields even before the user clicks
             // inside the remote framebuffer.
-            self.focus_remote_desktop_keyboard(window, cx);
+            self.focus_remote_desktop_keyboard(tab_id, window, cx);
         } else {
             self.focus_active_pane(window, cx);
         }
@@ -1026,6 +1027,7 @@ impl WorkspaceApp {
                     self.ssh_registry
                         .release(&runtime.connection_id, &runtime.consumer);
                 }
+                self.ftp_sessions.remove(&endpoint_id);
             }
         }
         self.ide_workspace.update(cx, |workspace, cx| {

@@ -8,7 +8,7 @@ impl WorkspaceApp {
         cx: &App,
     ) where
         F: FnOnce(
-                SftpSession,
+                ftp::MutationSession,
             ) -> std::pin::Pin<
                 Box<dyn std::future::Future<Output = Result<(), String>> + Send>,
             > + Send
@@ -25,7 +25,7 @@ impl WorkspaceApp {
         cx: &App,
     ) where
         F: FnOnce(
-                SftpSession,
+                ftp::MutationSession,
             ) -> std::pin::Pin<
                 Box<dyn std::future::Future<Output = Result<(), String>> + Send>,
             > + Send
@@ -45,7 +45,7 @@ impl WorkspaceApp {
         let runtime = self.forwarding_runtime.clone();
         runtime.spawn(async move {
             let result = async {
-                let sftp = backend.acquire_transfer_sftp().await?;
+                let sftp = backend.mutation_session().await?;
                 operation(sftp).await
             }
             .await;
@@ -146,11 +146,7 @@ impl WorkspaceApp {
                     self.spawn_sftp_pane_remote_mutation(
                         pane,
                         move |sftp| {
-                            Box::pin(async move {
-                                sftp.rename(&old_path, &new_path)
-                                    .await
-                                    .map_err(|error| error.to_string())
-                            })
+                            Box::pin(async move { sftp.rename(&old_path, &new_path).await })
                         },
                         Some(toast),
                         cx,
@@ -214,11 +210,7 @@ impl WorkspaceApp {
                             };
                             self.spawn_remote_sftp_mutation(
                                 move |sftp| {
-                                    Box::pin(async move {
-                                        sftp.rename(&old_path, &new_path)
-                                            .await
-                                            .map_err(|error| error.to_string())
-                                    })
+                                    Box::pin(async move { sftp.rename(&old_path, &new_path).await })
                                 },
                                 Some(toast),
                                 cx,
@@ -246,11 +238,7 @@ impl WorkspaceApp {
                     };
                     self.spawn_sftp_pane_remote_mutation(
                         pane,
-                        move |sftp| {
-                            Box::pin(async move {
-                                sftp.mkdir(&path).await.map_err(|error| error.to_string())
-                            })
-                        },
+                        move |sftp| Box::pin(async move { sftp.mkdir(&path).await }),
                         Some(toast),
                         cx,
                     );
@@ -296,11 +284,7 @@ impl WorkspaceApp {
                                 error_title: self.i18n.t("sftp.toast.create_folder_failed"),
                             };
                             self.spawn_remote_sftp_mutation(
-                                move |sftp| {
-                                    Box::pin(async move {
-                                        sftp.mkdir(&path).await.map_err(|error| error.to_string())
-                                    })
-                                },
+                                move |sftp| Box::pin(async move { sftp.mkdir(&path).await }),
                                 Some(toast),
                                 cx,
                             );
@@ -334,9 +318,7 @@ impl WorkspaceApp {
                         move |sftp| {
                             Box::pin(async move {
                                 for path in targets {
-                                    sftp.delete_recursive(&path)
-                                        .await
-                                        .map_err(|error| error.to_string())?;
+                                    sftp.delete_recursive(&path).await?;
                                 }
                                 Ok(())
                             })
@@ -419,17 +401,14 @@ impl WorkspaceApp {
                         let error_title = self.i18n.t("sftp.toast.delete_failed");
                         runtime.spawn(async move {
                             let result = async {
-                                let sftp = backend.acquire_transfer_sftp().await?;
+                                let sftp = backend.mutation_session().await?;
                                 let mut deleted = 0_u64;
                                 for path in targets {
                                     // Tauri nodeSftpDeleteRecursive returns the
                                     // recursive item count; keep the success
                                     // toast tied to the same backend count.
-                                    deleted = deleted.saturating_add(
-                                        sftp.delete_recursive(&path)
-                                            .await
-                                            .map_err(|error| error.to_string())?,
-                                    );
+                                    deleted =
+                                        deleted.saturating_add(sftp.delete_recursive(&path).await?);
                                 }
                                 Ok(deleted)
                             }
