@@ -5,6 +5,7 @@ pub(in crate::workspace) use entity::CommandPaletteEntity;
 use entity::CommandPaletteView;
 use oxideterm_connections::{resolve_ssh_config_alias, saved_connection_from_ssh_host};
 use oxideterm_gpui_settings_view::{OXIDE_THEME_IDS, built_in_theme_exists, is_oxide_theme};
+use oxideterm_gpui_ui::motion::{ExitPhase, MotionDuration};
 use oxideterm_gpui_ui::{
     modal::{
         dialog_content, dismissible_command_palette_backdrop, dismissible_dialog_backdrop,
@@ -20,8 +21,9 @@ use oxideterm_workspace::{
 };
 use std::borrow::Cow;
 
-const COMMAND_PALETTE_WIDTH: f32 = 560.0; // Tauri DialogContent max-w-[560px].
-const COMMAND_PALETTE_FALLBACK_TOP: f32 = 96.0;
+const COMMAND_PALETTE_MIN_WIDTH: f32 = 560.0;
+const COMMAND_PALETTE_MAX_WIDTH: f32 = 960.0;
+const COMMAND_PALETTE_CONNECTION_PREVIEW_HEIGHT: f32 = 80.0;
 const COMMAND_PALETTE_TOP_RATIO: f32 = 0.15; // Tauri DialogContent top-[15%] translate-y-0.
 const COMMAND_PALETTE_LIST_MAX_HEIGHT: f32 = 400.0; // Tauri CommandList max-h-[min(50vh,400px)] cap.
 const COMMAND_PALETTE_INPUT_HEIGHT: f32 = 40.0; // Tauri CommandInput h-10.
@@ -167,8 +169,9 @@ impl WorkspaceApp {
     }
 
     pub(super) fn close_command_palette(&mut self, cx: &mut Context<Self>) {
+        let delay = self.palette_exit_delay(cx);
         self.command_palette.update(cx, |palette, cx| {
-            palette.close(cx);
+            palette.begin_close(delay, cx);
         });
         self.ime_marked_text = None;
         cx.notify();
@@ -192,6 +195,10 @@ impl WorkspaceApp {
 
     pub(super) fn open_shortcuts_modal(&mut self, cx: &mut Context<Self>) {
         self.release_active_remote_desktop_inputs(cx);
+        self.shortcuts_modal.exit_task = None;
+        self.shortcuts_modal.presence.reopen();
+        self.shortcuts_modal.motion_generation =
+            self.shortcuts_modal.motion_generation.wrapping_add(1);
         self.shortcuts_modal.open = true;
         self.shortcuts_modal.query.clear();
         self.shortcuts_modal.scroll_handle = UniformListScrollHandle::new();
@@ -199,11 +206,44 @@ impl WorkspaceApp {
         cx.notify();
     }
 
+    fn palette_exit_delay(&self, cx: &App) -> Duration {
+        if self.tokens.motion.enabled && !cx.reduce_motion() {
+            oxideterm_gpui_ui::motion::duration(&self.tokens, MotionDuration::Control)
+        } else {
+            Duration::ZERO
+        }
+    }
+
     pub(super) fn close_shortcuts_modal(&mut self, cx: &mut Context<Self>) {
-        self.shortcuts_modal.open = false;
-        self.shortcuts_modal.query.clear();
+        if !self.shortcuts_modal.open {
+            return;
+        }
+        let Some(generation) = self.shortcuts_modal.presence.begin_exit() else {
+            return;
+        };
         self.ime_marked_text = None;
+        let delay = self.palette_exit_delay(cx);
+        if delay.is_zero() {
+            self.finish_shortcuts_modal_exit(generation, cx);
+            return;
+        }
+        let timer = cx.background_executor().timer(delay);
+        self.shortcuts_modal.exit_task = Some(cx.spawn(async move |weak, cx| {
+            timer.await;
+            let _ = weak.update(cx, |this, cx| {
+                this.finish_shortcuts_modal_exit(generation, cx);
+            });
+        }));
         cx.notify();
+    }
+
+    fn finish_shortcuts_modal_exit(&mut self, generation: u64, cx: &mut Context<Self>) {
+        if self.shortcuts_modal.presence.finish_exit(generation) {
+            self.shortcuts_modal.open = false;
+            self.shortcuts_modal.query.clear();
+            self.shortcuts_modal.exit_task = None;
+            cx.notify();
+        }
     }
 
     pub(super) fn handle_command_palette_key(
@@ -212,6 +252,21 @@ impl WorkspaceApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if crate::keybindings::keystroke_matches_action(
+            &event.keystroke,
+            "app.commandPalette",
+            &self.settings_store.settings().keybindings.overrides,
+        ) {
+            if self.command_palette.read(cx).is_closing() {
+                self.open_command_palette(window, cx);
+            } else {
+                self.close_command_palette(cx);
+            }
+            return;
+        }
+        if self.command_palette.read(cx).is_closing() {
+            return;
+        }
         let key = event.keystroke.key.as_str();
         match key {
             "escape" if !event.keystroke.modifiers.platform => self.close_command_palette(cx),
@@ -372,6 +427,21 @@ impl WorkspaceApp {
         event: &KeyDownEvent,
         cx: &mut Context<Self>,
     ) {
+        if crate::keybindings::keystroke_matches_action(
+            &event.keystroke,
+            "app.showShortcuts",
+            &self.settings_store.settings().keybindings.overrides,
+        ) {
+            if self.shortcuts_modal.presence.phase() == ExitPhase::Exiting {
+                self.open_shortcuts_modal(cx);
+            } else {
+                self.close_shortcuts_modal(cx);
+            }
+            return;
+        }
+        if self.shortcuts_modal.presence.phase() == ExitPhase::Exiting {
+            return;
+        }
         let key = event.keystroke.key.as_str();
         match key {
             "escape" if !event.keystroke.modifiers.platform => self.close_shortcuts_modal(cx),
@@ -403,9 +473,10 @@ impl WorkspaceApp {
         cx: &mut Context<Self>,
     ) {
         let items = self.filtered_command_palette_items(cx);
-        let execution = self
-            .command_palette
-            .update(cx, |palette, cx| palette.take_selected_action(&items, cx));
+        let close_delay = self.palette_exit_delay(cx);
+        let execution = self.command_palette.update(cx, |palette, cx| {
+            palette.take_selected_action(&items, close_delay, cx)
+        });
         let Some(execution) = execution else {
             return;
         };
@@ -418,9 +489,10 @@ impl WorkspaceApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let execution = self
-            .command_palette
-            .update(cx, |palette, cx| palette.take_item_action(&item, cx));
+        let close_delay = self.palette_exit_delay(cx);
+        let execution = self.command_palette.update(cx, |palette, cx| {
+            palette.take_item_action(&item, close_delay, cx)
+        });
         let Some(execution) = execution else {
             return;
         };
@@ -1219,20 +1291,43 @@ impl WorkspaceApp {
         format!("{}: {target}", self.i18n.t("command_palette.quick_connect"))
     }
 
-    pub(super) fn render_command_palette(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_command_palette(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let ranked_items = self.ranked_command_palette_items(cx);
         let palette: CommandPaletteView = self.command_palette.read(cx).view();
+        let selected_connection = ranked_items
+            .get(self.command_palette.read(cx).selected_index())
+            .filter(|ranked| matches!(ranked.item.action, PaletteAction::OpenSavedConnection(_)))
+            .map(|ranked| &ranked.item);
+        let preview =
+            selected_connection.map(|item| command_palette_connection_preview(&self.tokens, item));
+        let viewport = window.viewport_size();
+        let palette_top = f32::from(viewport.height) * COMMAND_PALETTE_TOP_RATIO;
+        let preview_height = if preview.is_some() {
+            COMMAND_PALETTE_CONNECTION_PREVIEW_HEIGHT
+        } else {
+            0.0
+        };
+        let list_max_height = (f32::from(viewport.height)
+            - palette_top
+            - COMMAND_PALETTE_INPUT_HEIGHT
+            - preview_height
+            - 48.0)
+            .clamp(0.0, COMMAND_PALETTE_LIST_MAX_HEIGHT);
         let mode = palette.mode;
         let query_placeholder = self.i18n.t(command_palette_placeholder_key(mode));
         let rows = Arc::new(command_palette_virtual_rows(ranked_items));
         let row_count = rows.len();
-        let rows_height = (row_count as f32 * COMMAND_PALETTE_VIRTUAL_ROW_HEIGHT)
-            .min(COMMAND_PALETTE_LIST_MAX_HEIGHT);
+        let rows_height =
+            (row_count as f32 * COMMAND_PALETTE_VIRTUAL_ROW_HEIGHT).min(list_max_height);
         let virtual_rows = rows;
         let entity = cx.entity();
 
         let panel = dialog_content(&self.tokens)
-            .w(px(COMMAND_PALETTE_WIDTH))
+            .w(px(command_palette_panel_width(f32::from(viewport.width))))
             .rounded(px(self.tokens.radii.lg))
             .shadow_xl()
             .child(
@@ -1241,7 +1336,6 @@ impl WorkspaceApp {
                     .flex_col()
                     .overflow_hidden()
                     .rounded(px(self.tokens.radii.md))
-                    .bg(rgb(self.tokens.ui.bg))
                     .child(
                         div()
                             .h(px(COMMAND_PALETTE_INPUT_HEIGHT))
@@ -1278,7 +1372,7 @@ impl WorkspaceApp {
                             .id("command-palette-scroll")
                             .w_full()
                             .h(px(rows_height))
-                            .max_h(px(COMMAND_PALETTE_LIST_MAX_HEIGHT))
+                            .max_h(px(list_max_height))
                             .child(tauri_virtual_uniform_list(
                                 "command-palette-virtual-list",
                                 row_count,
@@ -1299,6 +1393,7 @@ impl WorkspaceApp {
                                 },
                             )),
                     )
+                    .when_some(preview, |root, preview| root.child(preview))
                     .when_some(palette.error, |root, error| {
                         root.child(
                             div()
@@ -1333,15 +1428,8 @@ impl WorkspaceApp {
                             )),
                     ),
             );
-        let palette_top = self
-            .ai_entity
-            .read(cx)
-            .chat_ui()
-            .overlay_window_size
-            .map(|(_, height)| height * COMMAND_PALETTE_TOP_RATIO)
-            .unwrap_or(COMMAND_PALETTE_FALLBACK_TOP);
 
-        dismissible_command_palette_backdrop()
+        let overlay = dismissible_command_palette_backdrop()
             .items_start()
             .justify_center()
             .on_mouse_down(
@@ -1364,8 +1452,14 @@ impl WorkspaceApp {
                 div()
                     .mt(px(palette_top))
                     .child(overlay_content_boundary(panel)),
-            )
-            .into_any_element()
+            );
+        oxideterm_gpui_ui::motion::fade(
+            &self.tokens,
+            ("command-palette-motion", palette.motion_generation),
+            overlay,
+            MotionDuration::Control,
+            palette.phase == ExitPhase::Visible,
+        )
     }
 
     fn render_command_palette_mode_badge(&self, mode: PaletteMode) -> AnyElement {
@@ -1606,7 +1700,7 @@ impl WorkspaceApp {
             .min(SHORTCUTS_MODAL_LIST_MAX_HEIGHT);
         let virtual_rows = rows;
         let entity = cx.entity();
-        dismissible_dialog_backdrop()
+        let overlay = dismissible_dialog_backdrop()
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _event, window, cx| {
@@ -1724,8 +1818,17 @@ impl WorkspaceApp {
                                     )),
                             ),
                     ),
-            ))
-            .into_any_element()
+            ));
+        oxideterm_gpui_ui::motion::fade(
+            &self.tokens,
+            (
+                "shortcuts-modal-motion",
+                self.shortcuts_modal.motion_generation,
+            ),
+            overlay,
+            MotionDuration::Control,
+            self.shortcuts_modal.presence.phase() == ExitPhase::Visible,
+        )
     }
 
     fn filtered_shortcut_categories(&self) -> Vec<ShortcutModalCategory> {
@@ -2078,6 +2181,49 @@ fn shortcuts_modal_virtual_rows(
         }
     }
     rows
+}
+
+fn command_palette_panel_width(viewport_width: f32) -> f32 {
+    (viewport_width * 0.65)
+        .clamp(COMMAND_PALETTE_MIN_WIDTH, COMMAND_PALETTE_MAX_WIDTH)
+        .min((viewport_width - 32.0).max(0.0))
+}
+
+fn command_palette_connection_preview(
+    tokens: &oxideterm_theme::ThemeTokens,
+    item: &PaletteItem,
+) -> gpui::Stateful<gpui::Div> {
+    // Keep the list stationary while keyboard selection changes. Long names wrap
+    // and scroll here instead of being truncated again in the detail view.
+    div()
+        .id((
+            gpui::ElementId::from("command-palette-connection-preview"),
+            item.id.clone(),
+        ))
+        .w_full()
+        .h(px(COMMAND_PALETTE_CONNECTION_PREVIEW_HEIGHT))
+        .overflow_y_scroll()
+        .border_t_1()
+        .border_color(rgb(tokens.ui.border))
+        .px(px(12.0))
+        .py(px(8.0))
+        .text_size(px(12.0))
+        .line_height(px(18.0))
+        .whitespace_normal()
+        .child(
+            div()
+                .w_full()
+                .text_color(rgb(tokens.ui.text))
+                .child(item.label.clone()),
+        )
+        .when_some(item.detail.as_ref(), |preview, detail| {
+            preview.child(
+                div()
+                    .w_full()
+                    .text_color(rgb(tokens.ui.text_muted))
+                    .child(detail.clone()),
+            )
+        })
 }
 
 fn rank_palette_section(items: Vec<PaletteItem>, query: &str) -> Vec<RankedItem> {
@@ -2633,4 +2779,81 @@ fn shortcut_reference_rows() -> Vec<(
             ],
         ),
     ]
+}
+
+#[cfg(test)]
+mod panel_layout_tests {
+    use super::*;
+    use gpui::{Render, ScrollHandle, TestAppContext, size};
+
+    struct PalettePreviewLayout {
+        scroll: ScrollHandle,
+    }
+
+    impl Render for PalettePreviewLayout {
+        fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let tokens = oxideterm_theme::default_tokens();
+            let connection = PaletteItem {
+                id: "conn:long-name".into(),
+                label: format!("{}-user_prod", "x".repeat(512)),
+                section: PaletteSection::Connections,
+                icon: LucideIcon::Server,
+                detail: Some("operator@db.example:2222".into()),
+                shortcut: None,
+                value: String::new(),
+                action: PaletteAction::OpenSavedConnection("long-name".into()),
+                disabled: false,
+            };
+            div()
+                .size_full()
+                .flex()
+                .justify_center()
+                .items_start()
+                .child(
+                    dialog_content(&tokens)
+                        .w(px(command_palette_panel_width(f32::from(
+                            window.viewport_size().width,
+                        ))))
+                        .debug_selector(|| "palette-panel".into())
+                        .child(
+                            command_palette_connection_preview(&tokens, &connection)
+                                .track_scroll(&self.scroll)
+                                .debug_selector(|| "connection-preview".into()),
+                        ),
+                )
+        }
+    }
+
+    #[gpui::test]
+    fn palette_resizes_and_long_connection_details_wrap_without_growing_the_panel(
+        cx: &mut TestAppContext,
+    ) {
+        let scroll = ScrollHandle::new();
+        let (_, cx) = cx.add_window_view(|_, _| PalettePreviewLayout {
+            scroll: scroll.clone(),
+        });
+        for (viewport, expected_width) in [
+            (420.0, 388.0),
+            (800.0, 560.0),
+            (1200.0, 780.0),
+            (1800.0, 960.0),
+        ] {
+            cx.simulate_resize(size(px(viewport), px(800.0)));
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            let panel = cx.debug_bounds("palette-panel").unwrap();
+            let preview = cx.debug_bounds("connection-preview").unwrap();
+            assert_eq!(panel.size.width, px(expected_width), "viewport={viewport}");
+            assert!(panel.origin.x >= px(16.0) && panel.right() <= px(viewport - 16.0));
+            assert_eq!(preview.size.height, px(80.0));
+            assert!(
+                scroll.max_offset().y > px(0.0),
+                "long text must remain scrollable"
+            );
+            assert_eq!(
+                scroll.max_offset().x,
+                px(0.0),
+                "long text must wrap inside the preview"
+            );
+        }
+    }
 }

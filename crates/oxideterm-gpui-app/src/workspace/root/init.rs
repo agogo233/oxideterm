@@ -656,6 +656,9 @@ impl WorkspaceApp {
             onboarding: OnboardingState::from_settings(&settings),
             shortcuts_modal: ShortcutsModalState {
                 open: false,
+                presence: oxideterm_gpui_ui::motion::ExitPresence::visible(),
+                motion_generation: 0,
+                exit_task: None,
                 query: String::new(),
                 scroll_handle: UniformListScrollHandle::new(),
             },
@@ -683,17 +686,35 @@ impl WorkspaceApp {
             plugin_entity,
             _plugin_entity_subscription: plugin_entity_subscription,
             split_drag: None,
+            disclosure_motions: disclosure_motion::DisclosureMotions::default(),
             sidebar_resizing: false,
             embedded_sftp_sidebar_resizing: false,
             sidebar_resize_hotzone_hovered: false,
             sidebar_collapsed: settings.sidebar_ui.collapsed,
             sidebar_rendered: !settings.sidebar_ui.collapsed,
             sidebar_motion_generation: 0,
+            sidebar_motion: oxideterm_gpui_ui::motion::SidebarMotion::new(
+                if settings.sidebar_ui.collapsed {
+                    0.0
+                } else {
+                    initial_sidebar_width - tokens.metrics.activity_bar_width
+                },
+            ),
             sidebar_width: initial_sidebar_width,
             context_sidebar_rendered: !settings.sidebar_ui.ai_sidebar_collapsed
                 && !settings.sidebar_ui.zen_mode
                 && settings.ai.enabled,
             context_sidebar_motion_generation: 0,
+            context_sidebar_motion: oxideterm_gpui_ui::motion::SidebarMotion::new(
+                if settings.sidebar_ui.ai_sidebar_collapsed
+                    || settings.sidebar_ui.zen_mode
+                    || !settings.ai.enabled
+                {
+                    0.0
+                } else {
+                    initial_context_sidebar_width
+                },
+            ),
             ai_entity,
             acp_entity,
             skill_registry,
@@ -825,6 +846,7 @@ impl WorkspaceApp {
             ssh_nodes: HashMap::new(),
             saved_ssh_nodes: HashMap::new(),
             expanded_ssh_nodes: HashSet::new(),
+            expanded_standalone_connections: HashSet::new(),
             active_ssh_node_id: None,
             next_ssh_node_id: 1,
             forwarding,
@@ -1231,6 +1253,9 @@ impl WorkspaceApp {
             },
             autosuggest_labels: TerminalAutosuggestLabels {
                 history_source: self.i18n.t("terminal.command_bar.source_history"),
+                matches: self.i18n.t("terminal.autosuggest.matches"),
+                navigation_hint: self.i18n.t("terminal.autosuggest.navigation_hint"),
+                dismiss_hint: self.i18n.t("terminal.autosuggest.dismiss_hint"),
             },
             command_selection_labels: TerminalCommandSelectionLabels {
                 actions: self.i18n.t("terminal.command_selection.actions"),
@@ -1447,6 +1472,11 @@ impl WorkspaceApp {
             || self
                 .terminal_background_preferences(background_key)
                 .is_some()
+    }
+
+    pub(in crate::workspace) fn workspace_chrome_divider(&self) -> Rgba {
+        // Long workspace seams need less contrast than control outlines.
+        rgba((self.tokens.ui.border << 8) | 0x66)
     }
 
     pub(in crate::workspace) fn workspace_chrome_background(&self, color: u32) -> Rgba {
