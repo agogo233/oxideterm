@@ -37,9 +37,6 @@ const SESSION_FOCUS_EMERALD: u32 = 0x10b981;
 // Tauri EventLogPanel rows use `min-h-[24px]` with `px-3 py-1`; keep the
 // native estimate next to the shared virtual-list call so scroll-to-index and
 // sticky-bottom behavior stay browser-like.
-const EVENT_LOG_SIDEBAR_ROW_HEIGHT: f32 = 24.0;
-const EVENT_LOG_SIDEBAR_VIRTUAL_OVERSCAN: usize = 20;
-const EVENT_LOG_STICKY_BOTTOM_THRESHOLD_PX: f32 = 30.0;
 const EMBEDDED_SFTP_MIN_SESSION_FRACTION: f32 = 0.2;
 const EMBEDDED_SFTP_MAX_SESSION_FRACTION: f32 = 0.75;
 
@@ -199,8 +196,10 @@ pub(in crate::workspace) use titlebar::{
 };
 
 pub(in crate::workspace) use ai::{
-    AcpApplicationToolTurn, AiCompactionDelivery, AiCompactionDeliverySender, AiInlinePanelState,
-    AiStreamDelivery, AiStreamDeliveryEvent, AiStreamDeliverySender, ai_now_ms,
+    AcpApplicationToolTurn, AiChatPromptKeyAction, AiCompactionDelivery,
+    AiCompactionDeliverySender, AiInlinePanelState, AiInputVisualLine, AiStreamDelivery,
+    AiStreamDeliveryEvent, AiStreamDeliverySender, ai_chat_prompt_key_action,
+    ai_input_line_index_for_offset, ai_input_visual_lines, ai_now_ms,
     handle_acp_application_tool_call,
 };
 use helpers::*;

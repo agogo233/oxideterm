@@ -15,7 +15,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-2.0.30-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-2.1.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-blue" alt="Plattform">
   <img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="Lizenz">
   <img src="https://img.shields.io/badge/rust-2024%20edition-orange" alt="Rust 2024">
@@ -56,6 +56,21 @@ Verbindungen und Betriebsdaten bleiben unter Ihrer Kontrolle. Für OxideSens ver
 | BYOK-OxideSens-AI statt Plattformguthaben | OxideSens verwendet Ihren OpenAI-, Anthropic-, Gemini-, Ollama- oder OpenAI-kompatiblen Endpunkt mit MCP, RAG, anbieterabhängigen Denkstufen und genehmigten Arbeitsbereichsaktionen |
 | Stabiles Wiederverbinden | Grace Period prüft die alte Verbindung 30 Sekunden lang, bevor sie ersetzt wird, damit TUI-Anwendungen kurze Netzunterbrechungen überstehen |
 | Reines Rust-SSH und Schutz von Zugangsdaten | Der SSH-Stack nutzt `russh` + `ring` ohne OpenSSL/libssh2; gespeicherte Zugangsdaten liegen im Betriebssystem-Schlüsselbund und `.oxide`-Pakete verwenden ChaCha20-Poly1305 + Argon2id |
+
+---
+
+## Speicherverbrauch
+
+**Nach der nativen Neuentwicklung sank der Speicherverbrauch im Leerlauf unter macOS auf etwa ein Viertel und unter Windows auf etwa ein Achtel des vorherigen Werts.** Die folgenden Werte hat der Autor auf seinen eigenen Rechnern beim Wechsel von Tauri 1.x zur nativen GPUI-Version 2.0 erfasst:
+
+| Plattform | Tauri 1.x — im Leerlauf | Native Version 2.0 — im Leerlauf | Rückgang |
+|---|---:|---:|---:|
+| macOS | 318,7 MB | 81,3 MB | Etwa 74 % |
+| Windows | 182,4 MB | 23,5 MB | Etwa 87 % |
+
+![Speichervergleich im Leerlauf zwischen Tauri 1.x und der nativen Version 2.0 mit Screenshots der Systemprozesse](../screenshots/oxideterm-memory-comparison.png)
+
+Der Gesamtwert der alten Version umfasst OxideTerm und die zugehörigen WebView-Prozesse auf den Screenshots. Die native Version benötigt diese Browserprozesse nicht mehr.
 
 ---
 

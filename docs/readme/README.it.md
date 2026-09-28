@@ -15,7 +15,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-2.0.30-blue" alt="Versione">
+  <img src="https://img.shields.io/badge/version-2.1.0-blue" alt="Versione">
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-blue" alt="Piattaforma">
   <img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="Licenza">
   <img src="https://img.shields.io/badge/rust-2024%20edition-orange" alt="Rust 2024">
@@ -56,6 +56,21 @@ Connessioni e dati operativi rimangono sotto il tuo controllo. OxideSens usa il 
 | OxideSens AI con le tue chiavi invece di crediti di piattaforma | OxideSens usa il tuo endpoint OpenAI, Anthropic, Gemini, Ollama o compatibile OpenAI, con MCP, RAG, controlli di ragionamento specifici per provider e azioni approvate del workspace |
 | Stabilità della riconnessione | Grace Period verifica la vecchia connessione per 30 s prima di sostituirla, così le applicazioni TUI resistono a brevi cadute di rete |
 | SSH Rust puro e sicurezza delle credenziali | Lo stack SSH usa `russh` + `ring` senza OpenSSL/libssh2; le credenziali salvate usano il portachiavi di sistema e i pacchetti `.oxide` usano ChaCha20-Poly1305 + Argon2id |
+
+---
+
+## Utilizzo della memoria
+
+**Dopo la riscrittura nativa, l’utilizzo della memoria a riposo è sceso a circa un quarto di quello della versione precedente su macOS e a circa un ottavo su Windows.** Queste sono le misurazioni registrate dall’autore sui propri computer nel passaggio da Tauri 1.x alla versione nativa con GPUI 2.0:
+
+| Piattaforma | Tauri 1.x — a riposo | Versione nativa 2.0 — a riposo | Riduzione |
+|---|---:|---:|---:|
+| macOS | 318,7 MB | 81,3 MB | Circa il 74% |
+| Windows | 182,4 MB | 23,5 MB | Circa l’87% |
+
+![Confronto della memoria a riposo tra Tauri 1.x e la versione nativa 2.0, con schermate dei processi di sistema](../screenshots/oxideterm-memory-comparison.png)
+
+Il totale della versione precedente comprende OxideTerm e i processi WebView associati mostrati nelle schermate. La versione nativa non ha più bisogno di questi processi del browser.
 
 ---
 

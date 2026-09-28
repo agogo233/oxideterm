@@ -698,7 +698,10 @@ app_lock_dialog_open: self.app_lock.dialog.is_some(),
 
     fn active_tab_window_modal_owner(&self, cx: &App) -> Option<ActiveTabWindowModalSnapshot> {
         let visible = oxideterm_gpui_ui::motion::ExitPhase::Visible;
-        if !self.sidebar_collapsed
+        if self
+            .active_content_tab(cx)
+            .is_none_or(|tab| tab.kind != TabKind::Sftp)
+            && !self.sidebar_collapsed
             && self.effective_sidebar_panel_section() == SidebarSection::Sessions
             && self.embedded_sftp_node_id.is_some()
             && self.sftp_view.read(cx).current_surface_id == Some(sftp::SftpSurfaceId::Sidebar)
@@ -713,7 +716,7 @@ app_lock_dialog_open: self.app_lock.dialog.is_some(),
                 phase: self.sftp_view.read(cx).dialog_phase(),
             });
         }
-        let active_tab = self.active_tab(cx)?;
+        let active_tab = self.active_content_tab(cx)?;
         match active_tab.kind {
             TabKind::Knowledge => {
                 if self.knowledge_workspace.read(cx).rename.is_some() {
@@ -823,6 +826,7 @@ app_lock_dialog_open: self.app_lock.dialog.is_some(),
                 }
             }
             TabKind::Forwards => {
+                let _scope = self.enter_forwarding_page(active_tab.id, cx);
                 let forwarding = self.forwarding.read(cx);
                 if forwarding.delete_confirm_open() {
                     Some(ActiveTabWindowModalSnapshot {
@@ -839,7 +843,8 @@ app_lock_dialog_open: self.app_lock.dialog.is_some(),
                 }
             }
             TabKind::Sftp => {
-                let sftp = self.sftp_view.read(cx);
+                let _scope = self.enter_sftp_surface(sftp::SftpSurfaceId::Tab(active_tab.id));
+                let sftp = self.sftp_view().read(cx);
                 sftp.dialog_is_open().then(|| ActiveTabWindowModalSnapshot {
                     kind: if matches!(
                         sftp.dialog(),

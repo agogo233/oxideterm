@@ -2,6 +2,9 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    #[cfg(unix)]
+    use crate::recording_test_support::{AuditTestKeys, PausedFiles};
+
     use alacritty_terminal::{
         event::VoidListener,
         term::Config,
@@ -17,6 +20,566 @@ mod tests {
         },
         process::{parse_lsof_cwd, parse_process_table_for_group},
     };
+
+    #[cfg(unix)]
+    #[test]
+    fn local_pty_exit_records_actual_child_code_without_input() {
+        use oxideterm_audit::{AuditContext, AuditOutcome, AuditQuery, AuditService, AuditSource};
+
+        let directory = tempfile::tempdir().unwrap();
+        oxideterm_audit::AuditStore::open(&directory.path().join("audit.db"), &AuditTestKeys)
+            .unwrap()
+            .set_policy(oxideterm_audit::AuditPolicy {
+                enabled: true,
+                ..Default::default()
+            })
+            .unwrap();
+        let service =
+            AuditService::with_key_provider(directory.path().join("audit.db"), AuditTestKeys)
+                .unwrap();
+        let context =
+            AuditContext::new(service.client(), AuditSource::User).session("local", "localhost");
+        let config = crate::LocalPtyConfig {
+            shell: Some(
+                crate::ShellInfo::new("test-sh", "Test", "/bin/sh")
+                    .with_args(vec!["-c".into(), "exit 7".into()]),
+            ),
+            load_profile: false,
+            ..Default::default()
+        };
+        let mut session = LocalPtySession::spawn_with_config_graphics_encoding_and_audit(
+            20,
+            4,
+            config,
+            Default::default(),
+            Default::default(),
+            100,
+            Some(context),
+        )
+        .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while session.lifecycle.is_running() && std::time::Instant::now() < deadline {
+            session.drain_output();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(matches!(
+            session.lifecycle,
+            TerminalLifecycle::Exited(Some(7))
+        ));
+        let page = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(service.client().query(AuditQuery {
+                limit: 20,
+                ..Default::default()
+            }))
+            .unwrap();
+        let exit = page.records.iter().find(|record| {
+            record.details.operation.as_ref().is_some_and(|operation| {
+                operation.action == "local_terminal_exit"
+                    && operation.outcome == AuditOutcome::Failed
+            })
+        });
+        assert_eq!(
+            exit.unwrap().details.operation.as_ref().unwrap().exit_code,
+            Some(7)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_reader_records_output_resize_and_exit_without_pane_drain() {
+        use oxideterm_audit::{
+            AuditContext, AuditPolicy, AuditService, AuditSource, RecordingState,
+            StoredRecordingFrameKind,
+        };
+
+        let directory = tempfile::tempdir().unwrap();
+        let service =
+            AuditService::with_key_provider(directory.path().join("audit.db"), AuditTestKeys)
+                .unwrap();
+        let client = service.client();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime
+            .block_on(client.set_policy(AuditPolicy {
+                enabled: true,
+                record_output: true,
+                ..Default::default()
+            }))
+            .unwrap();
+        let context =
+            AuditContext::new(client.clone(), AuditSource::User).session("local", "localhost");
+        let session_id = context.session_id.clone();
+        let config = crate::LocalPtyConfig {
+            shell: Some(
+                crate::ShellInfo::new("test-sh", "Test", "/bin/sh").with_args(vec![
+                    "-c".into(),
+                    "stty -echo; printf 'ready\\r\\n'; IFS= read -r secret; printf 'done\\r\\n'"
+                        .into(),
+                ]),
+            ),
+            load_profile: false,
+            ..Default::default()
+        };
+        let mut session = LocalPtySession::spawn_with_config_graphics_encoding_and_audit(
+            80,
+            24,
+            config,
+            Default::default(),
+            Default::default(),
+            100,
+            Some(context),
+        )
+        .unwrap();
+        assert_eq!(
+            TerminalSessionBackend::audit_context(&session)
+                .unwrap()
+                .session_id,
+            session_id
+        );
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut saw_ready = false;
+        while std::time::Instant::now() < deadline {
+            let list = runtime.block_on(client.list_recordings(None, 10)).unwrap();
+            if let Some(recording) = list.recordings.first() {
+                let page = runtime
+                    .block_on(client.read_recording_page(recording.id.clone(), None, None, 10))
+                    .unwrap();
+                saw_ready = page
+                    .chunks
+                    .iter()
+                    .flat_map(|chunk| &chunk.frames)
+                    .any(|frame| {
+                        matches!(&frame.kind, StoredRecordingFrameKind::Output(bytes)
+                        if bytes.windows(b"ready".len()).any(|window| window == b"ready"))
+                    });
+            }
+            if saw_ready {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(saw_ready);
+        session.resize(40, 12).unwrap();
+        session.write_text("private-input\r").unwrap();
+
+        let mut recording_id = None;
+        while std::time::Instant::now() < deadline {
+            let list = runtime.block_on(client.list_recordings(None, 10)).unwrap();
+            if let Some(recording) = list.recordings.first()
+                && recording.state == RecordingState::Finished
+            {
+                recording_id = Some(recording.id.clone());
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let page = runtime
+            .block_on(client.read_recording_page(
+                recording_id.expect("PTY exit should finish the recording"),
+                None,
+                None,
+                10,
+            ))
+            .unwrap();
+        let mut output = Vec::new();
+        let mut sizes = Vec::new();
+        for frame in page.chunks.iter().flat_map(|chunk| &chunk.frames) {
+            match &frame.kind {
+                StoredRecordingFrameKind::Output(bytes) => output.extend_from_slice(bytes),
+                StoredRecordingFrameKind::Resize { columns, rows } => sizes.push((*columns, *rows)),
+                StoredRecordingFrameKind::Gap { .. } => panic!("unexpected recording gap"),
+            }
+        }
+        assert!(
+            output
+                .windows(b"ready".len())
+                .any(|window| window == b"ready")
+        );
+        assert!(
+            output
+                .windows(b"done".len())
+                .any(|window| window == b"done")
+        );
+        assert!(
+            !output
+                .windows(b"private-input".len())
+                .any(|window| window == b"private-input")
+        );
+        assert!(sizes.contains(&(80, 24)));
+        assert!(sizes.contains(&(40, 12)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_recording_pressure_preserves_output_and_services_input_and_close() {
+        use oxideterm_audit::{
+            AuditContext, AuditPolicy, AuditService, AuditSource, AuditStore, RecordingState,
+            StoredRecordingFrameKind,
+        };
+        use std::sync::{
+            Arc, Mutex,
+            atomic::AtomicBool,
+            mpsc,
+        };
+        use std::time::{Duration, Instant};
+
+        let corpus = (0..600_000)
+            .map(|index| format!("{index:08}:0123456789abcdef0123456789abcdef\r\n"))
+            .collect::<String>();
+        for cancel in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let database = directory.path().join("audit.db");
+            let fixture = directory.path().join("output");
+            let acknowledged = directory.path().join("input");
+            let ready = directory.path().join("ready");
+            let finished = directory.path().join("finished");
+            std::fs::write(&fixture, corpus.as_bytes()).unwrap();
+            let (entered, waiting) = mpsc::channel();
+            let (resume, resumed) = mpsc::channel();
+            let service = AuditService::with_recording_files(
+                database.clone(),
+                AuditTestKeys,
+                Arc::new(PausedFiles {
+                    first: AtomicBool::new(false),
+                    entered,
+                    resume: Mutex::new(resumed),
+                }),
+            )
+            .unwrap();
+            let client = service.client();
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime
+                .block_on(client.set_policy(AuditPolicy {
+                    enabled: true,
+                    record_output: true,
+                    ..Default::default()
+                }))
+                .unwrap();
+            let context = AuditContext::new(client.clone(), AuditSource::User)
+                .session("local", "pressure-fixture");
+            let config = crate::LocalPtyConfig {
+                shell: Some(crate::ShellInfo::new("test-sh", "Test", "/bin/sh").with_args(vec![
+                    "-c".into(),
+                    r#"stty raw -echo; printf ready > "$3"; read line; cat "$1" & output=$!; dd bs=1 count=1 of="$2" 2>/dev/null; wait "$output"; printf finished > "$4"; read line"#.into(),
+                    "pressure-fixture".into(), fixture.to_string_lossy().into_owned(), acknowledged.to_string_lossy().into_owned(), ready.to_string_lossy().into_owned(), finished.to_string_lossy().into_owned(),
+                ])), load_profile: false, ..Default::default()
+            };
+            let mut session = LocalPtySession::spawn_with_config_graphics_encoding_and_audit(
+                120,
+                24,
+                config,
+                Default::default(),
+                Default::default(),
+                100,
+                Some(context),
+            )
+            .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while !ready.exists() {
+                assert!(Instant::now() < deadline, "PTY did not become ready");
+                std::thread::yield_now();
+            }
+            session.write_input(b"\n").unwrap();
+            waiting
+                .recv_timeout(Duration::from_secs(30))
+                .expect("recording did not reach file I/O");
+            loop {
+                let report = session
+                    .stats_rx
+                    .recv_timeout(Duration::from_secs(30))
+                    .expect("PTY did not report recording pressure");
+                if report.recording_backpressured {
+                    break;
+                }
+            }
+            assert!(
+                !finished.exists(),
+                "producer finished before pressure reached the PTY"
+            );
+            session.write_input(b"x").unwrap();
+            let input_deadline = Instant::now() + Duration::from_secs(3);
+            while std::fs::read(&acknowledged).unwrap_or_default() != b"x" {
+                assert!(
+                    Instant::now() < input_deadline,
+                    "recording pressure blocked PTY input"
+                );
+                std::thread::yield_now();
+            }
+            if cancel {
+                let reader = session.io_thread.take().unwrap();
+                session.shutdown();
+                let close_deadline = Instant::now() + Duration::from_secs(3);
+                while !reader.is_finished() {
+                    assert!(
+                        Instant::now() < close_deadline,
+                        "closing PTY waited for recording I/O"
+                    );
+                    std::thread::yield_now();
+                }
+                reader.join().unwrap();
+            }
+            resume.send(()).unwrap();
+            if !cancel {
+                let finish_deadline = Instant::now() + Duration::from_secs(30);
+                while !finished.exists() {
+                    assert!(
+                        Instant::now() < finish_deadline,
+                        "PTY did not resume after recording capacity returned"
+                    );
+                    session.drain_output();
+                    std::thread::yield_now();
+                }
+                session.write_input(b"\n").unwrap();
+            }
+            let complete_deadline = Instant::now() + Duration::from_secs(30);
+            loop {
+                session.drain_output();
+                let list = runtime.block_on(client.list_recordings(None, 10)).unwrap();
+                if list
+                    .recordings
+                    .first()
+                    .is_some_and(|recording| recording.state != RecordingState::InProgress)
+                {
+                    break;
+                }
+                assert!(
+                    Instant::now() < complete_deadline,
+                    "recording did not finish"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            drop(service);
+            let store = AuditStore::open(&database, &AuditTestKeys).unwrap();
+            let list = store.list_recordings(None, 10).unwrap();
+            assert_eq!(
+                list.recordings[0].state,
+                if cancel {
+                    RecordingState::Interrupted
+                } else {
+                    RecordingState::Finished
+                }
+            );
+            let mut actual = Vec::new();
+            let mut cursor = None;
+            loop {
+                let page = store
+                    .read_recording_page(&list.recordings[0].id, cursor, None, 16)
+                    .unwrap();
+                for frame in page.chunks.iter().flat_map(|chunk| &chunk.frames) {
+                    match &frame.kind {
+                        StoredRecordingFrameKind::Output(bytes) => actual.extend_from_slice(bytes),
+                        StoredRecordingFrameKind::Gap { .. } => {
+                            panic!("accepted PTY output was lost")
+                        }
+                        StoredRecordingFrameKind::Resize { .. } => {}
+                    }
+                }
+                cursor = page.next_cursor;
+                if cursor.is_none() {
+                    break;
+                }
+            }
+            if cancel {
+                assert!(!actual.is_empty() && actual.len() < corpus.len());
+                assert_eq!(actual, corpus.as_bytes()[..actual.len()]);
+            } else {
+                assert_eq!(actual, corpus.as_bytes());
+                assert_eq!(client.health().unrecorded, 0);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "manual release-profile local PTY throughput benchmark"]
+    fn local_pty_output_benchmark() {
+        use oxideterm_audit::{
+            AuditContext, AuditPolicy, AuditService, AuditSource, AuditStore,
+            StoredRecordingFrameKind,
+        };
+        use std::time::{Duration, Instant};
+        let record_output = std::env::var("OXIDETERM_BENCH_RECORD_OUTPUT").as_deref() == Ok("1");
+        let audit_directory = tempfile::tempdir().unwrap();
+        let audit_service =
+            AuditService::with_key_provider(audit_directory.path().join("audit.db"), AuditTestKeys)
+                .unwrap();
+        let audit_client = audit_service.client();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime
+            .block_on(audit_client.set_policy(AuditPolicy {
+                enabled: true,
+                record_output,
+                ..Default::default()
+            }))
+            .unwrap();
+        let corpus_file = tempfile::NamedTempFile::new().unwrap();
+        let input_ack = tempfile::NamedTempFile::new().unwrap();
+        for (name, pattern) in [
+            (
+                "plain",
+                "terminal benchmark output abcdefghijklmnopqrstuvwxyz 0123456789\r\n",
+            ),
+            (
+                "ansi",
+                "\x1b[38;5;42mcolored output\x1b[0m terminal benchmark\r\n",
+            ),
+            (
+                "unicode",
+                "中文输出终端性能测试 e\u{301} 🦀 日本語かなカナ\r\n",
+            ),
+        ] {
+            let corpus = pattern.repeat((16 * 1024 * 1024) / pattern.len());
+            std::fs::write(corpus_file.path(), &corpus).unwrap();
+            for round in 0..4 {
+                std::fs::write(input_ack.path(), []).unwrap();
+                let config = crate::LocalPtyConfig {
+                    shell: Some(crate::ShellInfo::new("test-sh", "Test", "/bin/sh").with_args(vec![
+                        "-c".into(),
+                        r#"stty raw -echo; printf '\033]2;ready\007'; read line; cat "$1" & output=$!; dd bs=1 count=1 of="$2" 2>/dev/null; wait "$output"; printf '\r\nBENCH-END\r\n\033]2;done\007'; read line"#.into(),
+                        "pty-benchmark".into(),
+                        corpus_file.path().to_string_lossy().into_owned(),
+                        input_ack.path().to_string_lossy().into_owned(),
+                    ])),
+                    load_profile: false,
+                    ..Default::default()
+                };
+                let context = AuditContext::new(audit_client.clone(), AuditSource::User)
+                    .session("local", "benchmark");
+                let mut session = LocalPtySession::spawn_with_config_graphics_encoding_and_audit(
+                    120,
+                    40,
+                    config,
+                    Default::default(),
+                    Default::default(),
+                    20_000,
+                    Some(context),
+                )
+                .unwrap();
+                let startup = Instant::now();
+                while session.title.as_deref() != Some("ready") {
+                    assert!(
+                        startup.elapsed() < Duration::from_secs(10),
+                        "startup timeout"
+                    );
+                    session.drain_output();
+                    session.take_events();
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                let started = Instant::now();
+                session.write_input(b"\n").unwrap();
+                let mut report = TerminalDrainReport::default();
+                let mut input_started = None;
+                let mut input_latency = None;
+                while session.title.as_deref() != Some("done") {
+                    assert!(
+                        started.elapsed() < Duration::from_secs(30),
+                        "output timeout: {name}"
+                    );
+                    report.combine(session.drain_output_with_budget(
+                        TerminalDrainBudget::unlimited().with_performance_metrics(true),
+                    ));
+                    if report.drained_bytes >= 256 * 1024 && input_started.is_none() {
+                        input_started = Some(Instant::now());
+                        session.write_input(b"x").unwrap();
+                    }
+                    if let Some(started) = input_started {
+                        if input_latency.is_none()
+                            && std::fs::read(input_ack.path()).unwrap() == b"x"
+                        {
+                            input_latency = Some(started.elapsed());
+                        }
+                    }
+                    session.take_events();
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                let elapsed = started.elapsed();
+                let rss_kib = std::process::Command::new("ps")
+                    .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+                    .output()
+                    .ok()
+                    .and_then(|output| String::from_utf8(output.stdout).ok())
+                    .and_then(|value| value.trim().parse::<u64>().ok());
+                let snapshot = session.snapshot();
+                assert!(snapshot.lines.iter().any(|line| {
+                    line.cells
+                        .iter()
+                        .map(|cell| cell.ch)
+                        .collect::<String>()
+                        .starts_with("BENCH-END")
+                }));
+                session.write_input(b"\n").unwrap();
+                let shutdown = Instant::now();
+                while session.lifecycle().is_running() {
+                    assert!(
+                        shutdown.elapsed() < Duration::from_secs(5),
+                        "shutdown timeout"
+                    );
+                    session.drain_output();
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                eprintln!(
+                    "PTY_BENCH {name} round={round} record_output={record_output} bytes={} elapsed_ms={:.3} parse_ms={:.3} lock_ms={:.3} max_chunk={} input_ack_ms={:.3} unrecorded={} rss_kib={rss_kib:?}",
+                    corpus.len(),
+                    elapsed.as_secs_f64() * 1000.0,
+                    report.output_processing_duration.as_secs_f64() * 1000.0,
+                    report.terminal_lock_wait_duration.as_secs_f64() * 1000.0,
+                    report.max_data_chunk_bytes,
+                    input_latency
+                        .expect("input was not acknowledged during output")
+                        .as_secs_f64()
+                        * 1000.0,
+                    audit_client.health().unrecorded,
+                );
+            }
+        }
+        drop(audit_service);
+        if record_output {
+            let store =
+                AuditStore::open(&audit_directory.path().join("audit.db"), &AuditTestKeys).unwrap();
+            let mut stored_bytes = 0u64;
+            let mut lost_bytes = 0u64;
+            let mut unknown_gaps = 0u64;
+            let mut recording_cursor = None;
+            loop {
+                let list = store.list_recordings(recording_cursor, 100).unwrap();
+                for recording in list.recordings {
+                    let mut chunk_cursor = None;
+                    loop {
+                        let page = store
+                            .read_recording_page(&recording.id, chunk_cursor, None, 16)
+                            .unwrap();
+                        for frame in page.chunks.iter().flat_map(|chunk| &chunk.frames) {
+                            match &frame.kind {
+                                StoredRecordingFrameKind::Output(bytes) => {
+                                    stored_bytes += bytes.len() as u64
+                                }
+                                StoredRecordingFrameKind::Gap {
+                                    lost_bytes: Some(bytes),
+                                } => lost_bytes += *bytes,
+                                StoredRecordingFrameKind::Gap { lost_bytes: None } => {
+                                    unknown_gaps += 1
+                                }
+                                StoredRecordingFrameKind::Resize { .. } => {}
+                            }
+                        }
+                        chunk_cursor = page.next_cursor;
+                        if chunk_cursor.is_none() {
+                            break;
+                        }
+                    }
+                }
+                recording_cursor = list.next_cursor;
+                if recording_cursor.is_none() {
+                    break;
+                }
+            }
+            eprintln!(
+                "PTY_BENCH_CAPTURE stored_bytes={stored_bytes} lost_bytes={lost_bytes} unknown_gaps={unknown_gaps} lost_pct={:.2}",
+                100.0 * lost_bytes as f64 / (lost_bytes + stored_bytes).max(1) as f64
+            );
+        }
+    }
 
     #[cfg(unix)]
     #[test]
@@ -53,7 +616,8 @@ mod tests {
         crate::selection::set_term_selection(&mut guard, Some(range));
         let (tx, rx) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
-            tx.send(session.try_render_snapshot(&previous, true)).unwrap();
+            tx.send(session.try_render_snapshot(&previous, true))
+                .unwrap();
             (session, previous)
         });
         let attempt = rx.recv_timeout(std::time::Duration::from_millis(100));
@@ -1168,10 +1732,11 @@ mod tests {
             |event| events.push(event),
         );
 
-        assert!(!events.iter().any(|event| matches!(
-            event,
-            TerminalEvent::EditorIntegration(_)
-        )));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, TerminalEvent::EditorIntegration(_)))
+        );
         let snapshot = snapshot_from_term(&term, size, &TerminalGraphicsState::default());
         let visible_text = snapshot
             .lines
@@ -1201,12 +1766,9 @@ mod tests {
             "\u{1b}]7719;v=3;kind=editor-clipboard;app=vim;op=copy;data={encoded_text}\u{7}"
         );
 
-        integration.advance(
-            &mut parser,
-            &mut term,
-            payload.as_bytes(),
-            |event| events.push(event),
-        );
+        integration.advance(&mut parser, &mut term, payload.as_bytes(), |event| {
+            events.push(event)
+        });
 
         assert!(events.iter().any(|event| matches!(
             event,
@@ -1397,18 +1959,14 @@ mod tests {
         let mut integration = crate::shell_integration::TerminalShellIntegration::default();
         let mut events = Vec::new();
 
-        integration.advance(&mut parser, &mut term, b"\x1b", |event| {
-            events.push(event)
-        });
+        integration.advance(&mut parser, &mut term, b"\x1b", |event| events.push(event));
         integration.advance(
             &mut parser,
             &mut term,
             b"]7;file://build-host/home/dev\x1b",
             |event| events.push(event),
         );
-        integration.advance(&mut parser, &mut term, b"\\$ ", |event| {
-            events.push(event)
-        });
+        integration.advance(&mut parser, &mut term, b"\\$ ", |event| events.push(event));
 
         assert!(events.iter().any(|event| matches!(
             event,
@@ -1430,37 +1988,79 @@ mod tests {
 
     #[test]
     fn terminal_recording_bytes_exclude_private_osc_across_chunks() {
-        let size = TerminalSize {
-            cols: 80,
-            rows: 8,
-            cell_width: 8,
-            cell_height: 17,
-        };
-        let mut term = Term::new(Config::default(), &size, VoidListener);
-        let mut parser = Processor::<StdSyncHandler>::new();
-        let mut integration = crate::shell_integration::TerminalShellIntegration::default();
-        let mut events = Vec::new();
+        for terminator in ["\x07", "\x1b\\"] {
+            let input = format!(
+                "before\x1b]7719;v=3;kind=editor-clipboard;app=vim;op=copy;data=%73%65%63%72%65%74{terminator}after\x1b]0;title\x07"
+            );
+            for split in 0..=input.len() {
+                let size = TerminalSize {
+                    cols: 80,
+                    rows: 8,
+                    cell_width: 8,
+                    cell_height: 17,
+                };
+                let mut term = Term::new(Config::default(), &size, VoidListener);
+                let mut parser = Processor::<StdSyncHandler>::new();
+                let mut integration = crate::shell_integration::TerminalShellIntegration::default();
+                let mut events = Vec::new();
+                let mut recorded = Vec::new();
+                for chunk in [&input.as_bytes()[..split], &input.as_bytes()[split..]] {
+                    let (_, bytes) = integration.advance_with_recording(
+                        &mut parser,
+                        &mut term,
+                        chunk,
+                        |event| events.push(event),
+                    );
+                    recorded.extend(bytes);
+                }
+                assert_eq!(recorded, b"beforeafter\x1b]0;title\x07", "split {split}");
+                assert_eq!(
+                    events
+                        .iter()
+                        .filter(|event| matches!(event, TerminalEvent::EditorClipboard(_)))
+                        .count(),
+                    1,
+                    "split {split}"
+                );
+            }
+        }
+    }
 
-        let (_, first) = integration.advance_with_recording(
-            &mut parser,
-            &mut term,
-            b"before\x1b]7719;v=3;kind=editor-clipboard;app=vim;op=copy;data=%73%65%63%72%65%74\x1b",
-            |event| events.push(event),
-        );
-        let (_, second) = integration.advance_with_recording(
-            &mut parser,
-            &mut term,
-            b"\\after\x1b]0;title\x07",
-            |event| events.push(event),
-        );
-        let recorded = [first, second].concat();
-
-        assert_eq!(recorded, b"beforeafter\x1b]0;title\x07");
-        assert!(!String::from_utf8_lossy(&recorded).contains("7719;"));
-        assert!(!String::from_utf8_lossy(&recorded).contains("%73%65%63%72%65%74"));
-        assert!(events
-            .iter()
-            .any(|event| matches!(event, TerminalEvent::EditorClipboard(_))));
+    #[test]
+    fn osc_capture_preserves_link_payload_and_recording_at_every_split() {
+        let input = b"\x1b]77190;not-private\x07\x1b]8;id=build;https://ex\0ample.com/log?a=1;b=2\x1b\\AB\x1b]8;;\x07C";
+        for split in 0..=input.len() {
+            let size = TerminalSize {
+                cols: 80,
+                rows: 2,
+                cell_width: 8,
+                cell_height: 17,
+            };
+            let mut term = Term::new(Config::default(), &size, VoidListener);
+            let mut parser = Processor::<StdSyncHandler>::new();
+            let mut integration = crate::shell_integration::TerminalShellIntegration::default();
+            let mut recorded = Vec::new();
+            for chunk in [&input[..split], &input[split..]] {
+                let (_, bytes) =
+                    integration.advance_with_recording(&mut parser, &mut term, chunk, |_| {});
+                recorded.extend(bytes);
+            }
+            assert_eq!(recorded, input, "split {split}");
+            let snapshot = snapshot_from_term(&term, size, &TerminalGraphicsState::default());
+            assert_eq!(snapshot.lines[0].text().trim_end(), "ABC", "split {split}");
+            assert_eq!(
+                snapshot.lines[0].cells[..3]
+                    .iter()
+                    .map(TerminalCell::hyperlink)
+                    .collect::<Vec<_>>(),
+                vec![
+                    Some("https://example.com/log?a=1;b=2"),
+                    Some("https://example.com/log?a=1;b=2"),
+                    None
+                ],
+                "split {split}"
+            );
+        }
     }
 
     #[test]
@@ -1474,19 +2074,14 @@ mod tests {
         let mut term = Term::new(Config::default(), &size, VoidListener);
         let mut parser = Processor::<StdSyncHandler>::new();
         let mut integration = crate::shell_integration::TerminalShellIntegration::default();
-        let mut oversized =
-            b"\x1b]7719;v=3;kind=editor-clipboard;app=vim;op=copy;data=".to_vec();
+        let mut oversized = b"\x1b]7719;v=3;kind=editor-clipboard;app=vim;op=copy;data=".to_vec();
         oversized.extend(std::iter::repeat_n(
             b'A',
             crate::editor_integration::EDITOR_PROTOCOL_PAYLOAD_LIMIT + 128,
         ));
 
-        let (_, first) = integration.advance_with_recording(
-            &mut parser,
-            &mut term,
-            &oversized,
-            |_| {},
-        );
+        let (_, first) =
+            integration.advance_with_recording(&mut parser, &mut term, &oversized, |_| {});
         let (_, second) = integration.advance_with_recording(
             &mut parser,
             &mut term,
@@ -1638,5 +2233,146 @@ mod tests {
 
         assert_eq!(fg, OXIDETERM_DARK_THEME.ansi[7]);
         assert_eq!(bg, OXIDETERM_DARK_THEME.ansi[15]);
+    }
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires the tmux executable; uses a private test server socket"]
+    fn real_tmux_control_actions_keep_replies_with_their_audit_operations() {
+        use oxideterm_audit::{
+            AuditCategory, AuditContext, AuditEvidence, AuditOutcome, AuditPhase, AuditQuery,
+            AuditService, AuditSource,
+        };
+        use std::time::{Duration, Instant};
+        struct Server(PathBuf);
+        impl Drop for Server {
+            fn drop(&mut self) {
+                let _ = std::process::Command::new("tmux")
+                    .args(["-S"])
+                    .arg(&self.0)
+                    .arg("kill-server")
+                    .output();
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let server = Server(directory.path().join("tmux.sock"));
+        let service =
+            AuditService::with_key_provider(directory.path().join("audit.db"), AuditTestKeys)
+                .unwrap();
+        let client = service.client();
+        let context =
+            AuditContext::new(client.clone(), AuditSource::User).session("local", "tmux-fixture");
+        let config = crate::LocalPtyConfig {
+            shell: Some(
+                crate::ShellInfo::new("test-tmux", "Test", "tmux").with_args(vec![
+                    "-S".into(),
+                    server.0.to_string_lossy().into_owned(),
+                    "-f".into(),
+                    "/dev/null".into(),
+                    "-CC".into(),
+                    "new-session".into(),
+                    "-s".into(),
+                    "audit-fixture".into(),
+                    "/bin/cat".into(),
+                ]),
+            ),
+            load_profile: false,
+            ..Default::default()
+        };
+        let mut session = LocalPtySession::spawn_with_config_graphics_encoding_and_audit(
+            80,
+            24,
+            config,
+            Default::default(),
+            Default::default(),
+            100,
+            Some(context.clone()),
+        )
+        .unwrap();
+        let started = Instant::now();
+        while !session.tmux_state().is_some_and(|state| state.ready) {
+            session.drain_output();
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "tmux did not become ready"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let id = session
+            .tmux_state()
+            .unwrap()
+            .sessions
+            .iter()
+            .find(|session| session.active)
+            .unwrap()
+            .id;
+        let rename = context.operation(AuditCategory::Automation, "tmux_control", Some("rename"));
+        let rename_id = rename.id().unwrap().to_owned();
+        session
+            .tmux_action(
+                crate::TmuxAction::RenameSession {
+                    id,
+                    name: "audit-renamed".into(),
+                },
+                rename,
+            )
+            .unwrap();
+        let rejected =
+            context.operation(AuditCategory::Automation, "tmux_control", Some("invalid"));
+        let rejected_id = rejected.id().unwrap().to_owned();
+        session
+            .tmux_action(
+                crate::TmuxAction::RunCommand("invalid-audit-fixture-command".into()),
+                rejected,
+            )
+            .unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        loop {
+            session.drain_output();
+            let page = runtime
+                .block_on(client.query(AuditQuery {
+                    category: Some(AuditCategory::Automation),
+                    limit: 20,
+                    ..Default::default()
+                }))
+                .unwrap();
+            let results = page
+                .records
+                .iter()
+                .filter_map(|record| record.details.operation.as_ref())
+                .filter(|operation| operation.phase == Some(AuditPhase::Result))
+                .collect::<Vec<_>>();
+            if results.len() == 2 {
+                let rename = results
+                    .iter()
+                    .find(|operation| operation.id == rename_id)
+                    .unwrap();
+                assert_eq!(
+                    (rename.outcome, rename.evidence),
+                    (AuditOutcome::Succeeded, AuditEvidence::Protocol)
+                );
+                let rejected = results
+                    .iter()
+                    .find(|operation| operation.id == rejected_id)
+                    .unwrap();
+                assert_eq!(
+                    (rejected.outcome, rejected.evidence),
+                    (AuditOutcome::Failed, AuditEvidence::Protocol)
+                );
+                assert!(
+                    session
+                        .tmux_state()
+                        .unwrap()
+                        .sessions
+                        .iter()
+                        .any(|session| session.id == id && session.name == "audit-renamed")
+                );
+                break;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "tmux did not return the action results"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 }

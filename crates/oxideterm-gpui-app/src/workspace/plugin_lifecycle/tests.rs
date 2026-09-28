@@ -33,6 +33,8 @@ const TEST_CONNECTIONS_UPDATED_AT: &str = "2026-05-25T00:00:00Z";
 // Shared fixtures keep unrelated sync tests insulated from snapshot field additions.
 fn saved_connections_sync_fixture() -> SavedConnectionsSyncSnapshot {
     SavedConnectionsSyncSnapshot {
+        local_terminal_profiles: Vec::new(),
+        local_terminal_tombstones: Vec::new(),
         revision: TEST_CONNECTIONS_REVISION.to_string(),
         exported_at: TEST_CONNECTIONS_UPDATED_AT.to_string(),
         records: Vec::new(),
@@ -982,6 +984,7 @@ fn api_invoke_rejects_undeclared_commands_and_runs_supported_whitelisted_command
             }),
         },
         NativePluginBackendAdapters {
+            audit_context: None,
             permissions: &permissions,
             sftp_router: &sftp_router,
             sftp_runtime: &runtime,
@@ -1010,6 +1013,7 @@ fn api_invoke_rejects_undeclared_commands_and_runs_supported_whitelisted_command
             args: serde_json::json!({ "command": "read_plugin_file" }),
         },
         NativePluginBackendAdapters {
+            audit_context: None,
             permissions: &permissions,
             sftp_router: &sftp_router,
             sftp_runtime: &runtime,
@@ -1035,6 +1039,7 @@ fn api_invoke_rejects_undeclared_commands_and_runs_supported_whitelisted_command
             args: serde_json::json!({ "command": "custom_declared_command" }),
         },
         NativePluginBackendAdapters {
+            audit_context: None,
             permissions: &permissions,
             sftp_router: &sftp_router,
             sftp_runtime: &runtime,
@@ -1084,6 +1089,7 @@ fn api_invoke_native_adapters_cover_system_transfer_and_capability_paths() {
             args: serde_json::json!({ "command": NATIVE_PLUGIN_API_COMMAND_GET_APP_VERSION }),
         },
         NativePluginBackendAdapters {
+            audit_context: None,
             permissions: &permissions,
             sftp_router: &sftp_router,
             sftp_runtime: &runtime,
@@ -1111,6 +1117,7 @@ fn api_invoke_native_adapters_cover_system_transfer_and_capability_paths() {
             }),
         },
         NativePluginBackendAdapters {
+            audit_context: None,
             permissions: &permissions,
             sftp_router: &sftp_router,
             sftp_runtime: &runtime,
@@ -1147,6 +1154,7 @@ fn api_invoke_native_adapters_cover_system_transfer_and_capability_paths() {
             }),
         },
         NativePluginBackendAdapters {
+            audit_context: None,
             permissions: &permissions,
             sftp_router: &sftp_router,
             sftp_runtime: &runtime,
@@ -1175,6 +1183,7 @@ fn api_invoke_native_adapters_cover_system_transfer_and_capability_paths() {
             }),
         },
         NativePluginBackendAdapters {
+            audit_context: None,
             permissions: &permissions,
             sftp_router: &sftp_router,
             sftp_runtime: &runtime,

@@ -250,6 +250,42 @@ fn reusable_direct_root_node_for_saved_config(
 }
 
 impl WorkspaceApp {
+    pub(crate) fn open_native_connection_handoff(
+        &mut self,
+        handoff: oxideterm_ssh_launch::NativeConnectionHandoff,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
+        let Some(parent_id) = handoff.audit_parent_id else {
+            return self.open_native_connection_launch(handoff.launch, window, cx);
+        };
+        let context = oxideterm_audit::AuditContext::current().map(|mut context| {
+            context.parent_id = Some(parent_id);
+            context.source = oxideterm_audit::AuditSource::Cli;
+            context
+        });
+        oxideterm_audit::AuditContext::with_sync_request(context.as_ref(), || {
+            let audit = oxideterm_audit::AuditOperation::begin(
+                oxideterm_audit::AuditCategory::Connection,
+                "connection_dispatch_receive",
+                None,
+                None,
+            );
+            let result = self.open_native_connection_launch(handoff.launch, window, cx);
+            audit.finish(
+                if result.is_ok() {
+                    oxideterm_audit::AuditOutcome::Sent
+                } else {
+                    oxideterm_audit::AuditOutcome::Failed
+                },
+                oxideterm_audit::AuditEvidence::Dispatch,
+                None,
+                None,
+            );
+            result
+        })
+    }
+
     pub(crate) fn open_native_connection_launch(
         &mut self,
         launch: NativeConnectionLaunch,
@@ -345,17 +381,19 @@ impl WorkspaceApp {
         let mut preferences =
             self.prepare_terminal_preferences_for_tab_kind(&TabKind::LocalTerminal, cx);
         preference_overrides.apply_to(&mut preferences);
+        let instance = super::super::local_sessions::LocalTerminalInstance::new(
+            &terminal_config,
+            title.clone(),
+        );
+        let shared_session = TerminalPane::local_shared_session(terminal_config, &preferences)?;
         let pane = cx.new(|cx| {
-            TerminalPane::new_local_with_config_and_preferences(
-                terminal_config,
-                preferences,
-                window,
-                cx,
-            )
-            .expect("failed to initialize terminal pane")
-            .with_preference_overrides(preference_overrides)
+            TerminalPane::from_shared_session(shared_session.clone(), preferences, window, cx)
+                .expect("failed to initialize terminal view")
+                .with_preference_overrides(preference_overrides)
         });
-        let shared_session = pane.read(cx).shared_session();
+        self.tab_host.update(cx, |host, _| {
+            host.local_sessions.insert(session_id, instance);
+        });
 
         self.register_terminal_pane(pane_id, session_id, pane.clone(), window, cx);
         self.refresh_native_plugin_terminal_hooks(cx);

@@ -15,7 +15,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-2.0.30-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-2.1.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-blue" alt="Platform">
   <img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="License">
   <img src="https://img.shields.io/badge/rust-2024%20edition-orange" alt="Rust 2024">
@@ -56,6 +56,21 @@ Kết nối và dữ liệu vận hành vẫn do bạn kiểm soát. OxideSens d
 | OxideSens AI BYOK thay vì tín dụng nền tảng | OxideSens dùng endpoint OpenAI, Anthropic, Gemini, Ollama hoặc tương thích OpenAI của bạn, với MCP, RAG, điều khiển suy luận theo nhà cung cấp và các thao tác workspace đã được phê duyệt |
 | Độ ổn định khi kết nối lại | Grace Period thăm dò kết nối cũ trong 30 giây trước khi thay thế, để ứng dụng TUI vượt qua các gián đoạn mạng ngắn |
 | SSH Rust thuần và an toàn thông tin xác thực | Ngăn xếp SSH dùng `russh` + `ring` không cần OpenSSL/libssh2; thông tin xác thực đã lưu dùng móc khóa hệ thống và gói `.oxide` dùng ChaCha20-Poly1305 + Argon2id |
+
+---
+
+## Mức sử dụng bộ nhớ
+
+**Sau khi viết lại thành ứng dụng gốc, mức sử dụng bộ nhớ khi nhàn rỗi giảm còn khoảng một phần tư so với phiên bản cũ trên macOS và một phần tám trên Windows.** Dưới đây là các số đo tác giả ghi nhận trên máy của mình khi chuyển từ Tauri 1.x sang phiên bản gốc dùng GPUI 2.0:
+
+| Nền tảng | Tauri 1.x — khi nhàn rỗi | Bản gốc 2.0 — khi nhàn rỗi | Mức giảm |
+|---|---:|---:|---:|
+| macOS | 318,7 MB | 81,3 MB | Khoảng 74% |
+| Windows | 182,4 MB | 23,5 MB | Khoảng 87% |
+
+![So sánh bộ nhớ khi nhàn rỗi giữa Tauri 1.x và bản gốc 2.0, kèm ảnh chụp các tiến trình hệ thống](../screenshots/oxideterm-memory-comparison.png)
+
+Tổng bộ nhớ của phiên bản cũ bao gồm OxideTerm và các tiến trình WebView liên quan trong ảnh chụp. Phiên bản gốc không còn cần những tiến trình trình duyệt này.
 
 ---
 

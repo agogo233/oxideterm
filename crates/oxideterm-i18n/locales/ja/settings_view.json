@@ -222,6 +222,9 @@
       "keep_running_on_close_hint": "ウィンドウを閉じても、OxideTerm はバックグラウンドで実行し続けます。"
     },
     "terminal": {
+      "cjk_font_custom": "カスタム…",
+      "custom_cjk_font": "カスタム CJK フォント",
+      "custom_cjk_font_hint": "インストール済みフォントの正式な名前を入力してください。空欄にすると自動フォールバックを使用します。",
       "input_keyboard": "キーボードと入力候補",
       "input_mouse_links": "マウスとリンク",
       "input_clipboard": "コピーと貼り付け",
@@ -663,6 +666,10 @@
       "theme": "テーマ",
       "color_theme": "カラーテーマ",
       "color_theme_hint": "ターミナルの配色",
+      "theme_preview_hint": "カーソルを合わせるか ↑/↓ でプレビューし、クリックまたは Enter で適用します。",
+      "theme_preview_added": "  新規ファイル: src/theme.rs",
+      "theme_preview_modified": "  変更: Cargo.toml",
+      "theme_preview_deleted": "  削除: old-theme.toml",
       "select_theme": "テーマを選択",
       "layout": "インターフェースのレイアウト",
       "layout_hint": "サイドバーは右端をドラッグしてサイズ変更できます。折りたたみボタン（◧）を使用して非表示にします。",
@@ -1410,7 +1417,9 @@
       "memory_no_providers": "No frontend diagnostics providers reported data yet.",
       "memory_export_warning": "Exported diagnostics contain counts, estimates, paths or session identifiers only. Terminal output, AI message text, API keys and environment values are not included.",
       "memory_open": "Open",
-      "memory_close": "Close"
+      "memory_close": "Close",
+      "third_party_notices": "第三者に関する表記",
+      "third_party_notices_description": "同梱の依存ライブラリと画像の帰属表示、および原ライセンスへのリンク。"
     },
     "errors": {
       "create_group_failed": "グループの作成に失敗しました: {{error}}",

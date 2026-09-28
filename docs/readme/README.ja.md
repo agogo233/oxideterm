@@ -15,7 +15,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-2.0.30-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-2.1.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-blue" alt="Platform">
   <img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="License">
   <img src="https://img.shields.io/badge/rust-2024%20edition-orange" alt="Rust 2024">
@@ -52,6 +52,21 @@ OxideTerm は SSH とリモート運用のためのオープンソースワー�
 - 短いネットワーク断に対応する Grace Period 再接続
 - 自分の AI 認証情報と承認済み操作を使う OxideSens
 - Electron と組み込みブラウザーランタイムを使わない GPUI インターフェース
+
+---
+
+## メモリ使用量
+
+**ネイティブ化により、アイドル時のメモリ使用量は macOS で旧版の約 4 分の 1、Windows で約 8 分の 1 になりました。** 以下は、作者が自身の環境で記録した Tauri 1.x とネイティブ GPUI 2.0 の比較です。
+
+| プラットフォーム | Tauri 1.x — アイドル時 | ネイティブ 2.0 — アイドル時 | 削減率 |
+|---|---:|---:|---:|
+| macOS | 318.7 MB | 81.3 MB | 約 74% |
+| Windows | 182.4 MB | 23.5 MB | 約 87% |
+
+![Tauri 1.x とネイティブ 2.0 のアイドル時メモリ比較（システムのプロセス一覧のスクリーンショット付き）](../screenshots/oxideterm-memory-comparison.png)
+
+旧版の値は、スクリーンショットに表示された OxideTerm と関連する WebView プロセスの合計です。ネイティブ版では、これらのブラウザプロセスが不要になりました。
 
 ---
 

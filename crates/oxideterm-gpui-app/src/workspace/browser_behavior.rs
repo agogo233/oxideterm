@@ -441,6 +441,7 @@ pub(crate) enum BrowserPointerCaptureOwner {
     SftpPaneResize,
     SftpQueueResize,
     TerminalCommandSenderResize,
+    TerminalQuickCommandsResize,
     PaneSplitter,
     SettingsSlider,
     TerminalCastSeekbar,
@@ -464,6 +465,7 @@ struct BrowserPointerCaptureState {
     sftp_pane_resizing: bool,
     sftp_queue_resizing: bool,
     terminal_command_sender_resizing: bool,
+    terminal_quick_commands_resizing: bool,
     pane_splitter_dragging: bool,
     settings_slider_dragging: bool,
     terminal_cast_seekbar_dragging: bool,
@@ -523,7 +525,9 @@ pub(crate) fn pointer_capture_needs_workspace_overlay(owner: BrowserPointerCaptu
             | BrowserPointerCaptureOwner::SftpPaneResize
             | BrowserPointerCaptureOwner::SftpQueueResize
             | BrowserPointerCaptureOwner::TerminalCommandSenderResize
+            | BrowserPointerCaptureOwner::TerminalQuickCommandsResize
             | BrowserPointerCaptureOwner::HostToolsTabScrollbar
+            | BrowserPointerCaptureOwner::TabDrag
     )
 }
 
@@ -536,7 +540,7 @@ impl WorkspaceApp {
             return Some(BrowserPointerCaptureOwner::KnowledgeResize);
         }
         let host_tools_tab_scrollbar_dragging = self.host_tools_tab_scrollbar_drag_active(cx);
-        let sftp = self.sftp_view.read(cx);
+        let sftp = self.sftp_view().read(cx);
         resolve_browser_pointer_capture_owner(BrowserPointerCaptureState {
             sidebar_resizing: self.sidebar_resizing,
             embedded_sftp_sidebar_resizing: self.embedded_sftp_sidebar_resizing,
@@ -544,6 +548,12 @@ impl WorkspaceApp {
             sftp_pane_resizing: sftp.pane_resize_active(),
             sftp_queue_resizing: sftp.queue_resize_active(),
             terminal_command_sender_resizing: self.terminal_command_sender.read(cx).is_resizing(),
+            terminal_quick_commands_resizing: self
+                .terminal
+                .read(cx)
+                .quick_commands
+                .panel
+                .is_resizing(),
             pane_splitter_dragging: self.split_drag.is_some(),
             settings_slider_dragging: self.settings_slider_drag.is_some(),
             terminal_cast_seekbar_dragging: self.terminal.read(cx).cast_seek_dragging(),
@@ -571,6 +581,8 @@ fn resolve_browser_pointer_capture_owner(
         Some(BrowserPointerCaptureOwner::SftpPaneResize)
     } else if state.sftp_queue_resizing {
         Some(BrowserPointerCaptureOwner::SftpQueueResize)
+    } else if state.terminal_quick_commands_resizing {
+        Some(BrowserPointerCaptureOwner::TerminalQuickCommandsResize)
     } else if state.terminal_command_sender_resizing {
         Some(BrowserPointerCaptureOwner::TerminalCommandSenderResize)
     } else if state.pane_splitter_dragging {
@@ -650,6 +662,13 @@ mod tests {
             ),
             (
                 BrowserPointerCaptureState {
+                    terminal_quick_commands_resizing: true,
+                    ..BrowserPointerCaptureState::default()
+                },
+                Some(BrowserPointerCaptureOwner::TerminalQuickCommandsResize),
+            ),
+            (
+                BrowserPointerCaptureState {
                     terminal_command_sender_resizing: true,
                     ..BrowserPointerCaptureState::default()
                 },
@@ -698,7 +717,13 @@ mod tests {
             BrowserPointerCaptureOwner::TerminalCommandSenderResize
         ));
         assert!(pointer_capture_needs_workspace_overlay(
+            BrowserPointerCaptureOwner::TerminalQuickCommandsResize
+        ));
+        assert!(pointer_capture_needs_workspace_overlay(
             BrowserPointerCaptureOwner::HostToolsTabScrollbar
+        ));
+        assert!(pointer_capture_needs_workspace_overlay(
+            BrowserPointerCaptureOwner::TabDrag
         ));
         assert!(!pointer_capture_needs_workspace_overlay(
             BrowserPointerCaptureOwner::TextSelection

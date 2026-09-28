@@ -125,6 +125,9 @@
       "choose_icon": "變更圖示",
       "hide_icons": "收合圖示",
       "default_icon": "預設圖示",
+      "auto_icon": "自動辨識",
+      "custom_icon": "指定圖示",
+      "auto_icon_hint": "連線後，活動工作階段會根據偵測到的系統顯示圖示；無法匹配時使用通用伺服器圖示。",
       "color": "顏色",
       "icon_color": "圖示顏色",
       "icon_background_color": "圖示背景顏色",
@@ -132,7 +135,8 @@
       "cancel": "取消",
       "save": "儲存",
       "saving": "儲存中...",
-      "passphrase_hint": "金鑰路徑未變時，留空會保留已儲存的密碼短語。"
+      "passphrase_hint": "金鑰路徑未變時，留空會保留已儲存的密碼短語。",
+      "brand_icon_hint": "發行版標誌保留原始顏色與比例。"
     },
     "serial_profiles": {
       "title": "序列埠設定檔",
@@ -198,6 +202,11 @@
       "list_header": "已儲存會話",
       "expand_all": "展開全部",
       "collapse_all": "摺疊全部"
+    },
+    "local_terminal_profiles": {
+      "delete": "刪除本機工作階段",
+      "delete_failed": "無法刪除本機工作階段",
+      "confirm_delete": "刪除本機工作階段「{{name}}」？執行中的終端會保留。"
     }
   }
 }

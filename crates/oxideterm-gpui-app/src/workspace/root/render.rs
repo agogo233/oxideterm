@@ -16,6 +16,15 @@ impl WorkspaceApp {
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let mut modals = Vec::new();
+        if *tab_kind == TabKind::Workspace {
+            let page = self.tab_host.read(cx).focused_page_id(tab_id);
+            if page != tab_id
+                && let Some(kind) = self.tab_by_id(page, cx).map(|tab| tab.kind.clone())
+            {
+                return self.render_tab_window_modals(page, &kind, window, cx);
+            }
+        }
+
         let window_id = window.window_handle().window_id();
         let document_dialog_owned_by_window = self
             .ai_entity
@@ -84,6 +93,7 @@ impl WorkspaceApp {
                 }
             }
             TabKind::Forwards => {
+                let _scope = self.enter_forwarding_page(tab_id, cx);
                 let Some(node_id) = self.forwarding.read(cx).node_for_tab(tab_id) else {
                     return modals;
                 };
@@ -104,7 +114,8 @@ impl WorkspaceApp {
                 ));
             }
             TabKind::Sftp => {
-                if let Some(dialog) = self.sftp_view.read(cx).dialog() {
+                let _scope = self.enter_sftp_surface(sftp::SftpSurfaceId::Tab(tab_id));
+                if let Some(dialog) = self.sftp_view().read(cx).dialog() {
                     let has_background = self.terminal_background_preferences("sftp").is_some();
                     modals.push(self.render_sftp_dialog(dialog, has_background, cx));
                 }
@@ -119,17 +130,22 @@ impl WorkspaceApp {
             }
             _ => {}
         }
-        if self.sftp_view.read(cx).preview_edit_request_pending() {
+        if self.sftp_view().read(cx).preview_edit_request_pending() {
             // Right-click "Edit" arms the preview load here; the sidebar and
             // SFTP-tab dialogs both settle into the same editor transition.
             self.schedule_pending_sftp_preview_edit(window, cx);
         }
-        if *tab_kind != TabKind::Sftp
+        let _sidebar_scope = self.enter_sftp_surface(sftp::SftpSurfaceId::Sidebar);
+        if self
+            .window_registry
+            .handle_for_role(window_registry::WindowRole::Main)
+            .is_some_and(|handle| handle.window_id() == window_id)
+            && *tab_kind != TabKind::Sftp
             && !self.sidebar_collapsed
             && self.effective_sidebar_panel_section() == SidebarSection::Sessions
             && self.embedded_sftp_node_id.is_some()
-            && self.sftp_view.read(cx).current_surface_id == Some(sftp::SftpSurfaceId::Sidebar)
-            && let Some(dialog) = self.sftp_view.read(cx).dialog()
+            && self.sftp_view().read(cx).current_surface_id == Some(sftp::SftpSurfaceId::Sidebar)
+            && let Some(dialog) = self.sftp_view().read(cx).dialog()
         {
             // Sidebar-owned dialogs stay at the window root so previews and
             // confirmations are never clipped by the narrow sidebar region.
@@ -210,6 +226,7 @@ impl WorkspaceApp {
             });
         }
 
+        self.split_drop_regions.borrow_mut().clear();
         let content = if let Some((tab_id, tab_kind, root_pane)) = &active_tab_projection {
             match (tab_kind, root_pane) {
                 (TabKind::Settings, _) => self.render_settings_surface(cx),
@@ -254,6 +271,11 @@ impl WorkspaceApp {
         } else {
             let available_width = self.welcome_main_content_width(window, cx);
             self.render_empty_workspace(available_width, cx)
+        };
+        let content = if let Some((tab, _, _)) = &active_tab_projection {
+            self.wrap_split_drop_region(*tab, None, content, window, cx)
+        } else {
+            content
         };
         let content = self.wrap_content_background(
             window_background,
@@ -380,6 +402,22 @@ impl WorkspaceApp {
                 }
             }))
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape" && this.cancel_tab_merge_drag(cx) {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    return;
+                }
+                let page = this.active_content_tab_id(cx);
+                let kind = page
+                    .and_then(|id| this.tab_by_id(id, cx))
+                    .map(|tab| tab.kind.clone());
+                let _sftp_scope = this.enter_sftp_surface(if kind == Some(TabKind::Sftp) {
+                    sftp::SftpSurfaceId::Tab(page.unwrap())
+                } else {
+                    sftp::SftpSurfaceId::Sidebar
+                });
+                let _forward_scope = (kind == Some(TabKind::Forwards))
+                    .then(|| this.enter_forwarding_page(page.unwrap(), cx));
                 // The top rendered blocking portal owns every key before
                 // background IME, terminal, and shortcut routing can observe it.
                 if this.capture_active_window_modal_key(event, window, cx) {
@@ -515,7 +553,7 @@ impl WorkspaceApp {
                 } else if this.handle_terminal_git_branch_picker_key(event, cx) {
                     window.prevent_default();
                     cx.stop_propagation();
-                } else if this.handle_terminal_command_overlay_escape(event, cx) {
+                } else if this.handle_terminal_command_overlay_escape(event, window, cx) {
                     window.prevent_default();
                     cx.stop_propagation();
                 } else if this.handle_ai_inline_panel_key(event, window, cx) {
@@ -555,10 +593,10 @@ impl WorkspaceApp {
                     window.prevent_default();
                     cx.stop_propagation();
                 } else if this
-                    .active_tab(cx)
+                    .active_content_tab(cx)
                     .is_some_and(|tab| tab.kind == TabKind::Sftp)
-                    && this.sftp_view.read(cx).dialog.is_none()
-                    && this.sftp_view.read(cx).focused_input.is_none()
+                    && this.sftp_view().read(cx).dialog.is_none()
+                    && this.sftp_view().read(cx).focused_input.is_none()
                     && crate::keybindings::ACTION_DEFINITIONS
                         .iter()
                         .any(|definition| {
@@ -574,7 +612,7 @@ impl WorkspaceApp {
                     window.prevent_default();
                     cx.stop_propagation();
                 } else if this
-                    .active_tab(cx)
+                    .active_content_tab(cx)
                     .is_some_and(|tab| tab.kind == TabKind::FileManager)
                     && this.file_manager.read(cx).dialog.is_none()
                     && this.file_manager.read(cx).focused_input.is_none()
@@ -604,7 +642,7 @@ impl WorkspaceApp {
                     window.prevent_default();
                     cx.stop_propagation();
                 } else if this
-                    .active_tab(cx)
+                    .active_content_tab(cx)
                     .is_some_and(|tab| tab.kind == TabKind::Forwards)
                     && this.forwarding.read(cx).view().focused_input.is_some()
                 {
@@ -612,16 +650,16 @@ impl WorkspaceApp {
                     window.prevent_default();
                     cx.stop_propagation();
                 } else if this
-                    .active_tab(cx)
+                    .active_content_tab(cx)
                     .is_some_and(|tab| tab.kind == TabKind::Graphics)
                     && this.graphics.read(cx).focused_input().is_some()
                 {
                     let _ = this.handle_graphics_key(event, cx);
                     window.prevent_default();
                     cx.stop_propagation();
-                } else if this.sftp_view.read(cx).focused_input().is_some()
+                } else if this.sftp_view().read(cx).focused_input().is_some()
                     || this
-                        .active_tab(cx)
+                        .active_content_tab(cx)
                         .is_some_and(|tab| tab.kind == TabKind::Sftp)
                 {
                     // Embedded SFTP inputs keep their keyboard model while a terminal tab is active.
@@ -629,7 +667,7 @@ impl WorkspaceApp {
                     window.prevent_default();
                     cx.stop_propagation();
                 } else if this
-                    .active_tab(cx)
+                    .active_content_tab(cx)
                     .is_some_and(|tab| tab.kind == TabKind::FileManager)
                 {
                     let _ = this.handle_file_manager_key(event, cx);
@@ -675,6 +713,7 @@ impl WorkspaceApp {
                 this.update_sftp_pane_resize(event, window, cx);
                 this.update_sftp_queue_resize(event, window, cx);
                 this.update_terminal_command_sender_resize(event, window, cx);
+                this.update_terminal_quick_commands_resize(event, cx);
                 this.update_split_drag(event, window, cx);
                 this.update_settings_slider_drag(event, cx);
                 this.update_terminal_cast_seek_drag(event, cx);
@@ -695,6 +734,9 @@ impl WorkspaceApp {
                 }
                 this.update_sftp_drag_capture(event.position, cx);
                 this.update_tab_drag(event, window, cx);
+                if let Some(drag) = this.detached_tab_return_drag {
+                    this.update_detached_tab_return_drag(drag.tab_id, event, window, cx);
+                }
                 if this.browser_pointer_capture_owner(cx).is_some() {
                     cx.stop_propagation();
                 }
@@ -1256,6 +1298,9 @@ impl WorkspaceApp {
                 self.render_tab_detach_drag_preview(window, cx),
                 |root, preview| root.child(preview),
             )
+            .when_some(self.render_split_drop_preview(window), |root, preview| {
+                root.child(preview)
+            })
             .when_some(self.render_tab_context_menu(window, cx), |root, menu| {
                 root.child(menu)
             })
@@ -1321,7 +1366,11 @@ impl WorkspaceApp {
             )
             .when(
                 overlay_confirm_snapshot.as_ref().is_some_and(|snapshot| {
-                    matches!(&snapshot.kind, WorkspaceOverlayConfirmKind::LegalNotice)
+                    matches!(
+                        &snapshot.kind,
+                        WorkspaceOverlayConfirmKind::LegalNotice
+                            | WorkspaceOverlayConfirmKind::ThirdPartyNotices
+                    )
                 }),
                 |root| root.child(self.render_help_legal_notice_dialog(cx)),
             )
@@ -1349,14 +1398,19 @@ impl WorkspaceApp {
         &self,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        if self.main_window_tabs.drag.is_some() {
+            return self.render_tab_drag_capture(None, cx);
+        }
         let cursor = match self.browser_pointer_capture_owner(cx) {
-            Some(browser_behavior::BrowserPointerCaptureOwner::HostToolsTabScrollbar) => {
-                CursorStyle::ClosedHand
-            }
+            Some(
+                browser_behavior::BrowserPointerCaptureOwner::HostToolsTabScrollbar
+                | browser_behavior::BrowserPointerCaptureOwner::TabDrag,
+            ) => CursorStyle::ClosedHand,
             Some(
                 browser_behavior::BrowserPointerCaptureOwner::EmbeddedSftpSidebarResize
                 | browser_behavior::BrowserPointerCaptureOwner::SftpQueueResize
-                | browser_behavior::BrowserPointerCaptureOwner::TerminalCommandSenderResize,
+                | browser_behavior::BrowserPointerCaptureOwner::TerminalCommandSenderResize
+                | browser_behavior::BrowserPointerCaptureOwner::TerminalQuickCommandsResize,
             ) => CursorStyle::ResizeRow,
             _ => CursorStyle::ResizeColumn,
         };
@@ -1373,6 +1427,7 @@ impl WorkspaceApp {
             .occlude()
             .bg(rgba(0x00000000))
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                this.update_tab_drag(event, window, cx);
                 this.update_sidebar_resize(event, window, cx);
                 this.update_embedded_sftp_sidebar_resize(event, window, cx);
                 this.update_knowledge_resize(event, window, cx);
@@ -1380,6 +1435,7 @@ impl WorkspaceApp {
                 this.update_sftp_pane_resize(event, window, cx);
                 this.update_sftp_queue_resize(event, window, cx);
                 this.update_terminal_command_sender_resize(event, window, cx);
+                this.update_terminal_quick_commands_resize(event, cx);
                 this.update_host_tools_tab_scrollbar_drag(event, cx);
                 cx.stop_propagation();
             }))
@@ -1408,6 +1464,7 @@ impl WorkspaceApp {
         self.finish_sftp_pane_resize(cx);
         self.finish_sftp_queue_resize(cx);
         self.finish_terminal_command_sender_resize(cx);
+        self.finish_terminal_quick_commands_resize(cx);
         self.finish_split_drag(cx);
         self.finish_settings_slider_drag(cx);
         self.finish_terminal_cast_seek_drag(cx);
@@ -1415,6 +1472,9 @@ impl WorkspaceApp {
         self.finish_tabbar_scrollbar_drag(cx);
         self.finish_ime_selection_drag(cx);
         self.stop_selectable_text_autoscroll();
+        if let Some(drag) = self.detached_tab_return_drag {
+            self.finish_detached_tab_return_drag(drag.tab_id, event, window, cx);
+        }
         self.finish_tab_drag(event, window, cx);
         let cancelled_sftp_drag = self.cancel_sftp_drag_capture(cx);
         if cancelled_sftp_drag {

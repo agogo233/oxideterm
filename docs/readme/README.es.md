@@ -15,7 +15,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-2.0.30-blue" alt="Versión">
+  <img src="https://img.shields.io/badge/version-2.1.0-blue" alt="Versión">
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-blue" alt="Plataforma">
   <img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="Licencia">
   <img src="https://img.shields.io/badge/rust-2024%20edition-orange" alt="Rust 2024">
@@ -56,6 +56,21 @@ Tus conexiones y datos operativos siguen bajo tu control. OxideSens utiliza tu p
 | OxideSens AI con tus propias claves en lugar de créditos de plataforma | OxideSens usa tu endpoint de OpenAI, Anthropic, Gemini, Ollama o compatible con OpenAI, con MCP, RAG, controles de razonamiento según el proveedor y acciones del espacio de trabajo aprobadas |
 | Estabilidad de reconexión | Grace Period prueba la conexión anterior durante 30 s antes de sustituirla, para que las aplicaciones TUI sobrevivan cortes breves de red |
 | SSH en Rust puro y seguridad de credenciales | La pila SSH usa `russh` + `ring` sin OpenSSL/libssh2; las credenciales guardadas usan el llavero del sistema y los paquetes `.oxide` usan ChaCha20-Poly1305 + Argon2id |
+
+---
+
+## Uso de memoria
+
+**Tras la reescritura nativa, el uso de memoria en reposo se redujo a aproximadamente una cuarta parte del de la versión anterior en macOS y una octava parte en Windows.** Estas son las mediciones que el autor registró en sus propios equipos al pasar de Tauri 1.x a la versión nativa con GPUI 2.0:
+
+| Plataforma | Tauri 1.x — en reposo | Versión nativa 2.0 — en reposo | Reducción |
+|---|---:|---:|---:|
+| macOS | 318,7 MB | 81,3 MB | Aproximadamente 74 % |
+| Windows | 182,4 MB | 23,5 MB | Aproximadamente 87 % |
+
+![Comparación del uso de memoria en reposo entre Tauri 1.x y la versión nativa 2.0, con capturas de los procesos del sistema](../screenshots/oxideterm-memory-comparison.png)
+
+El total de la versión anterior incluye OxideTerm y los procesos WebView asociados que aparecen en las capturas. La versión nativa ya no necesita esos procesos del navegador.
 
 ---
 

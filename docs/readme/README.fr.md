@@ -15,7 +15,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-2.0.30-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-2.1.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-blue" alt="Plateforme">
   <img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="Licence">
   <img src="https://img.shields.io/badge/rust-2024%20edition-orange" alt="Rust 2024">
@@ -56,6 +56,21 @@ Vos connexions et données opérationnelles restent sous votre contrôle. OxideS
 | OxideSens AI avec vos propres clés plutôt que des crédits de plateforme | OxideSens utilise votre point de terminaison OpenAI, Anthropic, Gemini, Ollama ou compatible OpenAI, avec MCP, RAG, contrôles de raisonnement adaptés au fournisseur et actions approuvées |
 | La stabilité de reconnexion | Grace Period sonde l’ancienne connexion pendant 30 s avant son remplacement, afin que les applications TUI survivent aux brèves coupures réseau |
 | SSH Rust pur et sécurité des identifiants | La pile SSH utilise `russh` + `ring` sans OpenSSL/libssh2 ; les identifiants enregistrés utilisent le trousseau système et les paquets `.oxide` utilisent ChaCha20-Poly1305 + Argon2id |
+
+---
+
+## Utilisation de la mémoire
+
+**Après la réécriture native, la mémoire utilisée au repos est passée à environ un quart de celle de l’ancienne version sur macOS, et un huitième sur Windows.** Voici les mesures relevées par l’auteur sur ses propres machines lors du passage de Tauri 1.x à la version native GPUI 2.0 :
+
+| Plateforme | Tauri 1.x — au repos | Version native 2.0 — au repos | Réduction |
+|---|---:|---:|---:|
+| macOS | 318,7 Mo | 81,3 Mo | Environ 74 % |
+| Windows | 182,4 Mo | 23,5 Mo | Environ 87 % |
+
+![Comparaison de la mémoire au repos entre Tauri 1.x et la version native 2.0, avec captures des processus système](../screenshots/oxideterm-memory-comparison.png)
+
+Le total de l’ancienne version comprend OxideTerm et les processus WebView associés visibles sur les captures. La version native n’a plus besoin de ces processus de navigateur.
 
 ---
 

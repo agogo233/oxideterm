@@ -222,6 +222,9 @@
       "keep_running_on_close_hint": "Dopo la chiusura della finestra, OxideTerm continuerà a essere eseguito in background."
     },
     "terminal": {
+      "cjk_font_custom": "Personalizzato…",
+      "custom_cjk_font": "Carattere CJK personalizzato",
+      "custom_cjk_font_hint": "Inserisci il nome completo di un carattere installato. Lascia vuoto per usare la sostituzione automatica.",
       "input_keyboard": "Tastiera e suggerimenti di input",
       "input_mouse_links": "Mouse e collegamenti",
       "input_clipboard": "Copia e incolla",
@@ -663,6 +666,10 @@
       "theme": "Tema",
       "color_theme": "Tema Colori",
       "color_theme_hint": "Schema colori del terminale",
+      "theme_preview_hint": "Passa il puntatore o usa ↑/↓ per l’anteprima. Fai clic o premi Invio per applicare.",
+      "theme_preview_added": "  Nuovo file: src/theme.rs",
+      "theme_preview_modified": "  Modificato: Cargo.toml",
+      "theme_preview_deleted": "  Eliminato: old-theme.toml",
       "select_theme": "Seleziona tema",
       "layout": "Layout dell’interfaccia",
       "layout_hint": "La barra laterale può essere ridimensionata trascinando il bordo destro. Usa il pulsante comprimi (◧) per nasconderla.",
@@ -1410,7 +1417,9 @@
       "memory_no_providers": "No frontend diagnostics providers reported data yet.",
       "memory_export_warning": "Exported diagnostics contain counts, estimates, paths or session identifiers only. Terminal output, AI message text, API keys and environment values are not included.",
       "memory_open": "Open",
-      "memory_close": "Close"
+      "memory_close": "Close",
+      "third_party_notices": "Avvisi di terze parti",
+      "third_party_notices_description": "Attribuzioni delle dipendenze e delle immagini incluse, con collegamenti alle licenze originali."
     },
     "errors": {
       "create_group_failed": "Impossibile creare gruppo: {{error}}",

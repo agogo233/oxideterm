@@ -10,12 +10,12 @@ impl WorkspaceApp {
     ) {
         if file.file_type == SftpFileType::Directory {
             let base = match pane {
-                SftpPane::Local => self.sftp_view.read(cx).local_path.clone(),
-                SftpPane::Remote => self.sftp_view.read(cx).remote_path.clone(),
+                SftpPane::Local => self.sftp_view().read(cx).local_path.clone(),
+                SftpPane::Remote => self.sftp_view().read(cx).remote_path.clone(),
             };
             self.set_sftp_path(pane, join_sftp_path(&base, &file.name), cx);
         } else if pane == SftpPane::Remote {
-            let generation = self.sftp_view.update(cx, |sftp, cx| {
+            let generation = self.sftp_view().update(cx, |sftp, cx| {
                 sftp.active_pane = pane;
                 sftp.clear_context_menu_immediately();
                 sftp.stop_preview_media();
@@ -65,7 +65,7 @@ impl WorkspaceApp {
         name: &str,
         cx: &App,
     ) -> bool {
-        let sftp = self.sftp_view.read(cx);
+        let sftp = self.sftp_view().read(cx);
         if sftp.preview_pane != Some(SftpPane::Remote) {
             return false;
         }
@@ -79,7 +79,7 @@ impl WorkspaceApp {
     }
 
     pub(in crate::workspace::sftp) fn can_edit_sftp_preview(&self, cx: &App) -> bool {
-        let sftp = self.sftp_view.read(cx);
+        let sftp = self.sftp_view().read(cx);
         sftp.preview_pane == Some(SftpPane::Remote)
             && matches!(
                 sftp.preview_content.as_deref(),
@@ -89,7 +89,7 @@ impl WorkspaceApp {
 
     pub(in crate::workspace::sftp) fn sftp_preview_is_markdown_content(&self, cx: &App) -> bool {
         matches!(
-            self.sftp_view.read(cx).preview_content.as_deref(),
+            self.sftp_view().read(cx).preview_content.as_deref(),
             Some(PreviewContent::Text {
                 language,
                 mime_type,
@@ -105,7 +105,7 @@ impl WorkspaceApp {
         cx: &mut Context<Self>,
     ) {
         let Some((data, language, encoding, preview_path)) = ({
-            let sftp = self.sftp_view.read(cx);
+            let sftp = self.sftp_view().read(cx);
             if sftp.preview_pane != Some(SftpPane::Remote) {
                 None
             } else {
@@ -141,10 +141,10 @@ impl WorkspaceApp {
             select_all: self.i18n.t("fileManager.selectAll"),
         };
         // The SFTP view owns its preview editor, so this backlink must be weak.
-        let sftp_entity = self.sftp_view.downgrade();
+        let sftp_entity = self.sftp_view().downgrade();
         let (editor_text, line_ending) = normalize_text_line_endings(&data);
         let initial_editor_text: Arc<str> = editor_text.into();
-        let existing_editor = self.sftp_view.read(cx).preview_editor.clone();
+        let existing_editor = self.sftp_view().read(cx).preview_editor.clone();
         let configure_editor =
             move |editor: &mut TextEditorView, cx: &mut Context<TextEditorView>| {
                 editor.set_read_only(false);
@@ -180,12 +180,12 @@ impl WorkspaceApp {
                 editor
             })
         };
-        let observer = self.sftp_view.update(cx, |_sftp, cx| {
+        let observer = self.sftp_view().update(cx, |_sftp, cx| {
             cx.observe(&editor, |sftp, editor, cx| {
                 sftp.sync_preview_editor_state(&editor, cx);
             })
         });
-        self.sftp_view.update(cx, |sftp, cx| {
+        self.sftp_view().update(cx, |sftp, cx| {
             sftp.preview_editor = Some(editor.clone());
             sftp.preview_editor_observer = Some(observer);
             sftp.preview_editor_initial_content = initial_editor_text.clone();
@@ -339,7 +339,7 @@ impl WorkspaceApp {
 
     pub(in crate::workspace::sftp) fn save_sftp_preview_editor(&mut self, cx: &mut Context<Self>) {
         let Some(editor) = ({
-            let sftp = self.sftp_view.read(cx);
+            let sftp = self.sftp_view().read(cx);
             (!sftp.preview_editor_saving)
                 .then(|| sftp.preview_editor.clone())
                 .flatten()
@@ -347,7 +347,7 @@ impl WorkspaceApp {
             return;
         };
         let content = editor.read(cx).buffer().text_snapshot();
-        self.sftp_view.update(cx, |sftp, cx| {
+        self.sftp_view().update(cx, |sftp, cx| {
             sftp.sync_preview_editor_state(&editor, cx);
             sftp.save_preview_editor_content(content, cx);
         });
@@ -357,13 +357,13 @@ impl WorkspaceApp {
         &mut self,
         cx: &mut Context<Self>,
     ) {
-        self.sftp_view
+        self.sftp_view()
             .update(cx, |sftp, cx| sftp.retry_preview_editor_save(cx));
     }
 
     pub(in crate::workspace::sftp) fn request_close_sftp_editor(&mut self, cx: &mut Context<Self>) {
         let (name, dirty) = {
-            let sftp = self.sftp_view.read(cx);
+            let sftp = self.sftp_view().read(cx);
             let name = match sftp.dialog.clone() {
                 Some(SftpDialog::Editor { name }) => name,
                 Some(SftpDialog::EditorCloseConfirm { name }) => name,
@@ -372,7 +372,7 @@ impl WorkspaceApp {
             (name, sftp.preview_editor_dirty)
         };
         if dirty {
-            let editor = self.sftp_view.update(cx, |sftp, cx| {
+            let editor = self.sftp_view().update(cx, |sftp, cx| {
                 // The confirmation shell has no find input; leaving ownership on
                 // the query would swallow Enter/Escape and route text invisibly.
                 sftp.release_preview_find();
@@ -394,7 +394,7 @@ impl WorkspaceApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let editor = self.sftp_view.update(cx, |sftp, cx| {
+        let editor = self.sftp_view().update(cx, |sftp, cx| {
             sftp.set_dialog(SftpDialog::Editor { name });
             cx.notify();
             sftp.preview_editor.clone()
@@ -423,7 +423,7 @@ impl WorkspaceApp {
             return;
         };
         let Some((remote_path, local_path, size)) = ({
-            let sftp = self.sftp_view.read(cx);
+            let sftp = self.sftp_view().read(cx);
             sftp.preview_path.clone().map(|remote_path| {
                 let local_path = join_local_path(&sftp.local_path, name);
                 let size = sftp
@@ -440,7 +440,7 @@ impl WorkspaceApp {
         };
         let transfer_id = new_sftp_transfer_id(&remote_id, name);
         let protocol = self.transfer_protocol_for_remote(&remote_id);
-        let id = self.sftp_view.update(cx, |sftp, cx| {
+        let id = self.sftp_view().update(cx, |sftp, cx| {
             let id = sftp.next_transfer_id;
             sftp.next_transfer_id += 1;
             sftp.transfers.push(SftpTransferItem {
@@ -486,7 +486,7 @@ impl WorkspaceApp {
             return;
         }
         let Some((remote_content, local_file, remote_path)) = ({
-            let sftp = self.sftp_view.read(cx);
+            let sftp = self.sftp_view().read(cx);
             let remote_content = match sftp.preview_content.as_deref() {
                 Some(PreviewContent::Text { data, .. }) => Some(data.clone()),
                 _ => None,
@@ -510,7 +510,7 @@ impl WorkspaceApp {
                 self.i18n.t("sftp.toast.compare_failed"),
                 self.i18n.t("sftp.toast.compare_no_local")
             );
-            self.sftp_view.update(cx, |sftp, cx| {
+            self.sftp_view().update(cx, |sftp, cx| {
                 sftp.preview_error = Some(error);
                 cx.notify();
             });
@@ -519,7 +519,7 @@ impl WorkspaceApp {
 
         match std::fs::read_to_string(&local_file.path) {
             Ok(local_content) => {
-                self.sftp_view.update(cx, |sftp, cx| {
+                self.sftp_view().update(cx, |sftp, cx| {
                     sftp.diff_scroll = UniformListScrollHandle::new();
                     sftp.diff_document_scroll = ScrollHandle::new();
                     sftp.set_dialog(SftpDialog::Diff {
@@ -533,7 +533,7 @@ impl WorkspaceApp {
             }
             Err(error) => {
                 let error = format!("{}: {}", self.i18n.t("sftp.toast.compare_failed"), error);
-                self.sftp_view.update(cx, |sftp, cx| {
+                self.sftp_view().update(cx, |sftp, cx| {
                     sftp.preview_error = Some(error);
                     cx.notify();
                 });
@@ -546,13 +546,35 @@ impl WorkspaceApp {
         path: &str,
         cx: &mut Context<Self>,
     ) {
-        if let Err(error) = open_path_in_external_app(path) {
+        let audit = oxideterm_audit::AuditContext::current().map(|mut context| {
+            context.source = oxideterm_audit::AuditSource::User;
+            context.target = Some(oxideterm_audit::redact(path));
+            context.operation(
+                oxideterm_audit::AuditCategory::File,
+                "file_external_open",
+                Some("local_application_launch"),
+            )
+        });
+        let result = open_path_in_external_app(path);
+        if let Some(audit) = audit {
+            audit.finish(
+                if result.is_ok() {
+                    oxideterm_audit::AuditOutcome::Sent
+                } else {
+                    oxideterm_audit::AuditOutcome::Failed
+                },
+                oxideterm_audit::AuditEvidence::Dispatch,
+                None,
+                None,
+            );
+        }
+        if let Err(error) = result {
             let error = format!(
                 "{}: {}",
                 self.i18n.t("sftp.toast.open_external_failed"),
                 error
             );
-            self.sftp_view.update(cx, |sftp, cx| {
+            self.sftp_view().update(cx, |sftp, cx| {
                 sftp.preview_error = Some(error);
                 cx.notify();
             });
@@ -566,10 +588,21 @@ impl WorkspaceApp {
         let Some(backend) = self.sftp_remote_backend(&remote_id) else {
             return;
         };
-        let tx = self.sftp_view.read(cx).worker_sender();
+        let tx = self.sftp_view().read(cx).worker_sender();
         let runtime = self.forwarding_runtime.clone();
+        let audit_request = oxideterm_audit::AuditContext::current_request().or_else(|| {
+            oxideterm_audit::AuditContext::current().map(|mut context| {
+                context.source = oxideterm_audit::AuditSource::User;
+                context
+            })
+        });
         runtime.spawn(async move {
-            let result = load_remote_sftp_preview(backend, &path).await;
+            let task = load_remote_sftp_preview(backend, &path);
+            let result = if let Some(context) = audit_request {
+                context.scope(task).await
+            } else {
+                task.await
+            };
             let _ = tx.send(SftpWorkerResult::PreviewLoaded {
                 generation,
                 path,
@@ -582,7 +615,7 @@ impl WorkspaceApp {
         &mut self,
         cx: &mut Context<Self>,
     ) {
-        let request = self.sftp_view.update(cx, |sftp, cx| {
+        let request = self.sftp_view().update(cx, |sftp, cx| {
             if sftp.preview_loading || sftp.preview_hex_loading_more {
                 return None;
             }
@@ -614,11 +647,22 @@ impl WorkspaceApp {
         let Some(backend) = self.sftp_remote_backend(&remote_id) else {
             return;
         };
-        let tx = self.sftp_view.read(cx).worker_sender();
+        let tx = self.sftp_view().read(cx).worker_sender();
         let error_prefix = self.i18n.t("sftp.toast.load_more_failed");
         let runtime = self.forwarding_runtime.clone();
+        let audit_request = oxideterm_audit::AuditContext::current_request().or_else(|| {
+            oxideterm_audit::AuditContext::current().map(|mut context| {
+                context.source = oxideterm_audit::AuditSource::User;
+                context
+            })
+        });
         runtime.spawn(async move {
-            let result = load_remote_sftp_preview_hex(backend, &path, offset).await;
+            let task = load_remote_sftp_preview_hex(backend, &path, offset);
+            let result = if let Some(context) = audit_request {
+                context.scope(task).await
+            } else {
+                task.await
+            };
             let _ = tx.send(SftpWorkerResult::PreviewHexLoaded {
                 generation,
                 path,
@@ -646,15 +690,25 @@ impl WorkspaceApp {
         };
         let network_error_message = self.i18n.t("sftp.preview.network_error");
         let runtime = self.forwarding_runtime.clone();
+        let audit_request = oxideterm_audit::AuditContext::current_request().or_else(|| {
+            oxideterm_audit::AuditContext::current().map(|mut context| {
+                context.source = oxideterm_audit::AuditSource::User;
+                context
+            })
+        });
         runtime.spawn(async move {
-            let result = save_remote_sftp_preview(
+            let task = save_remote_sftp_preview(
                 backend,
                 &path,
                 content.as_ref(),
                 encoding.as_ref(),
                 line_ending,
-            )
-            .await;
+            );
+            let result = if let Some(context) = audit_request {
+                context.scope(task).await
+            } else {
+                task.await
+            };
             let _ = tx.send(SftpWorkerResult::PreviewSaved {
                 generation,
                 path,

@@ -15,7 +15,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-2.0.30-blue" alt="版本">
+  <img src="https://img.shields.io/badge/version-2.1.0-blue" alt="版本">
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-blue" alt="平台">
   <img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="授權">
   <img src="https://img.shields.io/badge/rust-2024%20edition-orange" alt="Rust 2024">
@@ -56,6 +56,21 @@ OxideTerm 是面向 SSH 與遠端維運的開源工作區。終端、檔案、�
 | 自帶金鑰的 OxideSens AI，而非平台額度 | OxideSens 使用你的 OpenAI、Anthropic、Gemini、Ollama 或 OpenAI 相容端點，並支援 MCP、本機 RAG、依服務商適配的推理控制和經核准的工作區操作 |
 | 重連穩定性 | Grace Period 會在替換連線前探測舊連線 30 秒，讓 TUI 應用程式能穿越短暫的網路中斷 |
 | 純 Rust SSH 與憑證安全 | SSH 堆疊透過 `russh` + `ring` 提供，不依賴 OpenSSL/libssh2；已儲存憑證使用系統鑰匙圈，`.oxide` 套件使用 ChaCha20-Poly1305 + Argon2id |
+
+---
+
+## 記憶體用量
+
+**原生重寫後，閒置記憶體用量降至舊版的約四分之一（macOS）和約八分之一（Windows）。** 以下是作者在自己的電腦上記錄的 Tauri 1.x 與原生 GPUI 2.0 對比：
+
+| 平台 | Tauri 1.x 閒置時 | 原生 2.0 閒置時 | 降幅 |
+|---|---:|---:|---:|
+| macOS | 318.7 MB | 81.3 MB | 約 74% |
+| Windows | 182.4 MB | 23.5 MB | 約 87% |
+
+![Tauri 1.x 與原生 2.0 的閒置記憶體用量對比，附系統處理程序截圖](../screenshots/oxideterm-memory-comparison.png)
+
+舊版合計截圖中 OxideTerm 及其相關 WebView 處理程序的記憶體用量；原生版不再需要這些瀏覽器處理程序。
 
 ---
 

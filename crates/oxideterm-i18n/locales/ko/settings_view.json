@@ -222,6 +222,9 @@
       "keep_running_on_close_hint": "창을 닫아도 OxideTerm은 백그라운드에서 계속 실행됩니다."
     },
     "terminal": {
+      "cjk_font_custom": "사용자 지정…",
+      "custom_cjk_font": "사용자 지정 CJK 글꼴",
+      "custom_cjk_font_hint": "설치된 글꼴의 전체 이름을 입력하세요. 비워 두면 자동 대체 글꼴을 사용합니다.",
       "input_keyboard": "키보드 및 입력 제안",
       "input_mouse_links": "마우스 및 링크",
       "input_clipboard": "복사 및 붙여넣기",
@@ -663,6 +666,10 @@
       "theme": "테마",
       "color_theme": "색상 테마",
       "color_theme_hint": "터미널 색상 구성표",
+      "theme_preview_hint": "마우스를 올리거나 ↑/↓로 미리 봅니다. 클릭하거나 Enter를 눌러 적용합니다.",
+      "theme_preview_added": "  새 파일: src/theme.rs",
+      "theme_preview_modified": "  수정됨: Cargo.toml",
+      "theme_preview_deleted": "  삭제됨: old-theme.toml",
       "select_theme": "테마 선택",
       "layout": "인터페이스 배치",
       "layout_hint": "사이드바는 오른쪽 가장자리를 드래그하여 크기를 조정할 수 있습니다. 접기 버튼 (◧)을 사용하여 숨길 수 있습니다.",
@@ -1410,7 +1417,9 @@
       "memory_no_providers": "No frontend diagnostics providers reported data yet.",
       "memory_export_warning": "Exported diagnostics contain counts, estimates, paths or session identifiers only. Terminal output, AI message text, API keys and environment values are not included.",
       "memory_open": "Open",
-      "memory_close": "Close"
+      "memory_close": "Close",
+      "third_party_notices": "타사 고지",
+      "third_party_notices_description": "포함된 의존성과 그래픽의 저작자 표시 및 원본 라이선스 링크입니다."
     },
     "errors": {
       "create_group_failed": "그룹 생성 실패: {{error}}",

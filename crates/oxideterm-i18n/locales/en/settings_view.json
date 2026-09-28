@@ -222,6 +222,9 @@
       "keep_running_on_close_hint": "Closing the window keeps OxideTerm running in the background."
     },
     "terminal": {
+      "cjk_font_custom": "Custom…",
+      "custom_cjk_font": "Custom CJK font",
+      "custom_cjk_font_hint": "Enter the full name of an installed font. Leave blank for automatic fallback.",
       "input_keyboard": "Keyboard & Input Suggestions",
       "input_mouse_links": "Mouse & Links",
       "input_clipboard": "Copy & Paste",
@@ -663,6 +666,10 @@
       "theme": "Theme",
       "color_theme": "Color Theme",
       "color_theme_hint": "Terminal color scheme",
+      "theme_preview_hint": "Hover or use ↑/↓ to preview. Click or press Enter to apply.",
+      "theme_preview_added": "  new file: src/theme.rs",
+      "theme_preview_modified": "  modified: Cargo.toml",
+      "theme_preview_deleted": "  deleted: old-theme.toml",
       "select_theme": "Select theme",
       "layout": "Interface Layout",
       "layout_hint": "Sidebar can be resized by dragging its right edge. Use the collapse button (◧) to hide it.",
@@ -1410,7 +1417,9 @@
       "memory_no_providers": "No frontend diagnostics providers reported data yet.",
       "memory_export_warning": "Exported diagnostics contain counts, estimates, paths or session identifiers only. Terminal output, AI message text, API keys and environment values are not included.",
       "memory_open": "Open",
-      "memory_close": "Close"
+      "memory_close": "Close",
+      "third_party_notices": "Third-party notices",
+      "third_party_notices_description": "Bundled dependency and artwork attribution, with links to their original licenses."
     },
     "errors": {
       "create_group_failed": "Failed to create group: {{error}}",

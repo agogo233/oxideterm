@@ -125,6 +125,9 @@
       "choose_icon": "Cambia icona",
       "hide_icons": "Nascondi icone",
       "default_icon": "Icona predefinita",
+      "auto_icon": "Rileva automaticamente",
+      "custom_icon": "Scegli icona",
+      "auto_icon_hint": "Dopo la connessione, le sessioni attive mostrano l’icona del sistema rilevato. Se non è disponibile un’icona corrispondente, viene usata un’icona server generica.",
       "color": "Colore",
       "icon_color": "Colore dell’icona",
       "icon_background_color": "Colore di sfondo dell’icona",
@@ -132,7 +135,8 @@
       "cancel": "Annulla",
       "save": "Salva",
       "saving": "Salvataggio...",
-      "passphrase_hint": "Lascia vuoto per mantenere la passphrase salvata se il percorso della chiave non cambia."
+      "passphrase_hint": "Lascia vuoto per mantenere la passphrase salvata se il percorso della chiave non cambia.",
+      "brand_icon_hint": "I loghi delle distribuzioni mantengono i colori e le proporzioni originali."
     },
     "serial_profiles": {
       "title": "Serial Profiles",
@@ -198,6 +202,11 @@
       "list_header": "Sessioni salvate",
       "expand_all": "Espandi tutto",
       "collapse_all": "Comprimi tutto"
+    },
+    "local_terminal_profiles": {
+      "delete": "Elimina sessione locale",
+      "delete_failed": "Impossibile eliminare la sessione locale",
+      "confirm_delete": "Eliminare la sessione locale «{{name}}»? I terminali attivi resteranno aperti."
     }
   }
 }

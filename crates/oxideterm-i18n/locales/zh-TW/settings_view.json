@@ -222,6 +222,9 @@
       "keep_running_on_close_hint": "關閉視窗後，OxideTerm 將繼續在背景執行。"
     },
     "terminal": {
+      "cjk_font_custom": "自訂…",
+      "custom_cjk_font": "自訂中文/CJK 字型",
+      "custom_cjk_font_hint": "輸入已安裝字型的完整名稱，留空使用自動備援字型。",
       "input_keyboard": "鍵盤與輸入提示",
       "input_mouse_links": "滑鼠與連結",
       "input_clipboard": "複製與貼上",
@@ -663,6 +666,10 @@
       "theme": "主題",
       "color_theme": "色彩主題",
       "color_theme_hint": "終端機配色方案",
+      "theme_preview_hint": "懸停或按 ↑/↓ 預覽，點擊或按 Enter 套用。",
+      "theme_preview_added": "  新檔案：src/theme.rs",
+      "theme_preview_modified": "  已修改：Cargo.toml",
+      "theme_preview_deleted": "  已刪除：old-theme.toml",
       "select_theme": "選擇主題",
       "layout": "介面排版",
       "layout_hint": "可拖曳側邊欄右側邊緣來調整大小。使用收合按鈕 (◧) 來隱藏它。",
@@ -1410,7 +1417,9 @@
       "memory_no_providers": "暂无前端诊断 provider 上报数据。",
       "memory_export_warning": "导出的诊断只包含计数、估算、路径或会话标识；不包含终端输出、AI 正文、API key 或环境变量值。",
       "memory_open": "打開",
-      "memory_close": "關閉"
+      "memory_close": "關閉",
+      "third_party_notices": "第三方聲明",
+      "third_party_notices_description": "應用程式隨附的依賴與圖像資源署名，以及原始授權條款連結。"
     },
     "errors": {
       "create_group_failed": "無法建立群組：{{error}}",

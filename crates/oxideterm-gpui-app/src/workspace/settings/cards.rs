@@ -620,6 +620,15 @@ impl WorkspaceApp {
                 && self.terminal.read(cx).project_panel_open())
             || (anchor.id == SelectAnchorId::SessionManagerViewMode
                 && self.session_manager.read(cx).view_mode_menu_open)
+            || (matches!(
+                anchor.id,
+                SelectAnchorId::AuditCategory
+                    | SelectAnchorId::AuditSeverity
+                    | SelectAnchorId::AuditSource
+                    | SelectAnchorId::AuditOutcome
+                    | SelectAnchorId::AuditTime
+                    | SelectAnchorId::AuditSearchField
+            ) && self.audit.open_filter.is_some())
             || (anchor.id == SelectAnchorId::ActiveSessionSort && self.session_sort_menu_open)
             || (anchor.id == SelectAnchorId::SessionManagerSort
                 && self.session_manager.read(cx).sort_menu_open)
@@ -887,8 +896,7 @@ impl WorkspaceApp {
             self.ime_marked_text = None;
             changed = true;
         }
-        if self.terminal.read(cx).quick_commands.has_open_or_pending() {
-            self.close_terminal_quick_commands_popover(cx);
+        if self.blur_terminal_quick_commands_input(cx) {
             changed = true;
         }
         if self.close_terminal_git_branch_picker(cx) {
@@ -922,7 +930,7 @@ impl WorkspaceApp {
             changed = true;
         }
         if self
-            .sftp_view
+            .sftp_view()
             .update(cx, |sftp, cx| sftp.clear_input_focus(cx))
         {
             self.ime_marked_text = None;
@@ -1188,6 +1196,7 @@ impl WorkspaceApp {
     }
 
     pub(in crate::workspace) fn close_settings_select(&mut self) {
+        self.settings_theme_preview = None;
         browser_behavior::close_browser_trigger_select(
             &mut self.open_settings_select,
             &mut self.settings_select_focus_origin,
@@ -1669,6 +1678,12 @@ pub(in crate::workspace) fn select_anchor_tracks_while_closed(anchor_id: SelectA
     matches!(
         anchor_id,
         SelectAnchorId::ActiveSessionSort
+            | SelectAnchorId::AuditCategory
+            | SelectAnchorId::AuditSeverity
+            | SelectAnchorId::AuditSource
+            | SelectAnchorId::AuditOutcome
+            | SelectAnchorId::AuditTime
+                    | SelectAnchorId::AuditSearchField
             | SelectAnchorId::SettingsAppearanceUiFontSizeSlider
             | SelectAnchorId::SettingsAppearanceBorderRadiusSlider
             | SelectAnchorId::OnboardingBorderRadiusSlider
