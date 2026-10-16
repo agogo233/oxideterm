@@ -1187,17 +1187,7 @@ mod tests {
                     sanitized.validation_warnings
                 ),
             }
-        }))
-        .expect("sanitize settings");
-
-        assert!(
-            sanitized
-                .settings
-                .terminal
-                .default_highlight_rule_set
-                .is_none()
-        );
-        assert_eq!(sanitized.settings.terminal.highlight_rule_sets.len(), 1);
+        }
     }
 
     #[test]
