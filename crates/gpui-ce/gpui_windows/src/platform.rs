@@ -11,7 +11,7 @@ use std::{
 };
 
 use anyhow::{Context as _, Result, anyhow};
-use futures::channel::oneshot::{self, Receiver};
+use futures::channel::oneshot::Receiver;
 use gpui_util::{ResultExt, new_std_command};
 use itertools::Itertools;
 use parking_lot::RwLock;
@@ -443,6 +443,8 @@ fn translate_accelerator(msg: &MSG) -> Option<()> {
     (result.0 == 0).then_some(())
 }
 
+const RESTART_WAIT_ARGUMENT: &str = "--gpui-restart-wait-pid";
+
 impl Platform for WindowsPlatform {
     fn background_executor(&self) -> BackgroundExecutor {
         self.background_executor.clone()
@@ -518,8 +520,6 @@ impl Platform for WindowsPlatform {
             .spawn(async { unsafe { PostQuitMessage(0) } })
             .detach();
     }
-
-const RESTART_WAIT_ARGUMENT: &str = "--gpui-restart-wait-pid";
 
     fn restart(&self, binary_path: Option<PathBuf>, arguments: Vec<OsString>) {
         let pid = std::process::id();
