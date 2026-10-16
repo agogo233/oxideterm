@@ -7315,9 +7315,8 @@ dependencies = [
  "oxideterm-terminal-semantic",
  "oxideterm-terminal-triggers",
  "oxideterm-theme",
- "oxideterm-topology",
- "oxideterm-update",
- "oxideterm-workspace",
+  "oxideterm-topology",
+  "oxideterm-workspace",
  "oxideterm-wsl-graphics",
  "parking_lot",
  "raw-window-handle",
@@ -8136,33 +8135,6 @@ dependencies = [
  "uuid",
  "walkdir",
  "zeroize",
-]
-
-[[package]]
-name = "oxideterm-update"
-version = "2.2.3"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "chrono",
- "flate2",
- "futures-util",
- "libc",
- "minisign-verify",
- "oxideterm-network-proxy",
- "oxideterm-portable-runtime",
- "oxideterm-settings",
- "reqwest",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tar",
- "tempfile",
- "thiserror 2.0.20",
- "tokio",
- "uuid",
- "windows 0.61.3",
- "zip",
 ]
 
 [[package]]
