@@ -153,7 +153,6 @@ class WindowsInstallerScriptTests(unittest.TestCase):
             ):
                 package_native.create_windows_installer(
                     binary=Path("oxideterm-native.exe"),
-                    update_helper=Path("oxideterm-update-helper.exe"),
                     target="x86_64-pc-windows-msvc",
                     version="2.1.0",
                     label="windows_x64",
@@ -222,7 +221,7 @@ class WindowsInstallerScriptTests(unittest.TestCase):
         self.assertNotIn('\nIcon "', script)
         self.assertNotIn("\nUninstallIcon ", script)
         display_icon_entry = r'"DisplayIcon" "$\"$INSTDIR\oxideterm-native.exe$\",0"'
-        self.assertEqual(script.count(display_icon_entry), 2)
+        self.assertEqual(script.count(display_icon_entry), 1)
 
     def test_stable_installer_detects_tauri_current_user_install(self) -> None:
         identity = package_native.release_identity("v2.0.0", "2.0.0")

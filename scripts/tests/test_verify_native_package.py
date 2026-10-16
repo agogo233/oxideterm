@@ -134,12 +134,11 @@ class PortableArchiveTests(unittest.TestCase):
             return b"2.0.0\n"
         return b"data"
 
-    def test_portable_archive_validates_contents_version_runtime_and_update_ownership(self) -> None:
+    def test_portable_archive_validates_contents_version_and_runtime(self) -> None:
         cases = [
             ("valid", None, None, None),
             ("version", None, "VERSION", "contains version"),
             ("plugins", "/data/plugins/", None, "data/plugins"),
-            ("manifest", None, "portable-update.json", "includes user data"),
             ("wrong architecture", None, None, "conpty"),
         ]
         for entry in ("conpty.dll", "OpenConsole.exe"):
@@ -158,11 +157,6 @@ class PortableArchiveTests(unittest.TestCase):
                         if replaced and entry.endswith(replaced):
                             if replaced == "VERSION":
                                 content = b"1.9.0\n"
-                            elif replaced == "portable-update.json":
-                                content = content.replace(
-                                    b'"portable-update.json"]',
-                                    b'"portable-update.json","data"]',
-                                )
                             else:
                                 content = b"corrupt runtime"
                         archive.writestr(entry, content)

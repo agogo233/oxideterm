@@ -150,6 +150,10 @@ def verify_portable_archive(path: Path, target: str, expected_version: str) -> N
         path,
     )
     verify_embedded_version(path, PACKAGE_VERSION_FILENAME, expected_version)
+    if "windows" in target:
+        for name, (_, digest) in conpty_runtime_files(target).items():
+            entry = f"/resources/conpty/{name}"
+            verify_digest(archive_entry_bytes(path, entry), digest, entry)
 
 
 def verify_macos_app_zip(path: Path, expected_version: str) -> None:

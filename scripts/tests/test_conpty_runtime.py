@@ -22,9 +22,7 @@ class ConptyRuntimeTests(unittest.TestCase):
             for relative in ["agents", "icons", f"cli-bin/{target}", f"helpers/{target}"]:
                 (resources / relative).mkdir(parents=True)
             binary = root / "oxideterm-native.exe"
-            helper = root / "oxideterm-update-helper.exe"
             binary.write_bytes(b"application fixture")
-            helper.write_bytes(b"update helper fixture")
 
             def stage_fixture(destination, runtime_target):
                 self.assertEqual(runtime_target, target)
@@ -38,10 +36,10 @@ class ConptyRuntimeTests(unittest.TestCase):
                 patch.object(package_native, "stage_conpty_runtime", side_effect=stage_fixture),
                 patch.object(package_native, "find_7zip", return_value=None),
             ):
-                installer = package_native.stage_windows_installer_root(binary, target, "2.1.0", "windows_x64", helper)
+                installer = package_native.stage_windows_installer_root(binary, target, "2.1.0", "windows_x64")
                 self.assertEqual((installer / "resources/conpty/conpty.dll").read_bytes(), b"DLL fixture")
                 self.assertEqual((installer / "resources/conpty/x64/OpenConsole.exe").read_bytes(), b"host fixture")
-                package_native.create_portable_package(binary, helper, target, "2.1.0", "windows_x64")
+                package_native.create_portable_package(binary, target, "2.1.0", "windows_x64")
                 with zipfile.ZipFile(root / "dist/OxideTerm_2.1.0_windows_x64_portable.zip") as archive:
                     prefix = "OxideTerm_2.1.0_windows_x64_portable/resources/conpty/"
                     self.assertEqual(archive.read(prefix + "conpty.dll"), b"DLL fixture")
