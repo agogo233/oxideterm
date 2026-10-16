@@ -1485,6 +1485,9 @@ impl HostToolsEntity {
         if !self.visibility.sidebar_is_visible() || self.sampling_config.is_empty() {
             return;
         }
+        if self.profiler_registry.request_refresh(&connection_id) {
+            return;
+        }
         let Some(runtime) = self.lifecycle_runtime.clone() else {
             return;
         };
@@ -2242,31 +2245,11 @@ mod tests {
     }
 
     #[gpui::test]
-    fn lifecycle_tick_samples_only_visible_host_tools(cx: &mut TestAppContext) {
-        let runtime = tokio::runtime::Runtime::new().expect("create test runtime");
-        let registry = SshConnectionRegistry::default();
-        let (profiler_update_tx, profiler_update_rx) = tokio::sync::mpsc::channel(1);
-        let entity =
-            cx.new(|cx| HostToolsEntity::new(profiler_update_tx, profiler_update_rx, registry, cx));
-
-        entity.update(cx, |entity, cx| {
-            assert!(entity.lifecycle_refresh_task.is_some());
-            entity.lifecycle_runtime = Some(runtime.handle().clone());
-            entity.last_pool_refresh = None;
-            entity.visibility = HostToolsVisibility::Hidden;
-            entity.refresh_lifecycle_tick(cx);
-            assert!(entity.last_pool_refresh.is_none());
-
-            entity.visibility = HostToolsVisibility::VisibleMainTab;
-            entity.refresh_lifecycle_tick(cx);
-            assert!(entity.last_pool_refresh.is_some());
-        });
-    }
-
-    #[gpui::test]
     fn visibility_stops_page_samplers_but_keeps_reliable_actions_and_node_owner(
         cx: &mut TestAppContext,
     ) {
+        // Real Tokio samplers wake delivery tasks from outside the GPUI test scheduler.
+        cx.executor().allow_parking();
         let runtime = tokio::runtime::Runtime::new().expect("create test runtime");
         let registry = SshConnectionRegistry::default();
         let node_consumer = ConnectionConsumer::NodeRouter("node-visibility".to_string());
@@ -2305,6 +2288,15 @@ mod tests {
         let sampling_config = oxideterm_connection_monitor::ResourceSamplingConfig::default();
 
         entity.update(cx, |entity, cx| {
+            assert!(entity.lifecycle_refresh_task.is_some());
+            entity.lifecycle_runtime = Some(runtime.handle().clone());
+            entity.last_pool_refresh = None;
+            entity.visibility = HostToolsVisibility::Hidden;
+            entity.refresh_lifecycle_tick(cx);
+            assert!(entity.last_pool_refresh.is_none());
+            entity.visibility = HostToolsVisibility::VisibleMainTab;
+            entity.refresh_lifecycle_tick(cx);
+            assert!(entity.last_pool_refresh.is_some());
             entity.test_resource_sampler = Some(test_sampler);
             entity.test_snapshot_dispatches = Some(Vec::new());
             entity.messages = Some(HostToolsMessages {

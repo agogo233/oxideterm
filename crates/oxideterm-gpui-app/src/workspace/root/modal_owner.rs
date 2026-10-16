@@ -62,6 +62,9 @@ pub(in crate::workspace) enum ActiveWindowModalOwner {
     SettingsReset {
         phase: oxideterm_gpui_ui::motion::ExitPhase,
     },
+    CommandHistoryClear {
+        phase: oxideterm_gpui_ui::motion::ExitPhase,
+    },
     SettingsDataDirectory {
         phase: oxideterm_gpui_ui::motion::ExitPhase,
     },
@@ -148,6 +151,7 @@ impl ActiveWindowModalOwner {
             Self::AiClearAll { .. } => 10,
             Self::AiDeleteMessage { .. } => 11,
             Self::SettingsReset { .. } => 12,
+            Self::CommandHistoryClear { .. } => 49,
             Self::SettingsDataDirectory { .. } => 13,
             Self::RemoteShellIntegration => 14,
             Self::TerminalTriggerQuickCommand => 15,
@@ -194,6 +198,7 @@ impl ActiveWindowModalOwner {
             | Self::AiClearAll { phase }
             | Self::AiDeleteMessage { phase }
             | Self::SettingsReset { phase }
+            | Self::CommandHistoryClear { phase }
             | Self::SettingsDataDirectory { phase }
             | Self::CloudSync { phase }
             | Self::NodeDisconnect { phase }
@@ -257,6 +262,7 @@ impl ActiveWindowModalOwner {
                 | Self::OxideExport { .. }
                 | Self::CommandPalette
                 | Self::AppLockDialog
+                | Self::Onboarding
         )
     }
 
@@ -380,6 +386,11 @@ impl ActiveWindowModalProjection {
             }
         });
         let overlay_owner = self.overlay_confirm.map(|snapshot| match snapshot.kind {
+            overlay::WorkspaceOverlayConfirmOwnerKind::CommandHistoryClear => {
+                ActiveWindowModalOwner::CommandHistoryClear {
+                    phase: snapshot.phase,
+                }
+            }
             overlay::WorkspaceOverlayConfirmOwnerKind::SettingsReset => {
                 ActiveWindowModalOwner::SettingsReset {
                     phase: snapshot.phase,
@@ -950,7 +961,8 @@ app_lock_dialog_open: self.app_lock.dialog.is_some(),
             | ActiveWindowModalOwner::AiDeleteMessage { .. } => {
                 let _ = self.handle_ai_chat_confirm_key(event, cx);
             }
-            ActiveWindowModalOwner::SettingsReset { .. } => {
+            ActiveWindowModalOwner::SettingsReset { .. }
+            | ActiveWindowModalOwner::CommandHistoryClear { .. } => {
                 let _ = self.handle_settings_reset_confirm_key(event, cx);
             }
             ActiveWindowModalOwner::SettingsDataDirectory { .. } => {

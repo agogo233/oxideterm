@@ -798,6 +798,22 @@ impl WorkspaceApp {
                 true
             }
             "enter" => {
+                if matches!(
+                    input,
+                    SettingsInput::NativePluginInstalledPageJump
+                        | SettingsInput::NativePluginMarketplacePageJump
+                ) {
+                    self.commit_plugin_page_jump(cx);
+                    return true;
+                }
+                if matches!(
+                    input,
+                    SettingsInput::NativePluginInstalledPageSize
+                        | SettingsInput::NativePluginMarketplacePageSize
+                ) {
+                    self.commit_plugin_page_size(cx);
+                    return true;
+                }
                 if input.accepts_newline() {
                     self.settings_input_draft.push('\n');
                     self.apply_settings_input_draft(input, cx);
@@ -1051,15 +1067,15 @@ impl WorkspaceApp {
                 }
             }
             SettingsSlider::AppearanceWindowOpacity => {
-                let Some(value) = self.settings_slider_value_from_position(
+                let Some(position) = self.settings_slider_value_from_position(
                     SelectAnchorId::SettingsAppearanceWindowOpacitySlider,
                     x,
-                    (MIN_WINDOW_OPACITY * SETTINGS_PERCENT_SCALE) as f32,
-                    (MAX_WINDOW_OPACITY * SETTINGS_PERCENT_SCALE) as f32,
+                    0.0,
+                    1.0,
                 ) else {
                     return;
                 };
-                let value = value.round() as f64 / SETTINGS_PERCENT_SCALE;
+                let value = super::appearance::window_opacity_from_slider_position(position);
                 if self.settings_store.settings().appearance.window_opacity != value {
                     self.edit_settings(|settings| settings.appearance.window_opacity = value, cx);
                     // Detached windows consume the same setting on their next frame.
@@ -1076,18 +1092,123 @@ impl WorkspaceApp {
                     return;
                 };
                 let value = value.round() as f64 / SETTINGS_PERCENT_SCALE;
-                if self.settings_store.settings().terminal.background_opacity != value {
-                    self.edit_settings(|settings| settings.terminal.background_opacity = value, cx);
+                if self
+                    .background_settings_for_controls(cx)
+                    .terminal
+                    .background_opacity
+                    != value
+                {
+                    self.edit_background_style(|style| style.opacity = value, cx);
                 }
             }
             SettingsSlider::AppearanceBackgroundBlur => {
                 self.set_background_blur_preview_from_position(x, cx);
             }
+            SettingsSlider::BackgroundReadability => {
+                if let Some(value) = self.settings_slider_value_from_position(
+                    SelectAnchorId::SettingsBackgroundReadability,
+                    x,
+                    0.0,
+                    100.0,
+                ) {
+                    self.edit_background_style(
+                        |style| style.readability = value.round() / 100.0,
+                        cx,
+                    );
+                }
+            }
+            SettingsSlider::BackgroundCameraAmount | SettingsSlider::BackgroundCameraSpeed => {
+                let (min, max) = if slider == SettingsSlider::BackgroundCameraSpeed {
+                    (10.0, 200.0)
+                } else {
+                    (0.0, 100.0)
+                };
+                if let Some(value) = self.settings_slider_value_from_position(
+                    settings_slider_anchor_id(slider),
+                    x,
+                    min,
+                    max,
+                ) {
+                    self.edit_background_style(
+                        |style| {
+                            if let Some(camera) = &mut style.camera {
+                                if slider == SettingsSlider::BackgroundCameraSpeed {
+                                    camera.speed = value.round() / 100.0;
+                                } else {
+                                    camera.amount = value.round() / 100.0;
+                                }
+                            }
+                        },
+                        cx,
+                    );
+                }
+            }
+            SettingsSlider::BackgroundParticleCount
+            | SettingsSlider::BackgroundEffectStrength
+            | SettingsSlider::BackgroundEffectSheen
+            | SettingsSlider::BackgroundEffectSpeed
+            | SettingsSlider::BackgroundEffectSize
+            | SettingsSlider::BackgroundEffectBrightness
+            | SettingsSlider::BackgroundEffectRoughness
+            | SettingsSlider::BackgroundEffectDirection => {
+                let (min, max) = match slider {
+                    SettingsSlider::BackgroundEffectSpeed => (0.0, 300.0),
+                    SettingsSlider::BackgroundEffectSize => (30.0, 200.0),
+                    SettingsSlider::BackgroundEffectDirection => (0.0, 360.0),
+                    SettingsSlider::BackgroundParticleCount => (
+                        oxideterm_gpui_background::MIN_EFFECT_DENSITY as f32,
+                        oxideterm_gpui_background::MAX_EFFECT_DENSITY as f32,
+                    ),
+                    _ => (0.0, 100.0),
+                };
+                if let Some(value) = self.settings_slider_value_from_position(
+                    settings_slider_anchor_id(slider),
+                    x,
+                    min,
+                    max,
+                ) {
+                    let value = if matches!(
+                        slider,
+                        SettingsSlider::BackgroundEffectDirection
+                            | SettingsSlider::BackgroundParticleCount
+                    ) {
+                        value.round()
+                    } else {
+                        value.round() / 100.0
+                    };
+                    self.edit_background_style(
+                        |style| {
+                            let effect = style.effect.get_or_insert_with(Default::default);
+                            match slider {
+                                SettingsSlider::BackgroundEffectStrength => effect.strength = value,
+                                SettingsSlider::BackgroundParticleCount => {
+                                    effect.particle_count = value as u32
+                                }
+                                SettingsSlider::BackgroundEffectSheen => effect.sheen = value,
+                                SettingsSlider::BackgroundEffectSpeed => effect.speed = value,
+                                SettingsSlider::BackgroundEffectSize => effect.size = value,
+                                SettingsSlider::BackgroundEffectRoughness => {
+                                    effect.roughness = value
+                                }
+                                SettingsSlider::BackgroundEffectDirection => {
+                                    effect.direction = value
+                                }
+                                _ => effect.brightness = value,
+                            }
+                        },
+                        cx,
+                    );
+                }
+            }
         }
     }
 
     pub(in crate::workspace) fn finish_settings_slider_drag(&mut self, cx: &mut Context<Self>) {
-        if self.settings_slider_drag.take().is_some() {
+        if let Some(slider) = self.settings_slider_drag.take() {
+            if slider == SettingsSlider::AppearanceBackgroundBlur {
+                self.settings_workspace
+                    .update(cx, |settings, cx| settings.finish_background_blur_drag(cx));
+            }
             cx.notify();
         }
     }
@@ -1322,6 +1443,18 @@ impl WorkspaceApp {
                 .plugin_manager_state(cx)
                 .marketplace_search_draft
                 .clone(),
+            SettingsInput::NativePluginInstalledPageSize => self
+                .plugin_page_size(plugin_manager::NativePluginManagerTab::Installed, cx)
+                .to_string(),
+            SettingsInput::NativePluginMarketplacePageSize => self
+                .plugin_page_size(plugin_manager::NativePluginManagerTab::Marketplace, cx)
+                .to_string(),
+            SettingsInput::NativePluginInstalledPageJump => self
+                .plugin_page_number(plugin_manager::NativePluginManagerTab::Installed, cx)
+                .to_string(),
+            SettingsInput::NativePluginMarketplacePageJump => self
+                .plugin_page_number(plugin_manager::NativePluginManagerTab::Marketplace, cx)
+                .to_string(),
             SettingsInput::PortableCurrentPassword
             | SettingsInput::PortableNewPassword
             | SettingsInput::PortableConfirmPassword => String::new(),
@@ -1337,6 +1470,10 @@ impl WorkspaceApp {
             | SettingsInput::ManagedKeyRenameName
             | SettingsInput::ConnectionImportTargetGroup => String::new(),
             SettingsInput::LocalPrivilegeLabel
+            | SettingsInput::TotpName
+            | SettingsInput::TotpSecret
+            | SettingsInput::TotpPattern
+            | SettingsInput::TotpPeriod
             | SettingsInput::LocalPrivilegeUsernameHint
             | SettingsInput::LocalPrivilegeSecret
             | SettingsInput::LocalPrivilegePromptPatterns => String::new(),
@@ -1364,13 +1501,43 @@ impl WorkspaceApp {
         input: SettingsInput,
         cx: &mut Context<Self>,
     ) {
-        let mut next_settings = self.settings_store.settings().clone();
+        let mut next_settings = if input.is_background() {
+            self.background_settings_for_controls(cx)
+        } else {
+            self.settings_store.settings().clone()
+        };
+        if matches!(input, SettingsInput::BackgroundEffectColor(_))
+            && !self.settings_input_draft.trim().is_empty()
+        {
+            let palette = if let Some(editor) = self.settings_workspace.read(cx).theme_editor() {
+                [
+                    editor_ui_colors(&editor.ui_colors).accent,
+                    editor_terminal_theme(&editor.terminal_colors).cyan,
+                ]
+            } else {
+                let tokens = oxideterm_settings_model::theme_tokens_for_system(
+                    self.settings_store.settings(),
+                    self.appearance_edit_scheme().unwrap_or(self.system_dark),
+                );
+                [tokens.ui.accent, tokens.terminal.cyan]
+            };
+            if let Some(effect) = &mut next_settings.terminal.background_effect {
+                effect.colors.get_or_insert(palette);
+            }
+        }
         match apply_persisted_settings_input_draft(
             &mut next_settings,
             input,
             &self.settings_input_draft,
         ) {
             SettingsInputDraftApply::Applied => {
+                if input.is_background() {
+                    self.edit_background_style(
+                        |style| *style = next_settings.terminal.background_style(),
+                        cx,
+                    );
+                    return;
+                }
                 self.edit_settings(move |settings| *settings = next_settings, cx);
                 return;
             }
@@ -1406,6 +1573,13 @@ impl WorkspaceApp {
             SettingsInput::PublicMcpPort => {
                 self.public_mcp
                     .set_port_draft(self.settings_input_draft.clone());
+                cx.notify();
+            }
+            SettingsInput::NativePluginInstalledPageSize
+            | SettingsInput::NativePluginMarketplacePageSize
+            | SettingsInput::NativePluginInstalledPageJump
+            | SettingsInput::NativePluginMarketplacePageJump => {
+                // Commit on Enter or Apply so typing does not move the plugin list.
                 cx.notify();
             }
             SettingsInput::TerminalCommandSpecsJson => {
@@ -1454,6 +1628,10 @@ impl WorkspaceApp {
             | SettingsInput::ManagedKeyRenameName
             | SettingsInput::ConnectionImportTargetGroup => {}
             SettingsInput::LocalPrivilegeLabel
+            | SettingsInput::TotpName
+            | SettingsInput::TotpSecret
+            | SettingsInput::TotpPattern
+            | SettingsInput::TotpPeriod
             | SettingsInput::LocalPrivilegeUsernameHint
             | SettingsInput::LocalPrivilegeSecret
             | SettingsInput::LocalPrivilegePromptPatterns => {}
@@ -1649,11 +1827,20 @@ impl WorkspaceApp {
         let percent =
             slider_pointer_percent(x - left, width, self.tokens.metrics.ui_slider_thumb_size);
         let value = (percent * 20.0).round() as i64;
-        let persisted_background_blur = self.settings_store.settings().terminal.background_blur;
+        if self.settings_workspace.read(cx).theme_editor().is_some() {
+            self.edit_background_style(|style| style.blur = value, cx);
+            return;
+        }
+        let persisted_background_blur = self
+            .background_settings_for_controls(cx)
+            .terminal
+            .background_blur;
+        let system_dark = self.appearance_edit_scheme();
         self.settings_workspace.update(cx, |settings, cx| {
             settings.update_background_blur_preview(
                 persisted_background_blur,
                 value,
+                system_dark,
                 BACKGROUND_BLUR_COMMIT_DELAY,
                 cx,
             );
@@ -1691,6 +1878,17 @@ pub(in crate::workspace) fn select_anchor_tracks_while_closed(anchor_id: SelectA
             | SelectAnchorId::VersionMigrationBorderRadiusSlider
             | SelectAnchorId::SettingsAppearanceBackgroundOpacitySlider
             | SelectAnchorId::SettingsAppearanceBackgroundBlurSlider
+            | SelectAnchorId::SettingsBackgroundReadability
+            | SelectAnchorId::SettingsBackgroundEffectStrength
+            | SelectAnchorId::SettingsBackgroundEffectSheen
+            | SelectAnchorId::SettingsBackgroundEffectSpeed
+            | SelectAnchorId::SettingsBackgroundEffectSize
+            | SelectAnchorId::SettingsBackgroundEffectBrightness
+            | SelectAnchorId::SettingsBackgroundEffectRoughness
+            | SelectAnchorId::SettingsBackgroundEffectDirection
+            | SelectAnchorId::SettingsBackgroundParticleCount
+            | SelectAnchorId::SettingsBackgroundCameraAmount
+            | SelectAnchorId::SettingsBackgroundCameraSpeed
             | SelectAnchorId::SettingsTerminalFontSizeSlider
             | SelectAnchorId::AiPanelRoot
             | SelectAnchorId::AiConversationList
@@ -1704,6 +1902,8 @@ pub(in crate::workspace) fn select_anchor_tracks_while_closed(anchor_id: SelectA
             | SelectAnchorId::NewConnectionGroup
             | SelectAnchorId::NewConnectionKeyAuthSource
             | SelectAnchorId::NewConnectionManagedKey
+            | SelectAnchorId::NewConnectionTotp
+            | SelectAnchorId::NewConnectionJumpTotp
             | SelectAnchorId::NewConnectionJumpSavedConnection
             | SelectAnchorId::NewConnectionRemoteDesktopSshGateway
             | SelectAnchorId::NewConnectionJumpKeyAuthSource
@@ -1734,4 +1934,39 @@ pub(in crate::workspace) fn select_anchor_tracks_while_closed(anchor_id: SelectA
             | SelectAnchorId::SessionManagerSort
             | SelectAnchorId::SessionManagerBatchMove
     )
+}
+
+#[cfg(test)]
+mod slider_anchor_tests {
+    use super::*;
+
+    #[test]
+    fn settings_sliders_have_geometry_before_the_first_pointer_down() {
+        for slider in [
+            SettingsSlider::TerminalFontSize,
+            SettingsSlider::AppearanceUiFontSize,
+            SettingsSlider::AppearanceBorderRadius,
+            SettingsSlider::OnboardingBorderRadius,
+            SettingsSlider::VersionMigrationBorderRadius,
+            SettingsSlider::AppearanceWindowOpacity,
+            SettingsSlider::AppearanceBackgroundOpacity,
+            SettingsSlider::AppearanceBackgroundBlur,
+            SettingsSlider::BackgroundReadability,
+            SettingsSlider::BackgroundEffectStrength,
+            SettingsSlider::BackgroundEffectSheen,
+            SettingsSlider::BackgroundEffectSpeed,
+            SettingsSlider::BackgroundEffectSize,
+            SettingsSlider::BackgroundEffectBrightness,
+            SettingsSlider::BackgroundEffectRoughness,
+            SettingsSlider::BackgroundEffectDirection,
+            SettingsSlider::BackgroundParticleCount,
+            SettingsSlider::BackgroundCameraAmount,
+            SettingsSlider::BackgroundCameraSpeed,
+        ] {
+            assert!(
+                select_anchor_tracks_while_closed(settings_slider_anchor_id(slider)),
+                "{slider:?}: pointer-down must use the already measured slider geometry"
+            );
+        }
+    }
 }

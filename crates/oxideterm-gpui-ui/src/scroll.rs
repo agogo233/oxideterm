@@ -3,8 +3,7 @@ use std::{cell::Cell, panic::Location, rc::Rc};
 use gpui::{
     AnyElement, App, AppContext, CursorStyle, Div, Element, ElementId, EmptyView,
     InteractiveElement, IntoElement, ParentElement, Point, RenderOnce, ScrollHandle, Stateful,
-    StatefulInteractiveElement, StyleRefinement, Styled, Window, WithAlpha, div,
-    prelude::FluentBuilder, px,
+    StatefulInteractiveElement, StyleRefinement, Styled, Window, div, prelude::FluentBuilder, px,
 };
 
 const SCROLLBAR_LAYER_WIDTH: f32 = 10.0;
@@ -167,14 +166,18 @@ pub trait ScrollableElement: InteractiveElement + Styled + ParentElement + Eleme
         )
     }
 
+    // Preserve the viewport's call site so sibling scroll areas own separate state.
+    #[track_caller]
     fn overflow_y_scrollbar(self) -> Scrollable<Self> {
         Scrollable::new(self, ScrollbarAxis::Vertical)
     }
 
+    #[track_caller]
     fn overflow_x_scrollbar(self) -> Scrollable<Self> {
         Scrollable::new(self, ScrollbarAxis::Horizontal)
     }
 
+    #[track_caller]
     fn overflow_scrollbar(self) -> Scrollable<Self> {
         Scrollable::new(self, ScrollbarAxis::Both)
     }
@@ -376,7 +379,7 @@ fn render_vertical_scrollbar(
     let Some(geometry) = scrollbar_geometry(viewport_height, max_offset_y, scroll_position) else {
         return div().id(id).into_any_element();
     };
-    let thumb_color = window.text_style().color.with_alpha(SCROLLBAR_THUMB_ALPHA);
+    let thumb_color = window.text_style().color.alpha(SCROLLBAR_THUMB_ALPHA);
     let drag_state = ScrollbarDragState {
         on_scroll,
         scroll_handle: scroll_handle.clone(),
@@ -434,7 +437,7 @@ fn render_horizontal_scrollbar(
     let Some(geometry) = scrollbar_geometry(viewport_width, max_offset_x, scroll_position) else {
         return div().id(id).into_any_element();
     };
-    let thumb_color = window.text_style().color.with_alpha(SCROLLBAR_THUMB_ALPHA);
+    let thumb_color = window.text_style().color.alpha(SCROLLBAR_THUMB_ALPHA);
     let drag_state = ScrollbarDragState {
         on_scroll: None,
         scroll_handle: scroll_handle.clone(),
@@ -486,6 +489,77 @@ pub fn vertical_scrollbar_layer(id: impl Into<ElementId>, handle: &ScrollHandle)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::{Context, Modifiers, MouseButton, Render, TestAppContext, point, size};
+
+    struct AdjacentScrollAreas;
+
+    impl Render for AdjacentScrollAreas {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(
+                    div().w(px(200.0)).h(px(40.0)).overflow_x_scrollbar().child(
+                        div()
+                            .w(px(80.0))
+                            .h(px(30.0))
+                            .flex_none()
+                            .debug_selector(|| "short-content".into()),
+                    ),
+                )
+                .child(
+                    div().w(px(200.0)).h(px(40.0)).overflow_x_scrollbar().child(
+                        div()
+                            .w(px(600.0))
+                            .h(px(30.0))
+                            .flex_none()
+                            .debug_selector(|| "long-content".into()),
+                    ),
+                )
+        }
+    }
+
+    #[gpui::test]
+    fn adjacent_scroll_areas_keep_independent_offsets_when_dragging(cx: &mut TestAppContext) {
+        let (_, cx) = cx.add_window_view(|_, _| AdjacentScrollAreas);
+        cx.simulate_resize(size(px(240.0), px(120.0)));
+        for _ in 0..2 {
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+        let short_before = cx.debug_bounds("short-content").unwrap();
+        let long_before = cx.debug_bounds("long-content").unwrap();
+
+        cx.simulate_mouse_down(
+            point(px(20.0), px(75.0)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.simulate_mouse_move(
+            point(px(60.0), px(75.0)),
+            Some(MouseButton::Left),
+            Modifiers::default(),
+        );
+        cx.simulate_mouse_move(
+            point(px(120.0), px(75.0)),
+            Some(MouseButton::Left),
+            Modifiers::default(),
+        );
+        cx.simulate_mouse_up(
+            point(px(120.0), px(75.0)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        assert_eq!(cx.debug_bounds("short-content").unwrap(), short_before);
+        assert!(
+            cx.debug_bounds("long-content").unwrap().left() < long_before.left() - px(100.0),
+            "dragging the lower scrollbar must move its content"
+        );
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.debug_bounds("long-content").unwrap().left() < long_before.left() - px(100.0));
+    }
 
     #[test]
     fn scrollbar_coordinates_translate_gpui_offsets_and_thumb_edges() {

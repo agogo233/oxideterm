@@ -122,8 +122,44 @@ impl SshPtyCore {
         } else {
             None
         };
-        let runtime_handle = runtime.as_ref().map(|runtime| runtime.handle().clone());
-        let connect_audit = audit.clone();
+        let (connect_tx, connect_rx) = unbounded();
+        drop(connect_tx);
+        let mut core = Self {
+            audit,
+            parser_state,
+            config,
+            activity,
+            lifecycle: TerminalLifecycle::Running,
+            runtime,
+            connect_task: None,
+            consumed_sequence: 0,
+            last_parse_completed: None,
+            connect_rx,
+            handle: None,
+            layout_resize_seen: false,
+            post_connect_input_sent: false,
+            output_queue: VecDeque::new(),
+            output_queue_bytes: 0,
+        };
+        if start_connection {
+            core.start_connection();
+        }
+        core
+    }
+
+    fn start_connection(&mut self) {
+        let previous_task = self.connect_task.take();
+        if let Some(task) = &previous_task {
+            task.abort();
+        }
+        let config = &mut self.config;
+        let resize = self.parser_state.resize;
+        let activity = self.activity.clone();
+        let runtime_handle = self
+            .runtime
+            .as_ref()
+            .map(|runtime| runtime.handle().clone());
+        let connect_audit = self.audit.clone();
         let mut connect_task = None;
         let (connect_tx, connect_rx) = unbounded();
         if let Some(runtime_handle) = runtime_handle {
@@ -139,6 +175,10 @@ impl SshPtyCore {
             };
             let connect_activity = activity.clone();
             connect_task = Some(runtime_handle.spawn(async move {
+                // A cancelled startup must release its consumer before the next acquire.
+                if let Some(task) = previous_task {
+                    let _ = task.await;
+                }
                 let result = match connection {
                     Some(SshSessionConnection::New(mut ssh_config)) => {
                         ssh_config.cols = cols;
@@ -228,28 +268,34 @@ impl SshPtyCore {
                 let _ = connect_tx.send(result);
                 connect_activity.notify();
             }));
-        } else if start_connection {
+        } else {
             let _ = connect_tx.send(Err("failed to initialize SSH runtime".to_string()));
             activity.notify();
         }
 
-        Self {
-            audit,
-            parser_state,
-            config,
-            activity,
-            lifecycle: TerminalLifecycle::Running,
-            runtime,
-            connect_task,
-            consumed_sequence: 0,
-            last_parse_completed: None,
-            connect_rx,
-            handle: None,
-            layout_resize_seen: false,
-            post_connect_input_sent: false,
-            output_queue: VecDeque::new(),
-            output_queue_bytes: 0,
-        }
+        self.connect_task = connect_task;
+        self.connect_rx = connect_rx;
+    }
+
+    fn reconnect(&mut self, mut config: SshSessionConfig) -> Result<()> {
+        // Retire this channel's lease before reacquiring the same consumer identity.
+        // The node and any SFTP/forwarding consumers retain their own transport owners.
+        self.handle.take();
+        self.parser_state.restart_transport(config.trzsz_policy());
+        self.output_queue.clear();
+        self.output_queue_bytes = 0;
+        self.consumed_sequence = 0;
+        self.last_parse_completed = None;
+        self.post_connect_input_sent = false;
+        self.runtime = config.runtime.take().or_else(|| self.runtime.take());
+        self.config = config;
+        self.lifecycle = TerminalLifecycle::Running;
+        self.parser_state
+            .pending_events
+            .push(TerminalEvent::SessionRestarted);
+        self.start_connection();
+        self.activity.notify();
+        Ok(())
     }
 
     fn title_text(&self) -> String {
@@ -347,6 +393,16 @@ impl SshPtyCore {
     ) -> TerminalDrainReport {
         let started = Instant::now();
         let mut report = TerminalDrainReport::default();
+        if let Some(status) = self
+            .handle
+            .as_ref()
+            .and_then(SshPtyHandle::take_x11_forwarding_status)
+        {
+            self.parser_state
+                .pending_events
+                .push(TerminalEvent::X11ForwardingStatus(status));
+            report.mark_changed();
+        }
         loop {
             // The parser has already consumed this suffix. Retry persistence
             // before reading more transport bytes or marking EOF as complete.
@@ -573,6 +629,10 @@ impl TerminalSessionBackend for SshPtyCore {
         self.parser_state.set_encoding(encoding)
     }
 
+    fn set_palette(&mut self, palette: TerminalPalette) {
+        self.parser_state.set_palette(palette)
+    }
+
     fn set_output_processor(&mut self, processor: Option<TerminalOutputProcessor>) {
         self.parser_state.set_output_processor(processor)
     }
@@ -660,8 +720,20 @@ impl TerminalSessionBackend for SshPtyCore {
     }
 
     fn resize_with_cell_size(&mut self, resize: TerminalResize) -> Result<()> {
+        let opening_shell = self.lifecycle.is_running()
+            && self
+                .handle
+                .as_ref()
+                .is_none_or(|handle| !handle.shell_started());
         self.layout_resize_seen = true;
         self.parser_state.resize_with_cell_size(resize)?;
+        if opening_shell {
+            // A larger viewport can pull history back onto the screen before login output arrives.
+            self.parser_state
+                .term
+                .lock()
+                .reset_session_preserving_history();
+        }
         // Deferred SSH sessions use this first real GPUI layout resize as the
         // remote PTY allocation boundary. Post-connect input must follow it so
         // the transport cannot fall back to a synthetic 120x40 shell.
@@ -710,6 +782,7 @@ impl TerminalSessionBackend for SshPtyCore {
                 cell_height: self.parser_state.resize.cell_height,
             },
             &self.parser_state.graphics,
+            &self.parser_state.palette,
             delta,
             previous,
         )
@@ -807,7 +880,12 @@ impl TerminalSessionBackend for SshPtyCore {
         }
         let term = self.parser_state.display_term();
         let term = term.lock();
-        snapshot_from_term(&term, size, &self.parser_state.graphics)
+        snapshot_from_term(
+            &term,
+            size,
+            &self.parser_state.graphics,
+            &self.parser_state.palette,
+        )
     }
 
     fn snapshot_incremental(&self, previous: &TerminalSnapshot) -> TerminalSnapshot {
@@ -826,7 +904,13 @@ impl TerminalSessionBackend for SshPtyCore {
         }
         let term = self.parser_state.display_term();
         let mut term = term.lock();
-        incremental_snapshot_from_term(&mut term, size, &self.parser_state.graphics, previous)
+        incremental_snapshot_from_term(
+            &mut term,
+            size,
+            &self.parser_state.graphics,
+            &self.parser_state.palette,
+            previous,
+        )
     }
 
     fn snapshot_with_display_offset(&self, display_offset: usize, rows: usize) -> TerminalSnapshot {
@@ -848,6 +932,7 @@ impl TerminalSessionBackend for SshPtyCore {
                 ..size
             },
             &self.parser_state.graphics,
+            &self.parser_state.palette,
             display_offset,
             rows,
         )

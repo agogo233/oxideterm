@@ -193,9 +193,17 @@ impl WorkspaceApp {
             let proxy_chain = if proxy_command.is_some() {
                 None
             } else {
-                proxy_chain_from_form(form, secret_handoff, saved_proxy_hop_auth)
+                proxy_chain_from_form(
+                    &this.connection_store,
+                    form,
+                    secret_handoff,
+                    saved_proxy_hop_auth,
+                )
             };
             let config = SshConfig {
+                totp: this
+                    .connection_store
+                    .totp_binding(form.totp_credential_id.as_deref()),
                 host: host.clone(),
                 port: port.unwrap_or(22),
                 username: username.clone(),
@@ -419,6 +427,75 @@ impl WorkspaceApp {
                 } => {
                     self.open_keyboard_interactive_challenge(request, response_tx, window, cx);
                 }
+                SshConnectionWorkerResult::SecurityKeyProvider { response_tx } => {
+                    let provider = self
+                        .plugin_entity
+                        .update(cx, |plugins, _| plugins.security_key_provider());
+                    let _ = response_tx
+                        .send(provider.ok_or_else(|| self.i18n.t("ssh.fido.errors.unavailable")));
+                }
+                SshConnectionWorkerResult::SecurityKeyPrompt {
+                    flow_id,
+                    touch,
+                    retry,
+                    response_tx,
+                } => {
+                    let request = KeyboardInteractivePromptRequest {
+                        flow_id: flow_id.clone(),
+                        name: self.i18n.t(if touch {
+                            "ssh.fido.touch_title"
+                        } else {
+                            "ssh.fido.pin_title"
+                        }),
+                        instructions: self.i18n.t(if touch {
+                            "ssh.fido.touch_instructions"
+                        } else if retry {
+                            "ssh.fido.pin_retry"
+                        } else {
+                            "ssh.fido.pin_instructions"
+                        }),
+                        prompts: if touch {
+                            Vec::new()
+                        } else {
+                            vec![oxideterm_ssh::KeyboardInteractivePrompt {
+                                prompt: self.i18n.t("ssh.fido.pin_label"),
+                                echo: false,
+                            }]
+                        },
+                        chained: false,
+                    };
+                    self.open_keyboard_interactive_challenge(request, response_tx, window, cx);
+                    if touch {
+                        self.connection_flow.update(cx, |flow, cx| {
+                            flow.wait_for_security_key_touch(&flow_id, cx)
+                        });
+                    }
+                }
+                SshConnectionWorkerResult::SecurityKeyError { error, response_tx } => {
+                    let _ = response_tx.send(self.i18n.t(error.message_key()));
+                }
+                SshConnectionWorkerResult::PasswordPrompt {
+                    node_id,
+                    prompt,
+                    response_tx,
+                } => {
+                    self.open_password_prompt(node_id, prompt, response_tx, window, cx);
+                }
+                SshConnectionWorkerResult::PasswordAuthenticated { target, password } => {
+                    self.save_authenticated_prompt_password(target, password, cx);
+                }
+                SshConnectionWorkerResult::AuthenticationCompleted {
+                    node_id,
+                    connection_id,
+                    configured_credentials_confirmed,
+                } => {
+                    self.save_confirmed_connection_auth(
+                        node_id,
+                        connection_id,
+                        configured_credentials_confirmed,
+                        cx,
+                    );
+                }
             }
         }
     }
@@ -467,6 +544,11 @@ impl WorkspaceApp {
                 if let Some(token) = intent.standalone_sftp_pair_launch_token() {
                     self.pending_standalone_sftp_pair_launches.remove(token);
                 }
+                if matches!(&intent, SshConnectionIntent::Mosh(_))
+                    && self.plugin_entity.read(cx).mosh_executable().is_none()
+                {
+                    self.show_required_plugin_notice("com.oxideterm.terminal.mosh", "Mosh", cx);
+                }
                 self.fail_public_mcp_mosh_open_for_intent(&intent, message.clone());
                 let reported_to_form = self.connection_flow.update(cx, |connection_flow, cx| {
                     connection_flow.set_form_feedback(None, Some(message.clone()), cx)
@@ -485,7 +567,7 @@ impl WorkspaceApp {
         &mut self,
         mut config: SshConfig,
         title: String,
-        intent: SshConnectionIntent,
+        mut intent: SshConnectionIntent,
         save_after_open: Option<SaveConnectionRequest>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -500,7 +582,7 @@ impl WorkspaceApp {
         let upstream_proxy = config.upstream_proxy.take();
         let endpoints = proxy_session_tree_endpoints(&config);
         let expansion_id = match &intent {
-            SshConnectionIntent::ConnectSaved(id) => id.clone(),
+            SshConnectionIntent::ConnectSaved { id, .. } => id.clone(),
             _ => format!("manual-{}", self.next_ssh_node_id),
         };
         let expansion =
@@ -523,6 +605,12 @@ impl WorkspaceApp {
                 return;
             }
         };
+        if let SshConnectionIntent::ConnectSaved {
+            auth_save_target, ..
+        } = &mut intent
+        {
+            self.arm_saved_auth_save(&expansion.target_node_id, auth_save_target.take());
+        }
         let run = NativeProxyConnectRun {
             generation: 0,
             plan,
@@ -921,7 +1009,7 @@ impl WorkspaceApp {
                     cx,
                 );
             }
-            SshConnectionIntent::ConnectSaved(id) => {
+            SshConnectionIntent::ConnectSaved { id, .. } => {
                 if let Some(connection_options) = self.connection_store.get(&id).map(|connection| {
                     (
                         connection.options.terminal.clone(),
@@ -1256,7 +1344,10 @@ impl WorkspaceApp {
                     cx,
                 );
             }
-            SshConnectionIntent::ConnectSaved(id) => {
+            SshConnectionIntent::ConnectSaved {
+                id,
+                auth_save_target,
+            } => {
                 self.connection_flow.update(cx, |connection_flow, cx| {
                     connection_flow.clear_host_key_challenge(cx);
                 });
@@ -1266,9 +1357,28 @@ impl WorkspaceApp {
                 self.session_manager.update(cx, |session_manager, cx| {
                     session_manager.set_status(None, cx);
                 });
-                let _ = self.open_or_create_saved_ssh_terminal_tab(id, config, title, window, cx);
+                let _ = self.open_or_create_saved_ssh_terminal_tab(
+                    id,
+                    config,
+                    title,
+                    auth_save_target,
+                    window,
+                    cx,
+                );
             }
             SshConnectionIntent::Mosh(options) => {
+                let Some(executable) = self.plugin_entity.read(cx).mosh_executable() else {
+                    let message =
+                        self.plugin_requirement_message("com.oxideterm.terminal.mosh", "Mosh", cx);
+                    self.show_required_plugin_notice("com.oxideterm.terminal.mosh", "Mosh", cx);
+                    self.fail_public_mcp_mosh_open_for_intent(
+                        &SshConnectionIntent::Mosh(options),
+                        message.clone(),
+                    );
+                    self.session_manager
+                        .update(cx, |manager, cx| manager.set_status(Some(message), cx));
+                    return;
+                };
                 let public_mcp_open_token = options.public_mcp_open_token.clone();
                 let runtime_connection_attempt_id = options.runtime_connection_attempt_id.clone();
                 if runtime_connection_attempt_id
@@ -1335,6 +1445,8 @@ impl WorkspaceApp {
                     )),
                 };
                 let terminal_config = MoshTerminalConfig {
+                    executable,
+                    plugin_sessions: self.mosh_plugin_sessions.clone(),
                     title: title.clone(),
                     bootstrap,
                     bootstrap_context,

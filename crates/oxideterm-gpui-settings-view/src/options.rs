@@ -520,6 +520,10 @@ pub fn set_autosuggest_local_history(settings: &mut PersistedSettings, value: bo
     settings.terminal.autosuggest.local_shell_history = value;
 }
 
+pub fn set_save_command_history(settings: &mut PersistedSettings, value: bool) {
+    settings.terminal.autosuggest.save_history = value;
+}
+
 pub fn set_command_marks_enabled(settings: &mut PersistedSettings, value: bool) {
     settings.terminal.command_marks.enabled = value;
 }
@@ -576,6 +580,25 @@ pub fn settings_slider_anchor_id(slider: SettingsSlider) -> SelectAnchorId {
         SettingsSlider::AppearanceBackgroundBlur => {
             SelectAnchorId::SettingsAppearanceBackgroundBlurSlider
         }
+        SettingsSlider::BackgroundEffectSpeed => SelectAnchorId::SettingsBackgroundEffectSpeed,
+        SettingsSlider::BackgroundReadability => SelectAnchorId::SettingsBackgroundReadability,
+        SettingsSlider::BackgroundEffectStrength => {
+            SelectAnchorId::SettingsBackgroundEffectStrength
+        }
+        SettingsSlider::BackgroundEffectSheen => SelectAnchorId::SettingsBackgroundEffectSheen,
+        SettingsSlider::BackgroundEffectSize => SelectAnchorId::SettingsBackgroundEffectSize,
+        SettingsSlider::BackgroundEffectBrightness => {
+            SelectAnchorId::SettingsBackgroundEffectBrightness
+        }
+        SettingsSlider::BackgroundEffectRoughness => {
+            SelectAnchorId::SettingsBackgroundEffectRoughness
+        }
+        SettingsSlider::BackgroundEffectDirection => {
+            SelectAnchorId::SettingsBackgroundEffectDirection
+        }
+        SettingsSlider::BackgroundParticleCount => SelectAnchorId::SettingsBackgroundParticleCount,
+        SettingsSlider::BackgroundCameraAmount => SelectAnchorId::SettingsBackgroundCameraAmount,
+        SettingsSlider::BackgroundCameraSpeed => SelectAnchorId::SettingsBackgroundCameraSpeed,
     }
 }
 

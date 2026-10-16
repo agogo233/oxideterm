@@ -66,6 +66,8 @@ mod connect;
 mod conversion;
 mod save;
 
+pub(super) use conversion::form_from_runtime_config;
+
 use conversion::*;
 pub(in crate::workspace) use save::mosh_options_from_profile;
 
@@ -140,7 +142,10 @@ pub(in crate::workspace) enum SshConnectionIntent {
     TestStandaloneSftp,
     Connect(SshTerminalConnectionOptions),
     ConnectTemporary,
-    ConnectSaved(String),
+    ConnectSaved {
+        id: String,
+        auth_save_target: Option<super::password_prompt::SavedAuthSaveTarget>,
+    },
     DrillDown {
         parent_id: NodeId,
         saved_connection_id: Option<String>,
@@ -247,11 +252,40 @@ pub(in crate::workspace) enum SshConnectionWorkerResult {
         request: KeyboardInteractivePromptRequest,
         response_tx: oneshot::Sender<Result<KeyboardInteractiveResponses, SshPromptError>>,
     },
+    SecurityKeyProvider {
+        response_tx: oneshot::Sender<Result<Arc<oxideterm_ssh::SecurityKeyProvider>, String>>,
+    },
+    SecurityKeyPrompt {
+        flow_id: String,
+        touch: bool,
+        retry: bool,
+        response_tx: oneshot::Sender<Result<KeyboardInteractiveResponses, SshPromptError>>,
+    },
+    SecurityKeyError {
+        error: oxideterm_ssh::SecurityKeyError,
+        response_tx: oneshot::Sender<String>,
+    },
+    PasswordPrompt {
+        node_id: Option<NodeId>,
+        prompt: oxideterm_ssh::SshPasswordPrompt,
+        response_tx: oneshot::Sender<Result<oxideterm_ssh::SshPasswordResponse, SshPromptError>>,
+    },
+    PasswordAuthenticated {
+        target: super::password_prompt::SavedPasswordTarget,
+        password: zeroize::Zeroizing<String>,
+    },
+    AuthenticationCompleted {
+        node_id: NodeId,
+        connection_id: String,
+        configured_credentials_confirmed: bool,
+    },
 }
 
 #[derive(Clone)]
 pub(in crate::workspace) struct NativeSshPromptHandler {
     tx: ActiveDeliverySender<SshConnectionWorkerResult>,
+    node_id: Option<NodeId>,
+    connection_id: Option<String>,
 }
 
 fn sync_saved_connection_node_title_for_nodes(
@@ -277,11 +311,90 @@ fn sync_saved_connection_node_title_for_nodes(
 
 impl NativeSshPromptHandler {
     pub(in crate::workspace) fn new(tx: ActiveDeliverySender<SshConnectionWorkerResult>) -> Self {
-        Self { tx }
+        Self {
+            tx,
+            node_id: None,
+            connection_id: None,
+        }
+    }
+
+    pub(in crate::workspace) fn for_node(mut self, node_id: NodeId) -> Self {
+        self.node_id = Some(node_id);
+        self
+    }
+
+    pub(in crate::workspace) fn for_connection(mut self, connection_id: String) -> Self {
+        self.connection_id = Some(connection_id);
+        self
     }
 }
 
 impl SshPromptHandler for NativeSshPromptHandler {
+    fn security_key_provider(
+        &self,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<Arc<oxideterm_ssh::SecurityKeyProvider>, String>>
+                + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            let (response_tx, response_rx) = oneshot::channel();
+            self.tx
+                .send(SshConnectionWorkerResult::SecurityKeyProvider { response_tx })
+                .map_err(|_| "Security-key UI is unavailable".to_string())?;
+            response_rx
+                .await
+                .map_err(|_| "Security-key UI was closed".to_string())?
+        })
+    }
+
+    fn security_key_interaction(&self) -> Option<Arc<dyn oxideterm_ssh::SecurityKeyInteraction>> {
+        Some(Arc::new(NativeSecurityKeyInteraction {
+            handler: self.clone(),
+            flow_id: uuid::Uuid::new_v4().to_string(),
+        }))
+    }
+    fn authentication_completed(&self, configured_credentials_confirmed: bool) {
+        if let (Some(node_id), Some(connection_id)) = (&self.node_id, &self.connection_id) {
+            let _ = self
+                .tx
+                .send(SshConnectionWorkerResult::AuthenticationCompleted {
+                    node_id: node_id.clone(),
+                    connection_id: connection_id.clone(),
+                    configured_credentials_confirmed,
+                });
+        }
+    }
+
+    fn password(
+        &self,
+        prompt: oxideterm_ssh::SshPasswordPrompt,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<oxideterm_ssh::SshPasswordResponse, SshPromptError>>
+                + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            let (response_tx, response_rx) = oneshot::channel();
+            self.tx
+                .send(SshConnectionWorkerResult::PasswordPrompt {
+                    node_id: self.node_id.clone(),
+                    prompt,
+                    response_tx,
+                })
+                .map_err(|_| {
+                    SshPromptError::Failed("native SSH prompt UI is unavailable".into())
+                })?;
+            response_rx
+                .await
+                .map_err(|_| SshPromptError::Failed("native SSH prompt UI was closed".into()))?
+        })
+    }
+
     fn keyboard_interactive(
         &self,
         request: KeyboardInteractivePromptRequest,
@@ -289,6 +402,9 @@ impl SshPromptHandler for NativeSshPromptHandler {
         Box<dyn Future<Output = Result<KeyboardInteractiveResponses, SshPromptError>> + Send + '_>,
     > {
         Box::pin(async move {
+            // The application has one protected SSH prompt surface. Keep other
+            // authentication attempts waiting instead of cancelling their challenges.
+            let _prompt_guard = NATIVE_SSH_PROMPT.lock().await;
             let (response_tx, response_rx) = oneshot::channel();
             self.tx
                 .send(SshConnectionWorkerResult::KeyboardInteractivePrompt {
@@ -301,6 +417,84 @@ impl SshPromptHandler for NativeSshPromptHandler {
             response_rx
                 .await
                 .map_err(|_| SshPromptError::Failed("native SSH prompt UI was closed".into()))?
+        })
+    }
+}
+
+static NATIVE_SSH_PROMPT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+struct NativeSecurityKeyInteraction {
+    handler: NativeSshPromptHandler,
+    flow_id: String,
+}
+
+impl NativeSecurityKeyInteraction {
+    async fn prompt(
+        &self,
+        touch: bool,
+        retry: bool,
+    ) -> Result<KeyboardInteractiveResponses, oxideterm_ssh::SecurityKeyError> {
+        let _guard = NATIVE_SSH_PROMPT.lock().await;
+        let (response_tx, response_rx) = oneshot::channel();
+        self.handler
+            .tx
+            .send(SshConnectionWorkerResult::SecurityKeyPrompt {
+                flow_id: self.flow_id.clone(),
+                touch,
+                retry,
+                response_tx,
+            })
+            .map_err(|_| oxideterm_ssh::SecurityKeyError::Unavailable)?;
+        response_rx
+            .await
+            .map_err(|_| oxideterm_ssh::SecurityKeyError::Cancelled)?
+            .map_err(|error| match error {
+                SshPromptError::Timeout => oxideterm_ssh::SecurityKeyError::Timeout,
+                _ => oxideterm_ssh::SecurityKeyError::Cancelled,
+            })
+    }
+}
+
+impl oxideterm_ssh::SecurityKeyInteraction for NativeSecurityKeyInteraction {
+    fn pin(
+        &self,
+        retry: bool,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<zeroize::Zeroizing<String>, oxideterm_ssh::SecurityKeyError>>
+                + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            let mut answers = self.prompt(false, retry).await?;
+            if answers.len() != 1 {
+                return Err(oxideterm_ssh::SecurityKeyError::InvalidRequest);
+            }
+            Ok(zeroize::Zeroizing::new(std::mem::take(&mut answers[0])))
+        })
+    }
+    fn touch(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<(), oxideterm_ssh::SecurityKeyError>> + Send + '_>>
+    {
+        Box::pin(async move { self.prompt(true, false).await.map(|_| ()) })
+    }
+    fn error_message(
+        &self,
+        error: oxideterm_ssh::SecurityKeyError,
+    ) -> Pin<Box<dyn Future<Output = String> + Send + '_>> {
+        Box::pin(async move {
+            let (response_tx, response_rx) = oneshot::channel();
+            if self
+                .handler
+                .tx
+                .send(SshConnectionWorkerResult::SecurityKeyError { error, response_tx })
+                .is_err()
+            {
+                return error.to_string();
+            }
+            response_rx.await.unwrap_or_else(|_| error.to_string())
         })
     }
 }

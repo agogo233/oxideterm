@@ -1664,21 +1664,21 @@ fn tool_definitions() -> Vec<ToolDefinition> {
         ),
         define_tool::<SyncPullPreviewArgs>(
             "sync_pull_preview",
-            "Download and freeze a bounded Cloud Sync pull plan without applying it.",
+            "Prepare a bounded causal Cloud Sync merge plan without applying or publishing it. Concurrent values remain unresolved until explicitly chosen.",
             ToolGroup::CloudSync,
             true,
             false,
         ),
         define_tool::<SyncPublishPreviewArgs>(
             "sync_publish_preview",
-            "Freeze a bounded Cloud Sync publish plan and check the current remote revision.",
+            "Prepare a bounded causal Cloud Sync merge and publication plan. Force selects this device's candidate where available; secrets are never returned.",
             ToolGroup::CloudSync,
             true,
             false,
         ),
         define_tool::<SyncApplyPlanArgs>(
             "sync_apply_plan",
-            "Apply one frozen pull or publish plan after checking local and remote revisions.",
+            "Apply one prepared causal sync plan on the live configuration owner, then publish an immutable encrypted snapshot. Unresolved conflicts keep local values.",
             ToolGroup::CloudSync,
             false,
             true,
@@ -2988,47 +2988,44 @@ mod tests {
     }
 
     #[test]
-    fn quick_command_run_parses_and_redacts_parameter_values() {
-        let secret_value = "sensitive-token";
-        let quickcommand_ref = crate::QuickCommandRef::new();
-        let node_ref = NodeRef::new();
-        let arguments = json!({
-            "quickcommand_ref": quickcommand_ref,
-            "node_ref": node_ref,
-            "expected_revision": 7,
-            "arguments": { "token": secret_value }
-        })
-        .as_object()
-        .cloned()
-        .unwrap();
+    fn quick_command_run_preserves_redacted_values_and_rejects_oversized_input() {
+        for (name, values, expected) in [
+            (
+                "secret value",
+                json!({ "token": "sensitive-token" }),
+                Some("sensitive-token"),
+            ),
+            (
+                "oversized value",
+                json!({ "value": "x".repeat(QUICK_COMMAND_ARGUMENT_VALUE_LIMIT_BYTES + 1) }),
+                None,
+            ),
+        ] {
+            let arguments = json!({
+                "quickcommand_ref": crate::QuickCommandRef::new(),
+                "node_ref": NodeRef::new(),
+                "expected_revision": 7,
+                "arguments": values,
+            })
+            .as_object()
+            .cloned()
+            .unwrap();
 
-        let parsed = parse_quick_commands_run(arguments).unwrap();
-
-        assert_eq!(parsed.arguments["token"].as_str(), secret_value);
-        assert!(!format!("{parsed:?}").contains(secret_value));
-    }
-
-    #[test]
-    fn quick_command_run_rejects_oversized_parameter_values_before_approval() {
-        let arguments = json!({
-            "quickcommand_ref": crate::QuickCommandRef::new(),
-            "node_ref": NodeRef::new(),
-            "expected_revision": 7,
-            "arguments": {
-                "value": "x".repeat(QUICK_COMMAND_ARGUMENT_VALUE_LIMIT_BYTES + 1)
+            let parsed = parse_quick_commands_run(arguments);
+            if let Some(secret_value) = expected {
+                let parsed = parsed.unwrap();
+                assert_eq!(parsed.arguments["token"].as_str(), secret_value, "{name}");
+                assert!(!format!("{parsed:?}").contains(secret_value), "{name}");
+            } else {
+                assert!(parsed.is_err(), "{name}");
             }
-        })
-        .as_object()
-        .cloned()
-        .unwrap();
-
-        assert!(parse_quick_commands_run(arguments).is_err());
+        }
     }
 
     #[test]
-    fn quick_command_save_roundtrips_advanced_fields_without_debugging_defaults() {
+    fn quick_command_save_preserves_advanced_fields_and_rejects_secret_defaults() {
         let secret_default = "sensitive-default";
-        let arguments = json!({
+        let mut arguments = json!({
             "name": "Deploy",
             "command": "deploy {{param.service}}",
             "category": "custom",
@@ -3049,32 +3046,29 @@ mod tests {
         .cloned()
         .unwrap();
 
-        let parsed = parse_quick_commands_save(arguments).unwrap();
+        let parsed = parse_quick_commands_save(arguments.clone()).unwrap();
 
-        assert_eq!(parsed.host_patterns.as_ref().map(Vec::len), Some(2));
-        assert_eq!(parsed.protocols.as_ref().map(Vec::len), Some(2));
-        assert_eq!(parsed.parameters.as_ref().map(Vec::len), Some(1));
+        assert_eq!(
+            parsed.host_patterns.as_deref(),
+            Some(["*.prod".to_string(), "bastion.*".to_string()].as_slice())
+        );
+        assert!(matches!(
+            parsed.protocols.as_deref(),
+            Some([
+                crate::PublicQuickCommandTargetProtocol::Ssh,
+                crate::PublicQuickCommandTargetProtocol::Mosh,
+            ])
+        ));
+        let parameters = parsed.parameters.as_deref().unwrap();
+        assert_eq!(parameters.len(), 1);
+        assert_eq!(parameters[0].name, "service");
+        assert_eq!(parameters[0].default_value.as_deref(), Some(secret_default));
+        assert_eq!(parameters[0].choices, [secret_default, "worker"]);
         assert!(!format!("{parsed:?}").contains(secret_default));
-    }
 
-    #[test]
-    fn quick_command_save_rejects_persisted_defaults_for_secret_parameters() {
-        let arguments = json!({
-            "name": "Login",
-            "command": "login {{param.password}}",
-            "category": "custom",
-            "expected_revision": 7,
-            "parameters": [{
-                "name": "password",
-                "label": "Password",
-                "kind": "secret",
-                "default_value": "must-not-persist",
-                "required": true
-            }]
-        })
-        .as_object()
-        .cloned()
-        .unwrap();
+        let parameter = &mut arguments.get_mut("parameters").unwrap()[0];
+        parameter["kind"] = json!("secret");
+        parameter["choices"] = json!([]);
 
         assert!(parse_quick_commands_save(arguments).is_err());
     }

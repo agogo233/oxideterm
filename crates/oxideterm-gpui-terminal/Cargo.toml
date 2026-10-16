@@ -18,9 +18,12 @@ async-channel.workspace = true
 chrono.workspace = true
 futures.workspace = true
 gpui.workspace = true
+oxideterm-background-media = { path = "../oxideterm-background-media" }
+oxideterm-gpui-background = { path = "../oxideterm-gpui-background" }
 image.workspace = true
 oxideterm-render-policy = { path = "../oxideterm-render-policy" }
 oxideterm-gpui-ui = { path = "../oxideterm-gpui-ui" }
+oxideterm-gpui-editor = { path = "../oxideterm-gpui-editor" }
 oxideterm-modem-transfer = { path = "../oxideterm-modem-transfer" }
 oxideterm-settings = { path = "../oxideterm-settings" }
 oxideterm-ssh = { path = "../oxideterm-ssh" }
@@ -33,6 +36,7 @@ oxideterm-theme = { path = "../oxideterm-theme" }
 oxideterm-trzsz = { path = "../oxideterm-trzsz" }
 parking_lot.workspace = true
 regex.workspace = true
+rusqlite = { version = "0.37", features = ["bundled"] }
 serde_json.workspace = true
 tempfile = "3.23"
 unicode-segmentation.workspace = true
@@ -45,9 +49,9 @@ russh.workspace = true
 rand10.workspace = true
 tokio.workspace = true
 crossbeam-channel.workspace = true
-criterion.workspace = true
-gpui = { workspace = true, features = ["bench"] }
-gpui_platform = { workspace = true, features = ["font-kit", "test-support"] }
+criterion = { version = "0.8.2", features = ["html_reports"] }
+gpui = { workspace = true, features = ["bench", "test-support"] }
+gpui_platform = { workspace = true, features = ["font-kit", "bench-support"] }
 
 [[bench]]
 name = "terminal_render"

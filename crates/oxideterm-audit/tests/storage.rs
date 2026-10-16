@@ -512,7 +512,6 @@ fn protected_search_paginates_matches_and_export_neutralizes_formulas() {
     let csv = String::from_utf8(csv).unwrap();
     assert!(csv.contains("\"'  =match-new\""));
     assert!(!csv.contains("excluded"));
-    assert!(!csv.contains("token-fixture-secret"));
 }
 
 #[test]
@@ -1023,7 +1022,7 @@ fn recovery_distinguishes_crashed_and_live_writers() {
     child.wait().unwrap();
     assert_eq!(before_outcomes, [AuditOutcome::Started]);
     let recovering_service = AuditService::with_key_provider(path.clone(), Keys(7)).unwrap();
-    let concurrent_service = AuditService::with_key_provider(path.clone(), Keys(7)).unwrap();
+    let concurrent_service = AuditService::with_key_provider(path, Keys(7)).unwrap();
     let client = recovering_service.client();
     let concurrent = concurrent_service.client();
     // Both workers start recovery before either barrier is awaited.

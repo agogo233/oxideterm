@@ -8,6 +8,10 @@ license.workspace = true
 version.workspace = true
 
 [dependencies]
+oxideterm-settings = { path = "../oxideterm-settings" }
+futures-util.workspace = true
+oxideterm-remote-desktop = { path = "../oxideterm-remote-desktop" }
+oxideterm-atomic-file = { path = "../oxideterm-atomic-file" }
 oxideterm-ai = { path = "../oxideterm-ai" }
 oxideterm-network-proxy = { path = "../oxideterm-network-proxy" }
 oxideterm-plugin-manifest = { path = "../oxideterm-plugin-manifest" }
@@ -17,3 +21,6 @@ semver.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 zip.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

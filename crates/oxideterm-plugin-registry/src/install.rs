@@ -41,6 +41,80 @@ pub(crate) fn install_native_plugin_package_bytes(
         let manifest = read_native_plugin_manifest_from_dir(&source_dir)?;
         validate_native_plugin_id(&manifest.id)
             .map_err(|error| format!("Invalid plugin ID in manifest: {error}"))?;
+        validate_native_plugin_manifest(&manifest)?;
+        let background_sources = manifest
+            .contributes
+            .as_ref()
+            .and_then(|value| value.backgrounds.as_ref())
+            .into_iter()
+            .flatten()
+            .map(|path| source_dir.join(path))
+            .collect::<Vec<_>>();
+        if background_sources.iter().any(|path| !path.is_file()) {
+            return Err("Background pack media is missing".into());
+        }
+        if let Some(language) = manifest
+            .contributes
+            .as_ref()
+            .and_then(|value| value.language.as_ref())
+        {
+            let parser = &manifest
+                .runtime
+                .as_ref()
+                .expect("validated language runtime")
+                .entry;
+            let mut assets = vec![
+                (parser, &language.parser_sha256, 16 * 1024 * 1024, true),
+                (
+                    &language.highlights,
+                    &language.highlights_sha256,
+                    1024 * 1024,
+                    false,
+                ),
+            ];
+            for injection in &language.injections {
+                assets.extend([
+                    (
+                        &injection.parser,
+                        &injection.parser_sha256,
+                        16 * 1024 * 1024,
+                        true,
+                    ),
+                    (
+                        &injection.highlights,
+                        &injection.highlights_sha256,
+                        1024 * 1024,
+                        false,
+                    ),
+                    (
+                        &injection.query,
+                        &injection.query_sha256,
+                        1024 * 1024,
+                        false,
+                    ),
+                ]);
+            }
+            for (file, checksum, maximum, is_parser) in assets {
+                use std::io::Read as _;
+                let mut bytes = Vec::new();
+                fs::File::open(source_dir.join(file))
+                    .map_err(|error| error.to_string())?
+                    .take(maximum + 1)
+                    .read_to_end(&mut bytes)
+                    .map_err(|error| error.to_string())?;
+                if bytes.len() as u64 > maximum || native_plugin_sha256_hex(&bytes) != *checksum {
+                    return Err("Language asset size or checksum mismatch".into());
+                }
+                if is_parser && !bytes.starts_with(b"\0asm") {
+                    return Err("Language parser is not a WebAssembly module".into());
+                }
+            }
+        }
+        let mut effective_manifest = manifest.clone();
+        if let Some(catalog) = load_catalog_cache(settings_path, &[&manifest.id])? {
+            apply_catalog_compatibility(&mut effective_manifest, &catalog);
+        }
+        validate_native_plugin_host(&effective_manifest)?;
         if let Some(expected_id) = expected_id
             && manifest.id != expected_id
         {
@@ -67,12 +141,7 @@ pub(crate) fn install_native_plugin_package_bytes(
         // Install uses staging + backup under the plugin directory so the final
         // rename is same-filesystem and rollback can restore the previous copy.
         match fs::rename(&source_dir, &dest_dir) {
-            Ok(()) => {
-                if backup_dir.exists() {
-                    fs::remove_dir_all(&backup_dir)
-                        .map_err(|error| format!("Failed to remove plugin backup: {error}"))?;
-                }
-            }
+            Ok(()) => {}
             Err(error) => {
                 if backup_dir.exists() {
                     fs::rename(&backup_dir, &dest_dir).map_err(|restore_error| {
@@ -85,10 +154,47 @@ pub(crate) fn install_native_plugin_package_bytes(
             }
         }
 
+        // Gallery copies remain user-owned after package removal and keep active videos stable.
+        let background_sources = manifest
+            .contributes
+            .as_ref()
+            .and_then(|value| value.backgrounds.as_ref())
+            .into_iter()
+            .flatten()
+            .map(|path| dest_dir.join(path))
+            .collect::<Vec<_>>();
+        let imported_backgrounds = if background_sources.is_empty() {
+            Vec::new()
+        } else {
+            match oxideterm_settings::import_background_pack(
+                settings_path,
+                &format!("{}-{}", manifest.id, manifest.version),
+                &background_sources,
+            ) {
+                Ok(paths) => paths,
+                Err(error) => {
+                    fs::remove_dir_all(&dest_dir).map_err(|rollback| {
+                        format!("{error}; package rollback failed: {rollback}")
+                    })?;
+                    if backup_dir.exists() {
+                        fs::rename(&backup_dir, &dest_dir).map_err(|rollback| {
+                            format!("{error}; package rollback failed: {rollback}")
+                        })?;
+                    }
+                    return Err(error.to_string());
+                }
+            }
+        };
+        if backup_dir.exists() {
+            fs::remove_dir_all(&backup_dir)
+                .map_err(|error| format!("Failed to remove plugin backup: {error}"))?;
+        }
+
         Ok(NativePluginUrlInstallResult {
             manifest,
             checksum: actual_checksum,
             replaced_existing,
+            imported_backgrounds,
         })
     })();
 
@@ -260,7 +366,7 @@ pub(crate) fn native_plugin_version_is_newer(new_version: &str, old_version: &st
         semver::Version::parse(new_version),
         semver::Version::parse(old_version),
     ) {
-        return new_version > old_version;
+        return new_version.cmp_precedence(&old_version).is_gt();
     }
 
     // Preserve comparison for legacy manifests that predate semantic-version

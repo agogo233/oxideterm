@@ -11,14 +11,17 @@ use std::{
 };
 
 use oxideterm_sftp::{
-    LocalDownloadDisposition, SftpTransferManager, probe_scp_capabilities, scp_download_directory,
-    scp_download_file, scp_upload_directory, scp_upload_file,
+    LocalDownloadDisposition, SftpTransferManager, TarTransferOptions, probe_scp_capabilities,
+    probe_tar_capabilities, profile_local_directory, scp_download_directory, scp_download_file,
+    scp_upload_directory, scp_upload_file, tar_upload_directory,
 };
 use oxideterm_ssh::{
     AuthMethod, ConnectionConsumer, ConnectionPoolConfig, ProxyHopConfig, SshConfig,
     SshConnectionRegistry, SshTransportClient, SshTransportCommand, UpstreamProxyAuth,
-    UpstreamProxyConfig, UpstreamProxyProtocol, upstream_proxy_from_env,
+    UpstreamProxyConfig, UpstreamProxyProtocol, X11ForwardPolicy, X11ForwardingFailure,
+    X11ForwardingStatus, upstream_proxy_from_env,
 };
+use rand10::{RngExt, SeedableRng};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -84,6 +87,89 @@ async fn local_sshd_upstream_proxy_e2e_matrix() {
         no_proxy_count,
         "matching no_proxy rules must bypass the upstream proxy"
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[ignore = "requires local sshd, ssh-keygen and xauth; run with --test-threads=1"]
+async fn local_sshd_x11_reports_fallback_and_server_assigned_display() {
+    let rejected = SshdFixture::start();
+    let accepted = SshdFixture::with_x11(10, true);
+    let authority = accepted.dir.join("local.authority");
+    let xauth = if PathBuf::from("/opt/X11/bin/xauth").is_file() {
+        "/opt/X11/bin/xauth"
+    } else {
+        "/usr/bin/xauth"
+    };
+    run(Command::new(xauth).arg("-f").arg(&authority).args([
+        "add",
+        "192.0.2.1:77",
+        "MIT-MAGIC-COOKIE-1",
+        "0123456789abcdef0123456789abcdef",
+    ]));
+    let _authority = EnvVarGuard::set("XAUTHORITY", authority.display().to_string());
+    for (server, display, expected) in [
+        (
+            &accepted,
+            "invalid",
+            X11ForwardingStatus::Unavailable(X11ForwardingFailure::LocalDisplayUnavailable),
+        ),
+        (
+            &rejected,
+            "192.0.2.1:77",
+            X11ForwardingStatus::Unavailable(X11ForwardingFailure::ServerRejected),
+        ),
+        (&accepted, "192.0.2.1:77", X11ForwardingStatus::Accepted),
+    ] {
+        let _display = EnvVarGuard::set("DISPLAY", display.into());
+        let mut config = target_config(server);
+        config.x11_forwarding = Some(X11ForwardPolicy::trusted());
+        let mut terminal = SshTransportClient::new(config)
+            .connect_shell()
+            .await
+            .unwrap();
+        terminal
+            .command_tx
+            .send(SshTransportCommand::Data(
+                b"printf '\\n%s%s%s\\n' '__X11_' 'DISPLAY__=' \"$DISPLAY\"; printf '\\n%s%s\\n' '__SSH_' 'READY__'\n"
+                    .to_vec(),
+            ))
+            .await
+            .unwrap();
+        let remote_display = tokio::time::timeout(Duration::from_secs(10), async {
+            let mut output = Vec::new();
+            loop {
+                match terminal.output_rx.try_recv() {
+                    Ok(chunk) => output.extend_from_slice(&chunk),
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    Err(error) => panic!("X11 fallback closed the regular shell: {error}"),
+                }
+                let text = String::from_utf8_lossy(&output);
+                if text.contains("__SSH_READY__")
+                    && let Some((_, suffix)) = text.split_once("__X11_DISPLAY__=")
+                {
+                    break suffix.lines().next().unwrap_or_default().trim().to_string();
+                }
+            }
+        })
+        .await
+        .expect("regular shell must run with or without X11");
+        assert_eq!(terminal.take_x11_forwarding_status(), Some(expected));
+        assert_eq!(terminal.take_x11_forwarding_status(), None);
+        if expected == X11ForwardingStatus::Accepted {
+            let (host, display) = remote_display
+                .split_once(':')
+                .expect("server display address");
+            assert_eq!(host, "localhost");
+            let (number, screen) = display.split_once('.').unwrap();
+            assert!(number.parse::<u16>().unwrap() >= 1000);
+            assert_eq!(screen, "0");
+        } else {
+            assert_eq!(remote_display, "");
+        }
+    }
 }
 
 #[tokio::test]
@@ -304,6 +390,123 @@ async fn local_sshd_terminal_close_releases_session_slot() {
     .expect("dropping the consumer must also close its channel");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires local sshd, ssh-keygen, and tar"]
+async fn local_sshd_directory_upload_preserves_shared_transport() {
+    let sshd = SshdFixture::start();
+    let registry = SshConnectionRegistry::default();
+    let mut config = target_config(&sshd);
+    config.ssh_algorithms.compression = vec!["zlib@openssh.com".into()];
+    let mut terminal = SshTransportClient::new(config)
+        .connect_shell_with_registry(registry, ConnectionConsumer::Terminal("tar-e2e".into()))
+        .await
+        .expect("connect shared terminal");
+    let connection = terminal.ssh_connection_handle().unwrap();
+    let browser = connection.acquire_sftp().await.expect("open SFTP browser");
+    let capabilities = probe_tar_capabilities(&connection).await;
+    assert!(capabilities.supports_tar, "local fixture provides tar");
+    assert_eq!(
+        connection
+            .run_command("printf probe-alive", Duration::from_secs(5), 1024)
+            .await
+            .expect("tar probes must not close the shared transport"),
+        "probe-alive"
+    );
+    let source = sshd.dir.join("source (1)");
+    let destination = sshd.dir.join("destination (1)");
+    fs::create_dir_all(source.join("nested")).unwrap();
+    fs::create_dir(&destination).unwrap();
+    fs::write(source.join("root.txt"), b"root contents\n").unwrap();
+    fs::write(source.join("nested/child.txt"), b"child contents\n").unwrap();
+    let mut payload = vec![0u8; 4 * 1024 * 1024];
+    rand10::rngs::StdRng::seed_from_u64(42).fill(payload.as_mut_slice());
+    fs::write(source.join("payload.bin"), &payload).unwrap();
+    let profile = profile_local_directory(&source).await.unwrap();
+    tar_upload_directory(
+        &connection,
+        source.to_str().unwrap(),
+        destination.to_str().unwrap(),
+        "tar-upload",
+        None,
+        Some(Arc::new(SftpTransferManager::new())),
+        TarTransferOptions {
+            profile,
+            compression: capabilities.compression,
+        },
+    )
+    .await
+    .expect("upload directory over the shared transport");
+    assert_eq!(
+        fs::read(destination.join("root.txt")).unwrap(),
+        b"root contents\n"
+    );
+    assert_eq!(
+        fs::read(destination.join("nested/child.txt")).unwrap(),
+        b"child contents\n"
+    );
+    assert_eq!(fs::read(destination.join("payload.bin")).unwrap(), payload);
+    let recursive_destination = sshd.dir.join("recursive (1)");
+    let transfer = connection.acquire_transfer_sftp().await.unwrap();
+    transfer
+        .upload_dir(
+            source.to_str().unwrap(),
+            recursive_destination.to_str().unwrap(),
+            "recursive-upload",
+            None,
+            Some(Arc::new(SftpTransferManager::new())),
+        )
+        .await
+        .expect("recursive upload over sibling SFTP channels");
+    drop(transfer);
+    assert_eq!(
+        fs::read(recursive_destination.join("nested/child.txt")).unwrap(),
+        b"child contents\n"
+    );
+    assert_eq!(
+        fs::read(recursive_destination.join("payload.bin")).unwrap(),
+        payload
+    );
+    assert_eq!(
+        browser
+            .lock()
+            .await
+            .stat(destination.join("root.txt").to_str().unwrap())
+            .await
+            .expect("browser survives directory transfers")
+            .size,
+        14
+    );
+    terminal
+        .command_tx
+        .send(SshTransportCommand::Data(
+            b"printf 'tar-%s\\n' survived\n".to_vec(),
+        ))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut output = Vec::new();
+        loop {
+            match terminal.output_rx.try_recv() {
+                Ok(chunk) => {
+                    output.extend_from_slice(&chunk);
+                    if output
+                        .windows(b"tar-survived".len())
+                        .any(|w| w == b"tar-survived")
+                    {
+                        break;
+                    }
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(error) => panic!("shared terminal disconnected: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("original terminal must still execute commands after upload");
+}
+
 async fn connect_shell(config: SshConfig) {
     let result = tokio::time::timeout(
         Duration::from_secs(10),
@@ -360,6 +563,10 @@ impl SshdFixture {
     }
 
     fn with_max_sessions(max_sessions: usize) -> Self {
+        Self::with_x11(max_sessions, false)
+    }
+
+    fn with_x11(max_sessions: usize, x11: bool) -> Self {
         let sshd = "/usr/sbin/sshd";
         let ssh_keygen = "ssh-keygen";
         assert!(
@@ -398,6 +605,20 @@ impl SshdFixture {
             .expect("write authorized keys");
         set_private_permissions(&dir, &client_key, &host_key, &authorized_keys);
 
+        let x11_config = if x11 {
+            let xauth = if PathBuf::from("/opt/X11/bin/xauth").is_file() {
+                "/opt/X11/bin/xauth"
+            } else {
+                "/usr/bin/xauth"
+            };
+            // Both client and server authority files remain inside the fixture.
+            format!(
+                "X11Forwarding yes\nX11DisplayOffset 1000\nXAuthLocation {xauth}\nPermitUserRC no\nSetEnv XAUTHORITY={}\n",
+                dir.join("remote.authority").display()
+            )
+        } else {
+            "X11Forwarding no\n".to_string()
+        };
         let config = format!(
             "\
 Port {port}
@@ -411,11 +632,13 @@ PasswordAuthentication no
 KbdInteractiveAuthentication no
 PubkeyAuthentication yes
 AllowTcpForwarding yes
+Subsystem sftp internal-sftp
 PermitTTY yes
 MaxSessions {max_sessions}
 PermitRootLogin no
 AllowUsers {username}
 LogLevel VERBOSE
+{x11_config}
 ",
             host_key = host_key.display(),
             pid_path = pid_path.display(),
@@ -445,6 +668,7 @@ LogLevel VERBOSE
 
     fn proxy_hop(&self) -> ProxyHopConfig {
         ProxyHopConfig {
+            totp: None,
             host: "127.0.0.1".to_string(),
             port: self.port,
             username: self.username.clone(),

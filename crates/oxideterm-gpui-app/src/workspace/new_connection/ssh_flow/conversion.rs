@@ -9,6 +9,7 @@ pub(super) fn detect_ssh_agent_available(identity_agent: &str) -> Option<bool> {
 }
 
 pub(super) fn proxy_chain_from_form(
+    store: &ConnectionStore,
     form: &mut NewConnectionForm,
     secret_handoff: RuntimeSecretHandoff,
     saved_auth: Vec<Option<AuthMethod>>,
@@ -21,6 +22,7 @@ pub(super) fn proxy_chain_from_form(
     let mut saved_auth = saved_auth.into_iter();
     for hop in form.proxy_hops.iter_mut().filter(|hop| hop.complete()) {
         chain.push(ProxyHopConfig {
+            totp: store.totp_binding(hop.totp_credential_id.as_deref()),
             host: hop.host.trim().to_string(),
             port: hop.port.trim().parse::<u16>().unwrap_or(22),
             username: hop.username.trim().to_string(),
@@ -193,7 +195,7 @@ pub(super) fn auth_method_from_proxy_hop(
     }
 }
 
-pub(super) fn form_from_runtime_config(
+pub(in crate::workspace) fn form_from_runtime_config(
     config: SshConfig,
     title: Option<&str>,
     default_group: String,
@@ -262,6 +264,7 @@ pub(super) fn form_from_runtime_config(
 pub(super) fn proxy_hop_form_from_runtime_config(config: ProxyHopConfig) -> NewConnectionProxyHop {
     let auth_fields = runtime_auth_form_fields(config.auth);
     NewConnectionProxyHop {
+        totp_credential_id: config.totp.map(|binding| binding.credential_id),
         empty_password: auth_fields.empty_password,
         saved_connection_id: String::new(),
         persisted_proxy_hop_index: None,
@@ -446,40 +449,26 @@ mod runtime_save_tests {
     use zeroize::Zeroizing;
 
     #[test]
-    fn test_secret_handoff_keeps_the_form_reusable() {
-        let mut form_secret = "target-secret".to_string();
-
-        let runtime_secret = RuntimeSecretHandoff::CopyForTest.zeroizing(&mut form_secret);
-
-        assert_eq!(runtime_secret.as_str(), "target-secret");
-        assert_eq!(form_secret, "target-secret");
-    }
-
-    #[test]
-    fn connection_secret_handoff_moves_the_form_allocation() {
-        let mut form_secret = "target-secret".to_string();
-        let form_secret_pointer = form_secret.as_ptr();
-
-        let runtime_secret = RuntimeSecretHandoff::Move.zeroizing(&mut form_secret);
-
-        assert_eq!(runtime_secret.as_str(), "target-secret");
-        assert_eq!(runtime_secret.as_ptr(), form_secret_pointer);
-        assert!(form_secret.is_empty());
-    }
-
-    #[test]
-    fn proxy_test_secret_handoff_keeps_the_hop_reusable() {
-        let mut hop = NewConnectionProxyHop::new();
-        hop.auth_tab = SshAuthTab::Password;
-        hop.password = "jump-secret".to_string();
-
-        let auth = auth_method_from_proxy_hop(&mut hop, RuntimeSecretHandoff::CopyForTest);
-
-        assert!(matches!(
-            auth,
-            AuthMethod::Password { ref password, .. } if password.as_str() == "jump-secret"
-        ));
-        assert_eq!(hop.password, "jump-secret");
+    fn proxy_auth_handoff_preserves_test_drafts_and_moves_connect_drafts() {
+        for (handoff, expected_draft) in [
+            (RuntimeSecretHandoff::CopyForTest, "jump-secret"),
+            (RuntimeSecretHandoff::Move, ""),
+        ] {
+            let mut hop = NewConnectionProxyHop::new();
+            hop.auth_tab = SshAuthTab::Password;
+            hop.password = "jump-secret".to_string();
+            let allocation = hop.password.as_ptr();
+            let auth = auth_method_from_proxy_hop(&mut hop, handoff);
+            let AuthMethod::Password { password, prompt } = auth else {
+                panic!("expected password authentication");
+            };
+            assert_eq!(password.as_str(), "jump-secret", "{handoff:?}");
+            assert!(!prompt, "{handoff:?}");
+            assert_eq!(hop.password, expected_draft, "{handoff:?}");
+            if matches!(handoff, RuntimeSecretHandoff::Move) {
+                assert_eq!(password.as_ptr(), allocation);
+            }
+        }
     }
 
     #[test]
@@ -535,9 +524,13 @@ mod runtime_save_tests {
         let saved_auth =
             saved_proxy_hop_auth_from_store(&connection_store, &form, "missing saved credentials")
                 .unwrap();
-        let proxy_chain =
-            proxy_chain_from_form(&mut form, RuntimeSecretHandoff::CopyForTest, saved_auth)
-                .expect("proxy chain");
+        let proxy_chain = proxy_chain_from_form(
+            &connection_store,
+            &mut form,
+            RuntimeSecretHandoff::CopyForTest,
+            saved_auth,
+        )
+        .expect("proxy chain");
 
         assert!(matches!(
             &proxy_chain[0].auth,
@@ -556,6 +549,7 @@ mod runtime_save_tests {
     #[test]
     fn runtime_proxy_hop_form_preserves_password_for_save_as() {
         let hop = proxy_hop_form_from_runtime_config(ProxyHopConfig {
+            totp: None,
             host: "jump.example.com".to_string(),
             port: 22,
             username: "ops".to_string(),
@@ -584,6 +578,7 @@ mod runtime_save_tests {
     #[test]
     fn runtime_proxy_hop_form_preserves_key_passphrase_for_save_as() {
         let hop = proxy_hop_form_from_runtime_config(ProxyHopConfig {
+            totp: None,
             host: "jump.example.com".to_string(),
             port: 22,
             username: "ops".to_string(),

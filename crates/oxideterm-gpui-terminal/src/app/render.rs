@@ -2,9 +2,8 @@ use std::{path::PathBuf, sync::Arc, time::Instant};
 
 use gpui::{
     Anchor, AnchoredPositionMode, AnyElement, App, ClipboardItem, Context, ExternalPaths,
-    FocusHandle, Focusable, FontWeight, IntoColor, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ObjectFit, Render, RenderImage, SharedString, StyledImage, Window, anchored,
-    deferred, div, point, prelude::*, px, rgb, rgba,
+    FocusHandle, Focusable, FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    Render, SharedString, Window, anchored, deferred, div, point, prelude::*, px, rgb, rgba,
 };
 use oxideterm_gpui_ui::button::{
     ButtonRadius, ContextChipOptions, IconButtonOptions, context_chip, icon_button,
@@ -12,9 +11,8 @@ use oxideterm_gpui_ui::button::{
 use oxideterm_gpui_ui::confirm::{ConfirmDialogVariant, ConfirmDialogView, confirm_dialog};
 use oxideterm_gpui_ui::context_menu::{
     ContextMenuItemKind, context_menu_action, context_menu_backdrop, context_menu_content,
-    context_menu_event_boundary, context_menu_item, context_menu_item_height_estimate,
-    context_menu_item_with_shortcut, context_menu_separator,
-    context_menu_separator_height_estimate, context_menu_sub_content, context_menu_sub_trigger,
+    context_menu_event_boundary, context_menu_item, context_menu_item_with_shortcut,
+    context_menu_separator,
 };
 use oxideterm_gpui_ui::menu::menu_content;
 use oxideterm_gpui_ui::modal::{TAURI_POPOVER_LAYER_PRIORITY, overlay_content_boundary};
@@ -41,17 +39,7 @@ use crate::terminal_view::*;
 // Bound stale frames under continuous output when the parser repeatedly wins the lock.
 const MAX_SNAPSHOT_DEFER_DURATION: std::time::Duration = std::time::Duration::from_millis(32);
 
-const PASTE_PREVIEW_TEXT_RADIUS: f32 = 4.0;
-const PASTE_CONFIRM_DIALOG_RADIUS: f32 = 8.0;
-const PASTE_CONFIRM_BUTTON_RADIUS: f32 = 4.0;
-const TERMINAL_KEY_HINT_RADIUS: f32 = 4.0;
 const TERMINAL_CONTEXT_MENU_WIDTH: f32 = 220.0;
-const TERMINAL_CONTEXT_MENU_ACTION_COUNT: f32 = 13.0;
-const TERMINAL_CONTEXT_MENU_SEPARATOR_COUNT: f32 = 4.0;
-const TERMINAL_MODEM_SUBMENU_ACTION_COUNT: f32 = 6.0;
-const TERMINAL_CONTEXT_MENU_ACTIONS_BEFORE_MODEM: f32 = 9.0;
-const TERMINAL_CONTEXT_MENU_SEPARATORS_BEFORE_MODEM: f32 = 2.0;
-const TERMINAL_CONTEXT_MENU_MARGIN: f32 = 8.0;
 const TERMINAL_CONTROL_ROW_HEIGHT: f32 = 34.0;
 const SERIAL_CONTROL_BUTTON_RADIUS: f32 = 999.0;
 // Keep diagnostic chrome away from the prompt and command text at the left edge.
@@ -189,49 +177,6 @@ fn external_paths_for_local_terminal(paths: &[PathBuf]) -> Option<String> {
     }
     input.push(' ');
     Some(input)
-}
-
-fn clamp_terminal_context_menu_position(
-    pointer_x: f32,
-    pointer_y: f32,
-    viewport_width: f32,
-    viewport_height: f32,
-    menu_width: f32,
-    menu_height: f32,
-    margin: f32,
-) -> (f32, f32) {
-    // Context menus are top-layer window overlays, so collision must use the
-    // window viewport instead of the terminal pane that opened the menu.
-    let max_x = (viewport_width - menu_width - margin).max(margin);
-    let max_y = (viewport_height - menu_height - margin).max(margin);
-    (
-        pointer_x.max(margin).min(max_x),
-        pointer_y.max(margin).min(max_y),
-    )
-}
-
-fn clamp_terminal_context_submenu_position(
-    menu_left: f32,
-    menu_top: f32,
-    trigger_top_offset: f32,
-    viewport_width: f32,
-    viewport_height: f32,
-    submenu_width: f32,
-    submenu_height: f32,
-    margin: f32,
-) -> (f32, f32) {
-    // Prefer the conventional right edge, then flip to the left when the
-    // submenu would cross the window boundary.
-    let right_x = menu_left + TERMINAL_CONTEXT_MENU_WIDTH;
-    let left_x = menu_left - submenu_width;
-    let x = if right_x + submenu_width <= viewport_width - margin {
-        right_x
-    } else {
-        left_x.max(margin)
-    };
-    let max_y = (viewport_height - submenu_height - margin).max(margin);
-    let y = (menu_top + trigger_top_offset).max(margin).min(max_y);
-    (x, y)
 }
 
 const TERMINAL_VISUAL_BELL_OVERLAY_ALPHA: u8 = 0x66;
@@ -409,8 +354,14 @@ impl Render for TerminalPane {
         let background_layer = background.as_ref().map(|background| {
             terminal_background_layer(
                 background.clone(),
-                self.background_image_cache
-                    .render_background_image(background, background_display),
+                if oxideterm_gpui_background::is_streaming_source(&background.path) {
+                    None
+                } else {
+                    self.background_image_cache
+                        .render_background_image(background, background_display)
+                },
+                window,
+                cx,
             )
         });
         self.ensure_background_image_completion_poll(cx);
@@ -474,6 +425,7 @@ impl Render for TerminalPane {
                 last_viewport_scale_factor_bits: self.viewport_scale_factor_bits,
             }),
         )
+        .marked_text_caret(self.marked_text_caret_utf16)
         .detect_file_paths_as_links(self.settings.detect_file_paths_as_links)
         .precomputed_search_matches()
         .selection_highlight_query(selection_highlight_query)
@@ -624,6 +576,47 @@ impl Render for TerminalPane {
             .when(self.is_serial_transport(), |pane| {
                 pane.child(self.render_serial_control_bar(cx))
             })
+            .when(
+                self.can_reconnect_ssh() || self.ssh_reconnect_pending(),
+                |pane| {
+                    pane.child(
+                        div()
+                            .absolute()
+                            .bottom_3()
+                            .right_3()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(self.render_terminal_toolbar_status(
+                                self.preferences.reconnect_hint.clone(),
+                            ))
+                            .child(
+                                self.render_terminal_toolbar_action(
+                                    if self.ssh_reconnect_pending() {
+                                        self.preferences.reconnecting_label.clone()
+                                    } else {
+                                        self.preferences.reconnect_label.clone()
+                                    },
+                                    !self.ssh_reconnect_pending(),
+                                    true,
+                                )
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _, _window, cx| {
+                                        if this.can_reconnect_ssh() {
+                                            this.request_context_action(
+                                                TerminalContextAction::Reconnect,
+                                                false,
+                                                cx,
+                                            );
+                                        }
+                                        cx.stop_propagation();
+                                    }),
+                                ),
+                            ),
+                    )
+                },
+            )
             .when_some(tmux_state, |pane, state| {
                 pane.child(self.render_tmux_control_bar(&state, cx))
             })
@@ -633,8 +626,8 @@ impl Render for TerminalPane {
             .when_some(self.tmux_prompt.clone(), |pane, prompt| {
                 pane.child(self.render_tmux_prompt_overlay(&prompt, cx))
             })
-            .when_some(self.pending_paste.clone(), |pane, paste| {
-                pane.child(self.render_paste_confirm_overlay(&paste, cx))
+            .when(self.pending_paste.is_some(), |pane| {
+                pane.child(self.render_paste_overlay(window, cx))
             })
             .when(
                 self.kitty_file_transmission_confirm_open && self.pending_paste.is_none(),
@@ -644,7 +637,7 @@ impl Render for TerminalPane {
                 pane.child(self.render_modem_progress_overlay(transfer, cx))
             })
             .when_some(self.context_menu.clone(), |pane, menu| {
-                pane.child(self.render_terminal_context_menu(menu, window, cx))
+                pane.child(self.render_terminal_context_menu(menu, cx))
             })
             .when_some(autosuggest_overlay, |pane, overlay| pane.child(overlay))
             .when(self.preferences.show_performance_overlay, |pane| {
@@ -728,7 +721,7 @@ impl TerminalPane {
                     (
                         range,
                         gpui::HighlightStyle {
-                            color: Some(rgb(tokens.ui.accent).into_color()),
+                            color: Some(rgb(tokens.ui.accent).into()),
                             ..Default::default()
                         },
                     )
@@ -1017,20 +1010,24 @@ impl TerminalPane {
             let window_id = tmux_window.id;
             let window_name = tmux_window.name.clone();
             controls.push(
-                self.render_terminal_toolbar_action(labels.rename_window.clone(), state.ready, false)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _event: &MouseDownEvent, window, cx| {
-                            window.prevent_default();
-                            cx.stop_propagation();
-                            this.open_tmux_prompt(
-                                TmuxPromptKind::RenameWindow(window_id),
-                                window_name.clone(),
-                                cx,
-                            );
-                        }),
-                    )
-                    .into_any_element(),
+                self.render_terminal_toolbar_action(
+                    labels.rename_window.clone(),
+                    state.ready,
+                    false,
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _event: &MouseDownEvent, window, cx| {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                        this.open_tmux_prompt(
+                            TmuxPromptKind::RenameWindow(window_id),
+                            window_name.clone(),
+                            cx,
+                        );
+                    }),
+                )
+                .into_any_element(),
             );
         }
         controls.push(
@@ -1542,6 +1539,31 @@ impl TerminalPane {
                 ),
             );
 
+        let control_row = control_row
+            .child(self.render_terminal_toolbar_separator())
+            .child(
+                self.render_terminal_toolbar_action(
+                    self.preferences.modem_labels.binary_transfer.clone(),
+                    running && !self.modem_prompt_active,
+                    false,
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                        if this.modem_prompt_active || !this.lifecycle().is_running() {
+                            return;
+                        }
+                        window.focus(&this.focus_handle, cx);
+                        this.open_terminal_context_menu(event, cx);
+                        if let Some(menu) = this.context_menu.as_mut() {
+                            menu.serial_transfer_menu = true;
+                        }
+                    }),
+                ),
+            );
+
         self.render_terminal_control_bar(information_row, control_row, cx)
     }
 
@@ -1616,9 +1638,11 @@ impl TerminalPane {
                     .items_center()
                     .child(toggle)
                     .child(
-                        div().min_w(px(0.0)).h_full().flex_1().child(
-                            div().size_full().overflow_x_scrollbar().child(information),
-                        ),
+                        div()
+                            .min_w(px(0.0))
+                            .h_full()
+                            .flex_1()
+                            .child(div().size_full().overflow_x_scrollbar().child(information)),
                     ),
             )
             .when(self.control_bar_expanded, |bar| {
@@ -1923,10 +1947,12 @@ impl TerminalPane {
     fn render_terminal_context_menu(
         &self,
         menu: TerminalContextMenu,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let (left, top) = self.clamped_terminal_context_menu_window_position(&menu, window);
+        let origin = self.bounds.map(|bounds| bounds.origin).unwrap_or_default();
+        // Preserve the pointer as the anchor. GPUI fits the measured menu to the
+        // window; pre-clamping an estimated height makes it flip a second time.
+        let position = origin + point(px(menu.x), px(menu.y));
         let copy_label = self.preferences.command_selection_labels.copy.clone();
         let copy_command_label = self
             .preferences
@@ -1980,7 +2006,6 @@ impl TerminalPane {
             .command_selection_labels
             .clear_screen_shortcut
             .clone();
-        let modem_labels = self.preferences.modem_labels.clone();
         let paste_label = self.preferences.paste_labels.paste.clone();
         let command_mark_id = menu.command_mark_id.clone();
         let has_command_mark = command_mark_id.is_some();
@@ -1995,226 +2020,185 @@ impl TerminalPane {
             self.free_type_context_replace_command_available(&menu);
         let insert_target = menu.target;
         let replace_target = menu.target;
-        let modem_submenu_open = menu.modem_submenu_open;
         let tokens = &self.theme.tokens;
         let menu_visible =
             self.context_menu_presence.phase() == oxideterm_gpui_ui::motion::ExitPhase::Visible;
-        let submenu_height = tokens.metrics.ui_menu_padding * 2.0
-            + TERMINAL_MODEM_SUBMENU_ACTION_COUNT * context_menu_item_height_estimate(tokens);
-        let modem_trigger_top_offset = tokens.metrics.ui_menu_padding
-            + TERMINAL_CONTEXT_MENU_ACTIONS_BEFORE_MODEM
-                * context_menu_item_height_estimate(tokens)
-            + TERMINAL_CONTEXT_MENU_SEPARATORS_BEFORE_MODEM
-                * context_menu_separator_height_estimate(tokens);
-        let viewport = window.viewport_size();
-        let (submenu_left, submenu_top) = clamp_terminal_context_submenu_position(
-            left,
-            top,
-            modem_trigger_top_offset,
-            f32::from(viewport.width),
-            f32::from(viewport.height),
-            TERMINAL_CONTEXT_MENU_WIDTH,
-            submenu_height,
-            TERMINAL_CONTEXT_MENU_MARGIN,
-        );
-        let popup = context_menu_event_boundary(
-            context_menu_content(tokens)
-                .w(px(TERMINAL_CONTEXT_MENU_WIDTH))
-                .child(self.render_terminal_context_menu_item(
-                    copy_label,
-                    !menu.has_selection,
-                    |this, _event, _window, cx| {
-                        this.copy_selection_from_context_menu(cx);
-                    },
-                    cx,
-                ))
-                .child(self.render_terminal_context_menu_item(
-                    copy_command_label,
-                    !has_command_text,
-                    move |this, _event, _window, cx| {
-                        this.dismiss_terminal_context_menu(cx);
-                        this.copy_command_mark_command_to_clipboard(
-                            copy_command_mark_id.as_deref(),
-                            cx,
-                        );
-                    },
-                    cx,
-                ))
-                .child(self.render_terminal_context_menu_item(
-                    paste_label,
-                    false,
-                    |this, _event, _window, cx| {
-                        this.dismiss_terminal_context_menu(cx);
-                        this.paste_from_clipboard(cx);
-                    },
-                    cx,
-                ))
-                .child(self.render_terminal_context_menu_item(
-                    insert_selection_label,
-                    !free_type_insert_selection_available,
-                    move |this, _event, _window, cx| {
-                        this.dismiss_terminal_context_menu(cx);
-                        this.insert_selection_into_free_type_command_from_context_menu(
-                            insert_target,
-                            false,
-                            cx,
-                        );
-                    },
-                    cx,
-                ))
-                .child(self.render_terminal_context_menu_item(
-                    replace_command_label,
-                    !free_type_replace_command_available,
-                    move |this, _event, _window, cx| {
-                        this.dismiss_terminal_context_menu(cx);
-                        this.insert_selection_into_free_type_command_from_context_menu(
-                            replace_target,
-                            true,
-                            cx,
-                        );
-                    },
-                    cx,
-                ))
-                .child(context_menu_separator(tokens))
-                .child(self.render_terminal_context_menu_item(
-                    send_to_ai_label,
-                    !menu.has_selection,
-                    |this, _event, _window, cx| {
-                        this.request_context_action(
-                            TerminalContextAction::SendSelectionToAi,
-                            true,
-                            cx,
-                        );
-                    },
-                    cx,
-                ))
-                .child(self.render_terminal_context_menu_item(
-                    fill_command_bar_label,
-                    !menu.has_selection,
-                    |this, _event, _window, cx| {
-                        this.request_context_action(
-                            TerminalContextAction::FillCommandBarFromSelection,
-                            true,
-                            cx,
-                        );
-                    },
-                    cx,
-                ))
-                .child(self.render_terminal_context_menu_item(
-                    find_label,
-                    false,
-                    |this, _event, _window, cx| {
-                        this.request_context_action(TerminalContextAction::OpenSearch, false, cx);
-                    },
-                    cx,
-                ))
-                .child(self.render_terminal_context_menu_item(
-                    manage_triggers_label,
-                    false,
-                    |this, _event, _window, cx| {
-                        this.request_context_action(
-                            TerminalContextAction::OpenSessionTriggers,
-                            false,
-                            cx,
-                        );
-                    },
-                    cx,
-                ))
-                .child(context_menu_separator(tokens))
-                .child(
-                    self.render_terminal_context_submenu_trigger(modem_labels.binary_transfer, cx),
-                )
-                .child(context_menu_separator(tokens))
-                .child(self.render_terminal_context_menu_item(
-                    select_command_label,
-                    !has_command_mark,
-                    move |this, _event, _window, cx| {
-                        this.dismiss_terminal_context_menu(cx);
-                        this.select_command_mark_by_id(select_command_mark_id.clone(), cx);
-                    },
-                    cx,
-                ))
-                .child(self.render_terminal_context_menu_item(
-                    previous_command_label,
-                    !menu.has_previous_command,
-                    move |this, _event, _window, cx| {
-                        this.dismiss_terminal_context_menu(cx);
-                        this.jump_to_command_mark_from_context_menu(
-                            previous_reference_line,
-                            TerminalCommandNavigationDirection::Previous,
-                            cx,
-                        );
-                    },
-                    cx,
-                ))
-                .child(self.render_terminal_context_menu_item(
-                    next_command_label,
-                    !menu.has_next_command,
-                    move |this, _event, _window, cx| {
-                        this.dismiss_terminal_context_menu(cx);
-                        this.jump_to_command_mark_from_context_menu(
-                            next_reference_line,
-                            TerminalCommandNavigationDirection::Next,
-                            cx,
-                        );
-                    },
-                    cx,
-                ))
-                .child(context_menu_separator(tokens))
-                .child(self.render_terminal_context_menu_item_with_shortcut(
-                    clear_screen_label,
-                    clear_screen_shortcut,
-                    false,
-                    |this, _event, _window, cx| {
-                        this.dismiss_terminal_context_menu(cx);
-                        this.clear_buffer(cx);
-                    },
-                    cx,
-                )),
-        );
-
-        let modem_submenu = modem_submenu_open.then(|| {
+        let popup = if menu.serial_transfer_menu {
+            self.render_serial_transfer_menu(cx)
+        } else {
             context_menu_event_boundary(
-                context_menu_sub_content(tokens)
+                context_menu_content(tokens)
                     .w(px(TERMINAL_CONTEXT_MENU_WIDTH))
-                    .child(self.render_terminal_modem_context_menu_item(
-                        modem_labels.xmodem_upload,
-                        DetectedModemProtocol::Xmodem,
-                        ModemTransferDirection::Upload,
+                    .children(self.plugin_text_actions.iter().cloned().map(|action| {
+                        self.render_terminal_context_menu_item(
+                            action.label.clone(),
+                            !menu.has_selection,
+                            move |this, _, _, cx| {
+                                this.request_plugin_text_action(action.clone(), cx);
+                            },
+                            cx,
+                        )
+                    }))
+                    .child(self.render_terminal_context_menu_item(
+                        copy_label,
+                        !menu.has_selection,
+                        |this, _event, _window, cx| {
+                            this.copy_selection_from_context_menu(cx);
+                        },
                         cx,
                     ))
-                    .child(self.render_terminal_modem_context_menu_item(
-                        modem_labels.xmodem_receive,
-                        DetectedModemProtocol::Xmodem,
-                        ModemTransferDirection::Download,
+                    .child(self.render_terminal_context_menu_item(
+                        copy_command_label,
+                        !has_command_text,
+                        move |this, _event, _window, cx| {
+                            this.dismiss_terminal_context_menu(cx);
+                            this.copy_command_mark_command_to_clipboard(
+                                copy_command_mark_id.as_deref(),
+                                cx,
+                            );
+                        },
                         cx,
                     ))
-                    .child(self.render_terminal_modem_context_menu_item(
-                        modem_labels.ymodem_upload,
-                        DetectedModemProtocol::Ymodem,
-                        ModemTransferDirection::Upload,
+                    .child(self.render_terminal_context_menu_item(
+                        paste_label,
+                        false,
+                        |this, _event, _window, cx| {
+                            this.dismiss_terminal_context_menu(cx);
+                            this.paste_from_clipboard(cx);
+                        },
                         cx,
                     ))
-                    .child(self.render_terminal_modem_context_menu_item(
-                        modem_labels.ymodem_receive,
-                        DetectedModemProtocol::Ymodem,
-                        ModemTransferDirection::Download,
+                    .child(self.render_terminal_context_menu_item(
+                        self.preferences.paste_labels.edit_title.clone(),
+                        false,
+                        |this, _, window, cx| this.edit_clipboard_paste(window, cx),
                         cx,
                     ))
-                    .child(self.render_terminal_modem_context_menu_item(
-                        modem_labels.zmodem_upload,
-                        DetectedModemProtocol::Zmodem,
-                        ModemTransferDirection::Upload,
+                    .child(self.render_terminal_context_menu_item(
+                        insert_selection_label,
+                        !free_type_insert_selection_available,
+                        move |this, _event, _window, cx| {
+                            this.dismiss_terminal_context_menu(cx);
+                            this.insert_selection_into_free_type_command_from_context_menu(
+                                insert_target,
+                                false,
+                                cx,
+                            );
+                        },
                         cx,
                     ))
-                    .child(self.render_terminal_modem_context_menu_item(
-                        modem_labels.zmodem_receive,
-                        DetectedModemProtocol::Zmodem,
-                        ModemTransferDirection::Download,
+                    .child(self.render_terminal_context_menu_item(
+                        replace_command_label,
+                        !free_type_replace_command_available,
+                        move |this, _event, _window, cx| {
+                            this.dismiss_terminal_context_menu(cx);
+                            this.insert_selection_into_free_type_command_from_context_menu(
+                                replace_target,
+                                true,
+                                cx,
+                            );
+                        },
+                        cx,
+                    ))
+                    .child(context_menu_separator(tokens))
+                    .child(self.render_terminal_context_menu_item(
+                        send_to_ai_label,
+                        !menu.has_selection,
+                        |this, _event, _window, cx| {
+                            this.request_context_action(
+                                TerminalContextAction::SendSelectionToAi,
+                                true,
+                                cx,
+                            );
+                        },
+                        cx,
+                    ))
+                    .child(self.render_terminal_context_menu_item(
+                        fill_command_bar_label,
+                        !menu.has_selection,
+                        |this, _event, _window, cx| {
+                            this.request_context_action(
+                                TerminalContextAction::FillCommandBarFromSelection,
+                                true,
+                                cx,
+                            );
+                        },
+                        cx,
+                    ))
+                    .child(self.render_terminal_context_menu_item(
+                        find_label,
+                        false,
+                        |this, _event, _window, cx| {
+                            this.request_context_action(
+                                TerminalContextAction::OpenSearch,
+                                false,
+                                cx,
+                            );
+                        },
+                        cx,
+                    ))
+                    .child(self.render_terminal_context_menu_item(
+                        manage_triggers_label,
+                        false,
+                        |this, _event, _window, cx| {
+                            this.request_context_action(
+                                TerminalContextAction::OpenSessionTriggers,
+                                false,
+                                cx,
+                            );
+                        },
+                        cx,
+                    ))
+                    .child(context_menu_separator(tokens))
+                    .child(self.render_terminal_context_menu_item(
+                        select_command_label,
+                        !has_command_mark,
+                        move |this, _event, _window, cx| {
+                            this.dismiss_terminal_context_menu(cx);
+                            this.select_command_mark_by_id(select_command_mark_id.clone(), cx);
+                        },
+                        cx,
+                    ))
+                    .child(self.render_terminal_context_menu_item(
+                        previous_command_label,
+                        !menu.has_previous_command,
+                        move |this, _event, _window, cx| {
+                            this.dismiss_terminal_context_menu(cx);
+                            this.jump_to_command_mark_from_context_menu(
+                                previous_reference_line,
+                                TerminalCommandNavigationDirection::Previous,
+                                cx,
+                            );
+                        },
+                        cx,
+                    ))
+                    .child(self.render_terminal_context_menu_item(
+                        next_command_label,
+                        !menu.has_next_command,
+                        move |this, _event, _window, cx| {
+                            this.dismiss_terminal_context_menu(cx);
+                            this.jump_to_command_mark_from_context_menu(
+                                next_reference_line,
+                                TerminalCommandNavigationDirection::Next,
+                                cx,
+                            );
+                        },
+                        cx,
+                    ))
+                    .child(context_menu_separator(tokens))
+                    .child(self.render_terminal_context_menu_item_with_shortcut(
+                        clear_screen_label,
+                        clear_screen_shortcut,
+                        false,
+                        |this, _event, _window, cx| {
+                            this.dismiss_terminal_context_menu(cx);
+                            this.clear_buffer(cx);
+                        },
                         cx,
                     )),
             )
-        });
+        }
+        .debug_selector(|| "terminal-context-menu".into());
 
         deferred(
             context_menu_backdrop()
@@ -2236,7 +2220,7 @@ impl TerminalPane {
                 .child(
                     anchored()
                         .anchor(Anchor::TopLeft)
-                        .position(point(px(left), px(top)))
+                        .position(position)
                         .position_mode(AnchoredPositionMode::Window)
                         .child(oxideterm_gpui_ui::motion::fade(
                             tokens,
@@ -2245,19 +2229,55 @@ impl TerminalPane {
                             oxideterm_gpui_ui::motion::MotionDuration::Micro,
                             menu_visible,
                         )),
-                )
-                .when_some(modem_submenu, |backdrop, submenu| {
-                    backdrop.child(
-                        anchored()
-                            .anchor(Anchor::TopLeft)
-                            .position(point(px(submenu_left), px(submenu_top)))
-                            .position_mode(AnchoredPositionMode::Window)
-                            .child(overlay_content_boundary(submenu)),
-                    )
-                }),
+                ),
         )
         .with_priority(TAURI_POPOVER_LAYER_PRIORITY)
         .into_any_element()
+    }
+
+    fn render_serial_transfer_menu(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let tokens = &self.theme.tokens;
+        let modem_labels = self.preferences.modem_labels.clone();
+        context_menu_event_boundary(
+            context_menu_content(tokens)
+                .w(px(TERMINAL_CONTEXT_MENU_WIDTH))
+                .child(self.render_terminal_modem_context_menu_item(
+                    modem_labels.xmodem_upload,
+                    DetectedModemProtocol::Xmodem,
+                    ModemTransferDirection::Upload,
+                    cx,
+                ))
+                .child(self.render_terminal_modem_context_menu_item(
+                    modem_labels.xmodem_receive,
+                    DetectedModemProtocol::Xmodem,
+                    ModemTransferDirection::Download,
+                    cx,
+                ))
+                .child(self.render_terminal_modem_context_menu_item(
+                    modem_labels.ymodem_upload,
+                    DetectedModemProtocol::Ymodem,
+                    ModemTransferDirection::Upload,
+                    cx,
+                ))
+                .child(self.render_terminal_modem_context_menu_item(
+                    modem_labels.ymodem_receive,
+                    DetectedModemProtocol::Ymodem,
+                    ModemTransferDirection::Download,
+                    cx,
+                ))
+                .child(self.render_terminal_modem_context_menu_item(
+                    modem_labels.zmodem_upload,
+                    DetectedModemProtocol::Zmodem,
+                    ModemTransferDirection::Upload,
+                    cx,
+                ))
+                .child(self.render_terminal_modem_context_menu_item(
+                    modem_labels.zmodem_receive,
+                    DetectedModemProtocol::Zmodem,
+                    ModemTransferDirection::Download,
+                    cx,
+                )),
+        )
     }
 
     fn render_modem_progress_overlay(
@@ -2350,18 +2370,6 @@ impl TerminalPane {
             .into_any_element()
     }
 
-    fn render_terminal_context_menu_item(
-        &self,
-        label: String,
-        disabled: bool,
-        listener: impl Fn(&mut Self, &MouseDownEvent, &mut Window, &mut Context<Self>) + 'static,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        self.render_terminal_context_menu_item_with_submenu_policy(
-            label, disabled, true, listener, cx,
-        )
-    }
-
     fn render_terminal_context_menu_item_with_shortcut(
         &self,
         label: String,
@@ -2403,17 +2411,13 @@ impl TerminalPane {
                 cx.notify();
             }),
         )
-        .on_mouse_move(cx.listener(|this, _event: &MouseMoveEvent, _window, cx| {
-            this.set_terminal_modem_submenu_open(false, cx);
-        }))
         .into_any_element()
     }
 
-    fn render_terminal_context_menu_item_with_submenu_policy(
+    fn render_terminal_context_menu_item(
         &self,
         label: String,
         disabled: bool,
-        close_modem_submenu_on_hover: bool,
         listener: impl Fn(&mut Self, &MouseDownEvent, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -2439,36 +2443,6 @@ impl TerminalPane {
                 cx.notify();
             }),
         )
-        .when(close_modem_submenu_on_hover, |item| {
-            item.on_mouse_move(cx.listener(|this, _event: &MouseMoveEvent, _window, cx| {
-                this.set_terminal_modem_submenu_open(false, cx);
-            }))
-        })
-        .into_any_element()
-    }
-
-    fn render_terminal_context_submenu_trigger(
-        &self,
-        label: String,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let disabled =
-            self.context_menu_presence.phase() == oxideterm_gpui_ui::motion::ExitPhase::Exiting;
-        let trigger = context_menu_sub_trigger(&self.theme.tokens, label, false, disabled).w_full();
-
-        context_menu_action(
-            trigger,
-            disabled,
-            false,
-            cx.listener(|this, _event, window, cx| {
-                window.prevent_default();
-                this.set_terminal_modem_submenu_open(true, cx);
-                cx.stop_propagation();
-            }),
-        )
-        .on_mouse_move(cx.listener(|this, _event: &MouseMoveEvent, _window, cx| {
-            this.set_terminal_modem_submenu_open(true, cx);
-        }))
         .into_any_element()
     }
 
@@ -2479,9 +2453,8 @@ impl TerminalPane {
         direction: ModemTransferDirection,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        self.render_terminal_context_menu_item_with_submenu_policy(
+        self.render_terminal_context_menu_item(
             label,
-            false,
             false,
             move |this, _event, _window, cx| {
                 this.dismiss_terminal_context_menu(cx);
@@ -2491,43 +2464,24 @@ impl TerminalPane {
         )
     }
 
-    fn clamped_terminal_context_menu_window_position(
-        &self,
-        menu: &TerminalContextMenu,
-        window: &Window,
-    ) -> (f32, f32) {
-        let viewport = window.viewport_size();
-        let origin = self
-            .bounds
-            .map(|bounds| bounds.origin)
-            .unwrap_or_else(|| point(px(0.0), px(0.0)));
-        let menu_height = self.terminal_context_menu_height_estimate();
-        clamp_terminal_context_menu_position(
-            f32::from(origin.x) + menu.x,
-            f32::from(origin.y) + menu.y,
-            f32::from(viewport.width),
-            f32::from(viewport.height),
-            TERMINAL_CONTEXT_MENU_WIDTH,
-            menu_height,
-            TERMINAL_CONTEXT_MENU_MARGIN,
-        )
-    }
-
-    fn terminal_context_menu_height_estimate(&self) -> f32 {
-        let tokens = &self.theme.tokens;
-        // Context menu rendering is token-driven; positioning uses the same
-        // Radix-mapped padding and shared line box as the rendered rows.
-        tokens.metrics.ui_menu_padding * 2.0
-            + TERMINAL_CONTEXT_MENU_ACTION_COUNT * context_menu_item_height_estimate(tokens)
-            + TERMINAL_CONTEXT_MENU_SEPARATOR_COUNT * context_menu_separator_height_estimate(tokens)
-    }
-
     fn copy_selection_from_context_menu(&mut self, cx: &mut Context<Self>) {
         self.dismiss_terminal_context_menu(cx);
         let _copied = self.copy_selection_to_clipboard_if_present(cx);
     }
 
-    fn request_context_action(
+    pub(super) fn request_plugin_text_action(
+        &mut self,
+        action: super::TerminalPluginTextAction,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(text) = self.selected_text_snapshot() else {
+            return;
+        };
+        self.pending_plugin_text = Some((action, zeroize::Zeroizing::new(text)));
+        self.request_context_action(super::TerminalContextAction::PluginTextTool, false, cx);
+    }
+
+    pub(super) fn request_context_action(
         &mut self,
         action: TerminalContextAction,
         requires_selection: bool,
@@ -2544,24 +2498,10 @@ impl TerminalPane {
         cx.notify();
     }
 
-    fn set_terminal_modem_submenu_open(&mut self, open: bool, cx: &mut Context<Self>) {
-        let Some(menu) = self.context_menu.as_mut() else {
-            return;
-        };
-        if menu.modem_submenu_open == open {
-            return;
-        }
-        // Submenu visibility belongs to the live context-menu instance so a
-        // newly opened terminal menu never inherits stale expansion state.
-        menu.modem_submenu_open = open;
-        cx.notify();
-    }
-
     pub(super) fn dismiss_terminal_context_menu(&mut self, cx: &mut Context<Self>) {
         if self.context_menu.is_none() {
             return;
         }
-        self.set_terminal_modem_submenu_open(false, cx);
         let Some(generation) = self.context_menu_presence.begin_exit() else {
             return;
         };
@@ -2780,174 +2720,6 @@ impl TerminalPane {
             }),
         )
     }
-
-    fn render_paste_confirm_overlay(&self, content: &str, cx: &mut Context<Self>) -> AnyElement {
-        const PREVIEW_MAX_LINES: usize = 5;
-
-        let lines = content.split('\n').collect::<Vec<_>>();
-        let remaining_lines = lines.len().saturating_sub(PREVIEW_MAX_LINES);
-        let title = label_with_count(&self.preferences.paste_labels.title_template, lines.len());
-        let more_lines = label_with_count(
-            &self.preferences.paste_labels.more_lines_template,
-            remaining_lines,
-        );
-
-        let mut preview = div()
-            .rounded(px(PASTE_PREVIEW_TEXT_RADIUS))
-            .border_1()
-            .border_color(rgb(0x2f343d))
-            .bg(rgb(0x090b0f))
-            .p(px(8.0))
-            .mb(px(12.0))
-            .max_h(px(128.0))
-            .overflow_hidden()
-            .flex()
-            .flex_col()
-            .gap(px(2.0))
-            .font_family(SharedString::from(self.preferences.font_family.clone()))
-            .text_size(px(12.0))
-            .text_color(rgb(0x9ca3af));
-
-        for line in lines.iter().take(PREVIEW_MAX_LINES) {
-            let rendered_line = if line.is_empty() {
-                "\u{00a0}".to_string()
-            } else {
-                (*line).to_string()
-            };
-            preview = preview.child(div().overflow_hidden().child(rendered_line));
-        }
-        if remaining_lines > 0 {
-            preview = preview.child(div().italic().text_color(rgb(0x9ca3af)).child(more_lines));
-        }
-
-        let cancel_label = self.preferences.paste_labels.cancel.clone();
-        let paste_label = self.preferences.paste_labels.paste.clone();
-        div()
-            .absolute()
-            .top_0()
-            .left_0()
-            .right_0()
-            .bottom_0()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(rgba(0x00000033))
-            .child(
-                div()
-                    .w(px(448.0))
-                    .rounded(px(PASTE_CONFIRM_DIALOG_RADIUS))
-                    .border_1()
-                    .border_color(rgba(0xeab30880))
-                    .bg(rgba(0x151922f2))
-                    .shadow_lg()
-                    .p(px(16.0))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.0))
-                            .mb(px(12.0))
-                            .child(
-                                div()
-                                    .size(px(16.0))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .text_size(px(14.0))
-                                    .text_color(rgb(0xeab308))
-                                    .child("!"),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(14.0))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(rgb(0xfef3c7))
-                                    .child(title),
-                            ),
-                    )
-                    .child(preview)
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .gap(px(16.0))
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .text_size(px(12.0))
-                                    .text_color(rgb(0x9ca3af))
-                                    .child(self.render_key_hint(
-                                        "Enter",
-                                        &self.preferences.paste_labels.confirm,
-                                    ))
-                                    .child(div().mx(px(8.0)).text_color(rgb(0x9ca3af)).child("·"))
-                                    .child(self.render_key_hint(
-                                        "Esc",
-                                        &self.preferences.paste_labels.cancel,
-                                    )),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .gap(px(8.0))
-                                    .child(
-                                        div()
-                                            .px(px(12.0))
-                                            .py(px(4.0))
-                                            .text_size(px(12.0))
-                                            .text_color(rgb(0x9ca3af))
-                                            .cursor_pointer()
-                                            .child(cancel_label)
-                                            .on_mouse_down(
-                                                MouseButton::Left,
-                                                cx.listener(|this, _event, _window, cx| {
-                                                    this.cancel_pending_paste(cx);
-                                                }),
-                                            ),
-                                    )
-                                    .child(
-                                        div()
-                                            .rounded(px(PASTE_CONFIRM_BUTTON_RADIUS))
-                                            .bg(rgb(0xca8a04))
-                                            .px(px(12.0))
-                                            .py(px(4.0))
-                                            .text_size(px(12.0))
-                                            .text_color(rgb(0xffffff))
-                                            .cursor_pointer()
-                                            .child(paste_label)
-                                            .on_mouse_down(
-                                                MouseButton::Left,
-                                                cx.listener(|this, _event, _window, cx| {
-                                                    this.confirm_pending_paste(cx);
-                                                }),
-                                            ),
-                                    ),
-                            ),
-                    ),
-            )
-            .into_any_element()
-    }
-
-    fn render_key_hint(&self, key: &'static str, label: &str) -> AnyElement {
-        div()
-            .flex()
-            .items_center()
-            .gap(px(4.0))
-            .child(
-                div()
-                    .rounded(px(TERMINAL_KEY_HINT_RADIUS))
-                    .bg(rgb(0x222834))
-                    .px(px(6.0))
-                    .py(px(2.0))
-                    .text_size(px(10.0))
-                    .text_color(rgb(0x9ca3af))
-                    .child(key),
-            )
-            .child(label.to_string())
-            .into_any_element()
-    }
 }
 
 fn label_with_count(template: &str, count: usize) -> String {
@@ -2999,16 +2771,98 @@ fn terminal_background_object_fit(fit: TerminalBackgroundFit) -> ObjectFit {
 
 #[cfg(test)]
 mod tests {
-    use gpui::AppContext;
+    use gpui::{AppContext, IntoElement};
     use std::path::PathBuf;
 
     use oxideterm_terminal::TerminalCursorShape;
 
-    use super::{
-        TERMINAL_VISUAL_BELL_OVERLAY_ALPHA, external_paths_for_local_terminal,
-        terminal_cursor_shape_for_render, terminal_pane_base_is_transparent,
-        terminal_visual_bell_overlay_color,
-    };
+    use super::{external_paths_for_local_terminal, terminal_cursor_shape_for_render};
+
+    struct BackgroundTestView {
+        background: crate::TerminalBackgroundPreferences,
+        image: std::sync::Arc<gpui::RenderImage>,
+    }
+
+    impl gpui::Render for BackgroundTestView {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            oxideterm_gpui_background::background_image_layer(
+                self.background.clone(),
+                Some(self.image.clone()),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn terminal_background_animation_plays_and_pauses(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        assert!(cx.update(|window, _| window.is_window_active()));
+        let image = std::sync::Arc::new(gpui::RenderImage::new(vec![
+            image::Frame::new(image::RgbaImage::from_pixel(
+                1,
+                1,
+                image::Rgba([0, 0, 255, 255]),
+            )),
+            image::Frame::new(image::RgbaImage::from_pixel(
+                1,
+                1,
+                image::Rgba([255, 0, 0, 255]),
+            )),
+        ]));
+        let background = crate::TerminalBackgroundPreferences {
+            path: "animation.gif".into(),
+            opacity: 1.0,
+            blur: 0.0,
+            fit: crate::TerminalBackgroundFit::Cover,
+            alignment: (0.5, 0.5),
+            effect: None,
+            readability: None,
+            limits: Default::default(),
+            scene: Default::default(),
+            on_failure: None,
+        };
+        let view = cx.update(|_, cx| {
+            cx.new(|_| BackgroundTestView {
+                background,
+                image: image.clone(),
+            })
+        });
+        for expected_all_frames in [false, true] {
+            cx.draw(
+                gpui::point(gpui::px(0.0), gpui::px(0.0)),
+                gpui::size(gpui::px(64.0), gpui::px(64.0)),
+                |_, _| view.clone().into_any_element(),
+            );
+            assert_eq!(
+                cx.update(|window, _| window.has_image_atlas_entry(&image)),
+                expected_all_frames
+            );
+        }
+        for reduce_motion in [true, false] {
+            if !reduce_motion {
+                cx.deactivate_window();
+            }
+            cx.update(|window, cx| {
+                cx.set_reduce_motion(reduce_motion);
+                window.drop_image(image.clone()).unwrap();
+            });
+            for _ in 0..2 {
+                cx.draw(
+                    gpui::point(gpui::px(0.0), gpui::px(0.0)),
+                    gpui::size(gpui::px(64.0), gpui::px(64.0)),
+                    |_, _| view.clone().into_any_element(),
+                );
+                // Both frames reached the atlas while playing; a paused
+                // animation must keep painting only its current frame.
+                assert!(!cx.update(|window, _| window.has_image_atlas_entry(&image)));
+            }
+        }
+    }
 
     struct AutosuggestTestView {
         pane: gpui::Entity<super::TerminalPane>,
@@ -3016,6 +2870,95 @@ mod tests {
 
     struct ControlBarTestView {
         pane: gpui::Entity<super::TerminalPane>,
+    }
+
+    struct ContextMenuTestView {
+        pane: gpui::Entity<super::TerminalPane>,
+    }
+
+    impl gpui::Render for ContextMenuTestView {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            use gpui::prelude::*;
+            let menu = self.pane.update(cx, |pane, cx| {
+                pane.context_menu
+                    .clone()
+                    .map(|menu| pane.render_terminal_context_menu(menu, cx))
+            });
+            gpui::div().size_full().relative().children(menu)
+        }
+    }
+
+    #[gpui::test]
+    fn context_menu_flips_at_the_pointer_using_its_rendered_size(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let pane = cx.new(|cx| {
+                super::TerminalPane::new_recording_playback(80, 24, Default::default(), window, cx)
+                    .unwrap()
+            });
+            cx.observe(&pane, |_, _, cx| cx.notify()).detach();
+            ContextMenuTestView { pane }
+        });
+        cx.simulate_resize(gpui::size(gpui::px(800.0), gpui::px(1000.0)));
+        let pane = cx.update(|_, cx| view.read(cx).pane.clone());
+        for scale in [1.0, 1.5, 2.0] {
+            cx.simulate_scale_factor_change(scale);
+            for (serial_transfer_menu, plugin_action) in
+                [(false, false), (false, true), (true, false)]
+            {
+                for (x, y) in [(100.0, 980.0), (760.0, 980.0), (100.0, 100.0)] {
+                    let pointer = gpui::point(gpui::px(x), gpui::px(y));
+                    pane.update(cx, |pane, cx| {
+                        pane.bounds = Some(gpui::Bounds::new(
+                            gpui::point(gpui::px(40.0), gpui::px(30.0)),
+                            gpui::size(gpui::px(740.0), gpui::px(950.0)),
+                        ));
+                        pane.plugin_text_actions = if plugin_action {
+                            vec![super::super::TerminalPluginTextAction {
+                                plugin_id: "test.tools".into(),
+                                tab_id: "tools".into(),
+                                control_id: "text".into(),
+                                label: "Process selection".into(),
+                            }]
+                        } else {
+                            Vec::new()
+                        };
+                        pane.open_terminal_context_menu(
+                            &gpui::MouseDownEvent {
+                                position: pointer,
+                                button: gpui::MouseButton::Right,
+                                ..Default::default()
+                            },
+                            cx,
+                        );
+                        pane.context_menu.as_mut().unwrap().serial_transfer_menu =
+                            serial_transfer_menu;
+                    });
+                    cx.update(|window, cx| window.draw(cx).clear(cx));
+                    let bounds = cx.debug_bounds("terminal-context-menu").unwrap();
+                    let anchor = gpui::point(
+                        if x > 400.0 {
+                            bounds.right()
+                        } else {
+                            bounds.left()
+                        },
+                        if y > 500.0 {
+                            bounds.bottom()
+                        } else {
+                            bounds.top()
+                        },
+                    );
+                    assert!(
+                        f32::from(anchor.x - pointer.x).abs() <= 1.0
+                            && f32::from(anchor.y - pointer.y).abs() <= 1.0,
+                        "menu {bounds:?} must stay at {pointer:?}; scale={scale}, serial={serial_transfer_menu}, plugin={plugin_action}",
+                    );
+                }
+            }
+        }
     }
 
     impl gpui::Render for ControlBarTestView {
@@ -3046,14 +2989,8 @@ mod tests {
     fn control_bar_toggle_hides_and_restores_the_controls_row(cx: &mut gpui::TestAppContext) {
         let (_, cx) = cx.add_window_view(|window, cx| {
             let pane = cx.new(|cx| {
-                super::TerminalPane::new_recording_playback(
-                    80,
-                    24,
-                    Default::default(),
-                    window,
-                    cx,
-                )
-                .unwrap()
+                super::TerminalPane::new_recording_playback(80, 24, Default::default(), window, cx)
+                    .unwrap()
             });
             cx.observe(&pane, |_, _, cx| cx.notify()).detach();
             ControlBarTestView { pane }
@@ -3205,16 +3142,6 @@ mod tests {
         assert_eq!(
             constrained.size,
             gpui::size(gpui::px(234.0), gpui::px(48.0))
-        );
-    }
-
-    #[test]
-    fn terminal_pane_base_keeps_window_background_visible_during_visual_bell() {
-        assert!(terminal_pane_base_is_transparent(true));
-        assert!(!terminal_pane_base_is_transparent(false));
-        assert_eq!(
-            terminal_visual_bell_overlay_color(0x17131a) & 0xff,
-            u32::from(TERMINAL_VISUAL_BELL_OVERLAY_ALPHA)
         );
     }
 

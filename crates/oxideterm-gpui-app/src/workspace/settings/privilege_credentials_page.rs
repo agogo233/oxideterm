@@ -3,6 +3,7 @@ use super::*;
 pub(in crate::workspace) const PRIVILEGE_SCOPE_LIST_WIDTH: f32 = 280.0; // Match the current scope rail width on comfortable layouts.
 pub(in crate::workspace) const PRIVILEGE_DETAIL_MIN_WIDTH: f32 = 320.0; // Wrap the detail pane before fixed controls crush its labels.
 pub(in crate::workspace) const PRIVILEGE_FORM_FIELD_MIN_WIDTH: f32 = 260.0; // Keep paired fields readable before the form wraps to one column.
+const PRIVILEGE_SCOPE_LIST_MAX_HEIGHT: f32 = 360.0;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(in crate::workspace) struct SettingsPrivilegeScopeRow {
@@ -221,6 +222,7 @@ impl WorkspaceApp {
     ) -> AnyElement {
         match section_index {
             0 => self.settings_privilege_credentials_card(cx),
+            1 => self.settings_totp_credentials_card(cx),
             _ => div().into_any_element(),
         }
     }
@@ -266,6 +268,7 @@ impl WorkspaceApp {
             .connection_store
             .list_privilege_credentials(&active_scope.id)
             .unwrap_or_default();
+        let scope_scroll = self.selectable_text_scroll_handle("settings-privilege-scopes-scroll");
 
         let mut scope_list = div().flex().flex_col().gap(px(2.0));
         for scope in scopes {
@@ -372,7 +375,23 @@ impl WorkspaceApp {
                             .text_color(rgb(theme.text))
                             .child(self.i18n.t("settings_view.privilege_credentials.scopes")),
                     )
-                    .child(scope_list),
+                    .child(
+                        div()
+                            .id("settings-privilege-scopes")
+                            .relative()
+                            .w_full()
+                            .max_h(px(PRIVILEGE_SCOPE_LIST_MAX_HEIGHT))
+                            .child(
+                                div()
+                                    .id("settings-privilege-scopes-scroll")
+                                    .w_full()
+                                    .max_h(px(PRIVILEGE_SCOPE_LIST_MAX_HEIGHT))
+                                    .selectable_overflow_y_scroll(&scope_scroll)
+                                    .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                                    .child(scope_list),
+                            )
+                            .vertical_scrollbar(&scope_scroll),
+                    ),
             )
             .child(
                 div()
@@ -897,7 +916,25 @@ impl WorkspaceApp {
     pub(in crate::workspace) fn settings_privilege_scope_rows(
         &self,
     ) -> Vec<SettingsPrivilegeScopeRow> {
-        let mut rows = vec![self.settings_local_privilege_scope_row()];
+        let mut rows = vec![
+            self.settings_local_privilege_scope_row(),
+            SettingsPrivilegeScopeRow {
+                id: SSH_COMMON_PRIVILEGE_SCOPE_ID.to_string(),
+                title: self
+                    .i18n
+                    .t("settings_view.privilege_credentials.ssh_common_scope"),
+                subtitle: self
+                    .i18n
+                    .t("settings_view.privilege_credentials.ssh_common_scope_hint"),
+                username_placeholder: String::new(),
+                credential_count: self
+                    .connection_store
+                    .list_privilege_credentials(SSH_COMMON_PRIVILEGE_SCOPE_ID)
+                    .map(|credentials| credentials.len())
+                    .unwrap_or(0),
+                local: false,
+            },
+        ];
         // Saved SSH connections already own privilege credential metadata in the
         // connection store. Expose those explicit scopes instead of letting the
         // terminal helper infer remote secrets from host/title/runtime matches.

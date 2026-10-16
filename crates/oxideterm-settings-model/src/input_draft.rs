@@ -45,6 +45,11 @@ pub fn persisted_settings_input_value(
         SettingsInput::TerminalFontSize => settings.terminal.font_size.to_string(),
         SettingsInput::TerminalFontWeight => settings.terminal.font_weight.to_string(),
         SettingsInput::TerminalScrollback => settings.terminal.scrollback.to_string(),
+        SettingsInput::CommandHistoryRetention => settings
+            .terminal
+            .autosuggest
+            .history_retention_days
+            .to_string(),
         SettingsInput::TerminalLineHeight => compact_decimal(settings.terminal.line_height),
         SettingsInput::TerminalPaddingHorizontal => {
             settings.terminal.padding_horizontal.to_string()
@@ -68,6 +73,36 @@ pub fn persisted_settings_input_value(
             .map(compact_decimal)
             .unwrap_or_default(),
         SettingsInput::AppearanceUiFont => settings.appearance.ui_font_family.clone(),
+        SettingsInput::BackgroundMaxWidth => settings
+            .terminal
+            .background_max_width
+            .map(|n| n.to_string())
+            .unwrap_or_default(),
+        SettingsInput::BackgroundMaxHeight => settings
+            .terminal
+            .background_max_height
+            .map(|n| n.to_string())
+            .unwrap_or_default(),
+        SettingsInput::BackgroundMaxFps => settings
+            .terminal
+            .background_max_fps
+            .map(|n| n.to_string())
+            .unwrap_or_default(),
+        SettingsInput::BackgroundEffectColor(index) => settings
+            .terminal
+            .background_effect
+            .as_ref()
+            .and_then(|effect| effect.colors)
+            .and_then(|colors| colors.get(index).copied())
+            .map(|color| format!("#{color:06x}"))
+            .unwrap_or_default(),
+        SettingsInput::BackgroundEffectMaxFps => settings
+            .terminal
+            .background_effect
+            .as_ref()
+            .and_then(|effect| effect.max_fps)
+            .map(|value| value.to_string())
+            .unwrap_or_default(),
         SettingsInput::LocalDefaultCwd => settings
             .local_terminal
             .default_cwd
@@ -333,8 +368,68 @@ pub fn apply_persisted_settings_input_draft(
     draft: &str,
 ) -> SettingsInputDraftApply {
     match input {
+        SettingsInput::BackgroundEffectColor(index) => {
+            if index >= 2 {
+                return SettingsInputDraftApply::Invalid;
+            }
+            let color = if draft.trim().is_empty() {
+                None
+            } else {
+                let Some(color) = crate::parse_rgb24_hex(draft) else {
+                    return SettingsInputDraftApply::Invalid;
+                };
+                Some(color)
+            };
+            let effect = settings
+                .terminal
+                .background_effect
+                .get_or_insert_with(Default::default);
+            if let Some(color) = color {
+                let colors = effect.colors.get_or_insert([0x6fa8dc, 0x75c9bb]);
+                colors[index] = color;
+            } else {
+                effect.colors = None;
+            }
+            SettingsInputDraftApply::Applied
+        }
         SettingsInput::TerminalCustomFontFamily => {
             settings.terminal.custom_font_family = draft.trim().to_string();
+            SettingsInputDraftApply::Applied
+        }
+        SettingsInput::BackgroundMaxWidth
+        | SettingsInput::BackgroundMaxHeight
+        | SettingsInput::BackgroundMaxFps
+        | SettingsInput::BackgroundEffectMaxFps => {
+            let max = match input {
+                SettingsInput::BackgroundMaxFps => 240,
+                SettingsInput::BackgroundEffectMaxFps => 30,
+                _ => 8192,
+            };
+            let value = if draft.trim().is_empty() {
+                None
+            } else {
+                let Ok(value) = draft.trim().parse::<u32>() else {
+                    return SettingsInputDraftApply::Invalid;
+                };
+                if !(1..=max).contains(&value) {
+                    return SettingsInputDraftApply::Invalid;
+                }
+                Some(value)
+            };
+            match input {
+                SettingsInput::BackgroundMaxWidth => settings.terminal.background_max_width = value,
+                SettingsInput::BackgroundMaxHeight => {
+                    settings.terminal.background_max_height = value
+                }
+                SettingsInput::BackgroundEffectMaxFps => {
+                    settings
+                        .terminal
+                        .background_effect
+                        .get_or_insert_with(Default::default)
+                        .max_fps = value;
+                }
+                _ => settings.terminal.background_max_fps = value,
+            }
             SettingsInputDraftApply::Applied
         }
         SettingsInput::TerminalCjkFontFamily => {
@@ -352,6 +447,12 @@ pub fn apply_persisted_settings_input_draft(
             .into(),
         SettingsInput::TerminalScrollback => parse_i64(draft)
             .map(|value| settings.terminal.scrollback = value.clamp(500, 20_000))
+            .into(),
+        SettingsInput::CommandHistoryRetention => parse_i64(draft)
+            .map(|value| {
+                settings.terminal.autosuggest.history_retention_days =
+                    value.clamp(0, u32::MAX as i64) as u32
+            })
             .into(),
         SettingsInput::TerminalLineHeight => parse_f64(draft)
             .map(|value| settings.terminal.line_height = value.clamp(0.8, 2.0))
@@ -992,7 +1093,7 @@ mod tests {
     }
 
     #[test]
-    fn persisted_number_drafts_clamp_in_model_layer() {
+    fn persisted_number_drafts_clamp_valid_values_and_reject_invalid_text() {
         let mut settings = PersistedSettings::default();
 
         assert_eq!(
@@ -1025,6 +1126,46 @@ mod tests {
             SettingsInputDraftApply::Applied
         );
         assert_eq!(settings.terminal.scrollback, 20_000);
+        let original_port = settings.connection_defaults.port;
+        assert_eq!(
+            apply_persisted_settings_input_draft(
+                &mut settings,
+                SettingsInput::ConnectionDefaultPort,
+                "not-a-port",
+            ),
+            SettingsInputDraftApply::Invalid
+        );
+        assert_eq!(settings.connection_defaults.port, original_port);
+
+        settings.terminal.background_max_fps = Some(60);
+        for (draft, result, expected) in [
+            ("24", SettingsInputDraftApply::Applied, Some(24)),
+            ("31", SettingsInputDraftApply::Invalid, Some(24)),
+            ("", SettingsInputDraftApply::Applied, None),
+        ] {
+            assert_eq!(
+                apply_persisted_settings_input_draft(
+                    &mut settings,
+                    SettingsInput::BackgroundEffectMaxFps,
+                    draft,
+                ),
+                result
+            );
+            assert_eq!(
+                settings
+                    .terminal
+                    .background_effect
+                    .as_ref()
+                    .unwrap()
+                    .max_fps,
+                expected
+            );
+            assert_eq!(
+                settings.terminal.background_max_fps,
+                Some(60),
+                "effect limits must leave video playback limits unchanged"
+            );
+        }
     }
 
     #[test]
@@ -1096,23 +1237,6 @@ mod tests {
             settings.terminal.command_bar.focus_handoff_commands,
             ["codex", "vim", "custom-new"]
         );
-    }
-
-    #[test]
-    fn invalid_persisted_number_draft_is_reported_without_mutation() {
-        let mut settings = PersistedSettings::default();
-        let original = settings.connection_defaults.port;
-
-        assert_eq!(
-            apply_persisted_settings_input_draft(
-                &mut settings,
-                SettingsInput::ConnectionDefaultPort,
-                "not-a-port",
-            ),
-            SettingsInputDraftApply::Invalid
-        );
-
-        assert_eq!(settings.connection_defaults.port, original);
     }
 
     #[test]

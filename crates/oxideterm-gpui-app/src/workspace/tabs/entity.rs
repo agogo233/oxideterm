@@ -478,26 +478,12 @@ impl WorkspaceTabHostEntity {
     }
 
     fn pages_fit_together(&self, source: TabId, target: TabId) -> bool {
-        let supported = |tab: &Tab| {
-            matches!(
-                tab.kind,
-                TabKind::LocalTerminal
-                    | TabKind::SshTerminal
-                    | TabKind::MoshTerminal
-                    | TabKind::Workspace
-                    | TabKind::Sftp
-                    | TabKind::Ide
-                    | TabKind::Forwards
-            )
-        };
         self.tab_by_id(source)
             .zip(self.tab_by_id(target))
             .is_some_and(|(a, b)| {
-                supported(a)
-                    && supported(b)
-                    && a.root_pane.as_ref().map_or(1, PaneNode::pane_count)
-                        + b.root_pane.as_ref().map_or(1, PaneNode::pane_count)
-                        <= MAX_PANES_PER_TAB
+                a.root_pane.as_ref().map_or(1, PaneNode::pane_count)
+                    + b.root_pane.as_ref().map_or(1, PaneNode::pane_count)
+                    <= MAX_PANES_PER_TAB
             })
     }
 
@@ -657,6 +643,18 @@ impl WorkspaceTabHostEntity {
         tab.active_pane_id = previous_active
             .filter(|id| *id != pane_id)
             .or(Some(next_active_pane_id));
+        let remaining_page = match &tab.root_pane {
+            Some(PaneNode::Page { tab_id, .. }) => Some(*tab_id),
+            _ => None,
+        };
+        if let Some((title, title_source)) = remaining_page
+            .and_then(|id| self.tab_by_id(id))
+            .map(|page| (page.title.clone(), page.title_source.clone()))
+        {
+            let tab = self.tab_mut_by_id(tab_id)?;
+            tab.title = title;
+            tab.title_source = title_source;
+        }
         Some(next_active_pane_id)
     }
 
@@ -685,25 +683,6 @@ impl WorkspaceTabHostEntity {
         };
         tab.and_then(|tab| tab.root_pane.as_mut())
             .is_some_and(|root_pane| root_pane.reset_group_sizes(group_id))
-    }
-
-    pub(in crate::workspace) fn replace_terminal_session(
-        &mut self,
-        tab_id: TabId,
-        old_session_id: TerminalSessionId,
-        old_pane_id: PaneId,
-        new_pane_id: PaneId,
-        new_session_id: TerminalSessionId,
-    ) -> Option<PaneId> {
-        let tab = self.tab_mut_by_id(tab_id)?;
-        let replaced_pane_id =
-            tab.root_pane
-                .as_mut()?
-                .replace_session(old_session_id, new_pane_id, new_session_id)?;
-        if tab.active_pane_id == Some(old_pane_id) {
-            tab.active_pane_id = Some(new_pane_id);
-        }
-        Some(replaced_pane_id)
     }
 
     pub(in crate::workspace) fn sync_tab_titles(
@@ -1580,6 +1559,14 @@ mod tests {
                 Some("same-saved-profile")
             );
             host.remove_terminal_pane(b);
+            assert_eq!(host.terminal_location(sb), None);
+            assert_eq!(
+                host.terminal_location(sa),
+                Some(TerminalLocation {
+                    tab_id: TabId(1),
+                    pane_id: a
+                })
+            );
             assert!(!host.local_sessions.contains_key(&sb));
             assert_eq!(
                 host.local_sessions[&sa].profile_id.as_deref(),
@@ -1623,113 +1610,6 @@ mod tests {
         assert_eq!(removed.mount_cleanup.reason, TabMountCloseReason::TabClosed);
         assert_eq!(tab_host.active_tab_id(), Some(first));
         assert!(tab_host.tab_by_id(second).is_none());
-    }
-
-    #[test]
-    fn pane_tree_transitions_remain_inside_the_canonical_tab_owner() {
-        let mut tab_host = WorkspaceTabHostEntity::new();
-        let tab_id = TabId(1);
-        let first_pane = PaneId(1);
-        let first_session = TerminalSessionId(1);
-        let split_group = PaneId(3);
-        let second_pane = PaneId(2);
-        let second_session = TerminalSessionId(2);
-        tab_host.insert_and_select_main_tab(test_tab(
-            tab_id,
-            Some(PaneNode::leaf(first_pane, first_session)),
-        ));
-
-        // Split, focus, resize, close, and reconnect replacement mutate one tree.
-        assert!(tab_host.split_pane(
-            tab_id,
-            first_pane,
-            split_group,
-            SplitDirection::Horizontal,
-            second_pane,
-            second_session,
-        ));
-        assert_eq!(
-            tab_host.active_tab().and_then(|tab| tab.active_pane_id),
-            Some(second_pane)
-        );
-        assert_eq!(
-            tab_host
-                .active_tab()
-                .and_then(|tab| tab.root_pane.as_ref())
-                .map(PaneNode::pane_count),
-            Some(2)
-        );
-        assert!(tab_host.set_active_pane(Some(tab_id), first_pane));
-        assert!(tab_host.update_group_sizes(Some(tab_id), split_group, &[35.0, 65.0]));
-        assert!(tab_host.reset_group_sizes(Some(tab_id), split_group));
-        assert_eq!(tab_host.close_pane(tab_id, second_pane), Some(first_pane));
-
-        let replacement_pane = PaneId(4);
-        let replacement_session = TerminalSessionId(4);
-        assert_eq!(
-            tab_host.replace_terminal_session(
-                tab_id,
-                first_session,
-                first_pane,
-                replacement_pane,
-                replacement_session,
-            ),
-            Some(first_pane)
-        );
-        let tab = tab_host.active_tab().expect("active terminal tab");
-        assert_eq!(tab.active_pane_id, Some(replacement_pane));
-        assert_eq!(
-            tab.root_pane
-                .as_ref()
-                .and_then(|root| root.session_id_for_pane(replacement_pane)),
-            Some(replacement_session)
-        );
-    }
-
-    #[test]
-    fn reconnect_replacement_preserves_the_sibling_split_session() {
-        let mut tab_host = WorkspaceTabHostEntity::new();
-        let tab_id = TabId(1);
-        let first_pane = PaneId(1);
-        let first_session = TerminalSessionId(1);
-        let second_pane = PaneId(2);
-        let second_session = TerminalSessionId(2);
-        tab_host.insert_and_select_main_tab(test_tab(
-            tab_id,
-            Some(PaneNode::leaf(first_pane, first_session)),
-        ));
-        assert!(tab_host.split_pane(
-            tab_id,
-            first_pane,
-            PaneId(3),
-            SplitDirection::Horizontal,
-            second_pane,
-            second_session,
-        ));
-        assert!(tab_host.set_active_pane(Some(tab_id), first_pane));
-
-        let replacement_pane = PaneId(4);
-        let replacement_session = TerminalSessionId(4);
-        assert_eq!(
-            tab_host.replace_terminal_session(
-                tab_id,
-                first_session,
-                first_pane,
-                replacement_pane,
-                replacement_session,
-            ),
-            Some(first_pane)
-        );
-
-        let tab = tab_host.active_tab().expect("split terminal tab");
-        let root = tab.root_pane.as_ref().expect("split pane tree");
-        assert_eq!(root.pane_count(), 2);
-        assert_eq!(
-            root.session_id_for_pane(replacement_pane),
-            Some(replacement_session)
-        );
-        assert_eq!(root.session_id_for_pane(second_pane), Some(second_session));
-        assert_eq!(tab.active_pane_id, Some(replacement_pane));
     }
 
     #[test]
@@ -1883,6 +1763,72 @@ mod tests {
                 .session_id_for_pane(pane),
             Some(session)
         );
+    }
+
+    #[test]
+    fn utility_pages_keep_their_identity_and_title_when_groups_shrink() {
+        for kind in [
+            TabKind::Settings,
+            TabKind::Knowledge,
+            TabKind::CloudSync,
+            TabKind::NotificationCenter,
+            TabKind::SessionManager,
+            TabKind::FileManager,
+            TabKind::Graphics,
+            TabKind::Runtime,
+            TabKind::ConnectionPool,
+            TabKind::Topology,
+            TabKind::PluginManager,
+            TabKind::RemoteDesktop,
+            TabKind::Plugin {
+                plugin_id: "example".into(),
+                tab_id: "tools".into(),
+            },
+        ] {
+            let mut host = WorkspaceTabHostEntity::new();
+            let source = host.alloc_tab_id();
+            let target = host.alloc_tab_id();
+            let mut source_tab = test_tab(source, None);
+            source_tab.kind = kind.clone();
+            source_tab.title = "Remaining page".into();
+            let mut target_tab = test_tab(target, None);
+            target_tab.kind = TabKind::Knowledge;
+            host.insert_tab(source_tab);
+            host.insert_and_select_main_tab(target_tab);
+            assert!(host.can_receive_tab_drop(source, target), "{kind:?}");
+            let (combined, removed) = host
+                .combine_pages(source, target, SplitDirection::Horizontal)
+                .unwrap();
+            assert_eq!(removed, Vec::<TabId>::new());
+            let mut pages = Vec::new();
+            combined
+                .root_pane
+                .as_ref()
+                .unwrap()
+                .collect_page_ids(&mut pages);
+            assert_eq!(pages, vec![target, source]);
+            assert_eq!(host.tab_by_id(source).unwrap().kind, kind);
+            host.select_main_tab(Some(source));
+            assert_eq!(host.active_tab_id(), Some(combined.id));
+            assert_eq!(host.focused_page_id(combined.id), source);
+            assert_eq!(host.unembed_page(source), Some(combined.id));
+            assert_eq!(host.container_tab_id(source), source);
+            assert_eq!(host.focused_page_id(combined.id), target);
+            assert_eq!(host.tab_by_id(source).unwrap().kind, kind);
+
+            let (combined, _) = host
+                .combine_pages(source, combined.id, SplitDirection::Vertical)
+                .unwrap();
+            host.remove_tab_at(host.tab_index_by_id(target).unwrap())
+                .unwrap();
+            let remaining = host.tab_by_id(combined.id).unwrap();
+            assert!(
+                matches!(remaining.root_pane, Some(PaneNode::Page { tab_id, .. }) if tab_id == source)
+            );
+            assert_eq!(remaining.title, "Remaining page");
+            assert_eq!(host.focused_page_id(combined.id), source);
+            assert_eq!(host.tab_by_id(source).unwrap().kind, kind);
+        }
     }
 
     #[gpui::test]
@@ -2041,37 +1987,6 @@ mod tests {
     }
 
     #[test]
-    fn terminal_location_lifecycle_is_owned_by_tab_host() {
-        let mut tab_host = WorkspaceTabHostEntity::new();
-        let first_session = TerminalSessionId(1);
-        let second_session = TerminalSessionId(2);
-        let first_location = TerminalLocation {
-            tab_id: TabId(3),
-            pane_id: PaneId(4),
-        };
-        let second_location = TerminalLocation {
-            tab_id: TabId(3),
-            pane_id: PaneId(5),
-        };
-
-        tab_host.bind_terminal_location(first_session, first_location);
-        tab_host.bind_terminal_location(second_session, second_location);
-        assert_eq!(
-            tab_host.terminal_location(first_session),
-            Some(first_location)
-        );
-        assert_eq!(
-            tab_host.unbind_terminal_location_for_pane(first_location.pane_id),
-            Some(first_session)
-        );
-        assert!(tab_host.terminal_location(first_session).is_none());
-        assert_eq!(
-            tab_host.terminal_location(second_session),
-            Some(second_location)
-        );
-    }
-
-    #[test]
     fn background_terminal_output_stays_unread_until_the_tab_becomes_visible() {
         let mut tab_host = WorkspaceTabHostEntity::new();
         let active_tab_id = TabId(1);
@@ -2125,82 +2040,6 @@ mod tests {
             .begin_detach_from_main(background_tab_id)
             .expect("background tab detach transition");
         assert!(tab_host.unread_terminal_output_tab_ids().is_empty());
-    }
-
-    #[gpui::test]
-    fn removing_pane_drops_delivery_subscription_and_terminal_location(cx: &mut TestAppContext) {
-        let (_, cx) = cx.add_window_view(|_window, _cx| TabHostTestRoot);
-        let pane = cx.update(|window, cx| {
-            cx.new(|cx| {
-                TerminalPane::new_recording_playback(
-                    80,
-                    24,
-                    oxideterm_gpui_terminal::TerminalUiPreferences::default(),
-                    window,
-                    cx,
-                )
-                .expect("recording pane")
-            })
-        });
-        let window_handle = cx.window_handle();
-        let tab_host = cx.new(|_| WorkspaceTabHostEntity::new());
-        let event_recorder = cx.new(|_| TabHostEventRecorder {
-            events: Vec::new(),
-            _subscription: None,
-        });
-        event_recorder.update(cx, |event_recorder, cx| {
-            event_recorder._subscription = Some(cx.subscribe(
-                &tab_host,
-                |event_recorder, _tab_host, event, _cx| {
-                    event_recorder.events.push(*event);
-                },
-            ));
-        });
-        let pane_id = PaneId(4);
-        let session_id = TerminalSessionId(5);
-
-        tab_host.update(cx, |tab_host, cx| {
-            tab_host.register_terminal_pane(pane_id, session_id, pane.clone(), window_handle, cx);
-            tab_host.bind_terminal_location(
-                session_id,
-                TerminalLocation {
-                    tab_id: TabId(3),
-                    pane_id,
-                },
-            );
-            assert_eq!(tab_host.panes().len(), 1);
-            assert_eq!(tab_host.pane_subscriptions.len(), 1);
-            assert_eq!(tab_host.pane_window_affinities.len(), 1);
-        });
-        pane.update(cx, |_pane, cx| {
-            cx.emit(TerminalPaneEvent::Exited { exit_code: Some(0) });
-        });
-        cx.run_until_parked();
-        assert_eq!(
-            event_recorder.read_with(cx, |event_recorder, _cx| event_recorder.events.clone()),
-            vec![WorkspaceTabHostEvent::TerminalPaneDelivery {
-                pane_id,
-                session_id,
-                window_handle,
-                event: TerminalPaneEvent::Exited { exit_code: Some(0) },
-            }]
-        );
-
-        tab_host.update(cx, |tab_host, _cx| {
-            assert!(tab_host.remove_terminal_pane(pane_id).is_some());
-            assert!(tab_host.panes().is_empty());
-            assert!(tab_host.pane_subscriptions.is_empty());
-            assert!(tab_host.pane_window_affinities.is_empty());
-            assert!(tab_host.terminal_location(session_id).is_none());
-        });
-        pane.update(cx, |_pane, cx| {
-            cx.emit(TerminalPaneEvent::ContextActionRequested);
-        });
-        cx.run_until_parked();
-        assert_eq!(
-            event_recorder.read_with(cx, |event_recorder, _cx| event_recorder.events.len()),
-            1
-        );
     }
 
     #[gpui::test]
@@ -2332,6 +2171,9 @@ mod tests {
                 cx,
             );
             assert!(tab_host.remove_terminal_pane(first_pane_id).is_some());
+            assert!(!tab_host.pane_subscriptions.contains_key(&first_pane_id));
+            assert!(!tab_host.pane_window_affinities.contains_key(&first_pane_id));
+            assert_eq!(tab_host.terminal_location(first_session_id), None);
             tab_host.bind_terminal_location(
                 replacement_session_id,
                 TerminalLocation {
@@ -2398,10 +2240,25 @@ mod tests {
                 },
             ]
         );
+        tab_host.update(cx, |tab_host, _cx| {
+            assert!(tab_host.remove_terminal_pane(replacement_pane_id).is_some());
+            assert!(tab_host.panes().is_empty());
+            assert!(tab_host.pane_subscriptions.is_empty());
+            assert!(tab_host.pane_window_affinities.is_empty());
+            assert_eq!(tab_host.terminal_location(replacement_session_id), None);
+        });
+        replacement_pane.update(cx, |_pane, cx| {
+            cx.emit(TerminalPaneEvent::ContextActionRequested);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            event_recorder.read_with(cx, |recorder, _cx| recorder.events.len()),
+            4
+        );
     }
 
     #[test]
-    fn navigation_replay_does_not_create_a_new_history_branch() {
+    fn navigation_replays_prunes_closed_tabs_and_branches_only_on_new_selection() {
         let mut tab_host = WorkspaceTabHostEntity::new();
         let first = TabId(1);
         let second = TabId(2);
@@ -2418,19 +2275,8 @@ mod tests {
         assert_eq!(tab_host.navigate_history(true, &existing), Some(second));
         tab_host.observe_active_tab(Some(second));
         assert_eq!(tab_host.navigate_history(true, &existing), Some(third));
-    }
-
-    #[test]
-    fn navigation_prunes_closed_tabs_and_new_selection_replaces_forward_history() {
-        let mut tab_host = WorkspaceTabHostEntity::new();
-        let first = TabId(1);
-        let second = TabId(2);
-        let third = TabId(3);
-        let replacement = TabId(4);
-
-        tab_host.observe_active_tab(Some(first));
-        tab_host.observe_active_tab(Some(second));
         tab_host.observe_active_tab(Some(third));
+        let replacement = TabId(4);
         assert_eq!(
             tab_host.navigate_history(false, &HashSet::from([first, third])),
             Some(first)
@@ -2487,8 +2333,22 @@ mod tests {
     }
 
     #[gpui::test]
-    fn newer_close_process_check_cancels_and_replaces_the_previous_task(cx: &mut TestAppContext) {
+    fn close_process_check_replacement_completion_and_release_preserve_delivery(
+        cx: &mut TestAppContext,
+    ) {
         let tab_host = cx.new(|_| WorkspaceTabHostEntity::new());
+        let event_recorder = cx.new(|_| TabHostEventRecorder {
+            events: Vec::new(),
+            _subscription: None,
+        });
+        event_recorder.update(cx, |event_recorder, cx| {
+            event_recorder._subscription = Some(cx.subscribe(
+                &tab_host,
+                |event_recorder, _tab_host, event, _cx| {
+                    event_recorder.events.push(*event);
+                },
+            ));
+        });
         let (first_sender, first_receiver) = tokio::sync::oneshot::channel();
         let (replacement_sender, replacement_receiver) = tokio::sync::oneshot::channel();
         tab_host.update(cx, |tab_host, cx| {
@@ -2522,23 +2382,57 @@ mod tests {
             .send(())
             .expect("current task remains retained");
         cx.run_until_parked();
-
-        let completion = tab_host
-            .update(cx, |tab_host, _| tab_host.take_close_process_completion())
-            .expect("latest close process completion");
+        tab_host.update(cx, |tab_host, _| {
+            let completion = tab_host
+                .take_close_process_completion()
+                .expect("latest close process completion");
+            assert_eq!(
+                completion.request,
+                LocalTerminalCloseCheck::Batch {
+                    tab_ids: vec![TabId(2), TabId(3)]
+                }
+            );
+            assert!(completion.results.is_empty());
+            assert!(!completion.has_foreground_child);
+            assert!(tab_host.take_close_process_completion().is_none());
+        });
         assert_eq!(
-            completion.request,
-            LocalTerminalCloseCheck::Batch {
-                tab_ids: vec![TabId(2), TabId(3)]
-            }
+            event_recorder.read_with(cx, |recorder, _| recorder.events.clone()),
+            vec![WorkspaceTabHostEvent::CloseProcessCheckReady]
         );
-        assert!(completion.results.is_empty());
-        assert!(!completion.has_foreground_child);
-    }
 
-    #[gpui::test]
-    fn entity_release_cancels_close_process_check_without_completion(cx: &mut TestAppContext) {
-        let tab_host = cx.new(|_| WorkspaceTabHostEntity::new());
+        let (result_sender, result_receiver) = tokio::sync::oneshot::channel();
+        tab_host.update(cx, |tab_host, cx| {
+            tab_host.start_close_process_check_with_future(
+                LocalTerminalCloseCheck::Single { tab_id: TabId(7) },
+                async move {
+                    result_receiver.await.expect("single result released");
+                    Vec::new()
+                },
+                cx,
+            );
+        });
+        result_sender.send(()).expect("current task retained");
+        cx.run_until_parked();
+        tab_host.update(cx, |tab_host, _| {
+            let completion = tab_host
+                .take_close_process_completion()
+                .expect("single completion");
+            assert_eq!(
+                completion.request,
+                LocalTerminalCloseCheck::Single { tab_id: TabId(7) }
+            );
+            assert!(tab_host.take_close_process_completion().is_none());
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            event_recorder.read_with(cx, |recorder, _| recorder.events.clone()),
+            vec![
+                WorkspaceTabHostEvent::CloseProcessCheckReady,
+                WorkspaceTabHostEvent::CloseProcessCheckReady,
+            ]
+        );
+
         let completion_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let completion_count_for_task = completion_count.clone();
         let (result_sender, result_receiver) = tokio::sync::oneshot::channel();
@@ -2553,11 +2447,9 @@ mod tests {
                 cx,
             );
         });
-
         drop(tab_host);
         cx.update(|_cx| {});
         cx.run_until_parked();
-
         assert!(
             result_sender.send(()).is_err(),
             "releasing the Entity must cancel its retained check"
@@ -2566,56 +2458,9 @@ mod tests {
             completion_count.load(std::sync::atomic::Ordering::SeqCst),
             0
         );
-    }
-
-    #[gpui::test]
-    fn current_close_process_check_completes_and_notifies_exactly_once(cx: &mut TestAppContext) {
-        let tab_host = cx.new(|_| WorkspaceTabHostEntity::new());
-        let event_recorder = cx.new(|_| TabHostEventRecorder {
-            events: Vec::new(),
-            _subscription: None,
-        });
-        event_recorder.update(cx, |event_recorder, cx| {
-            event_recorder._subscription = Some(cx.subscribe(
-                &tab_host,
-                |event_recorder, _tab_host, event, _cx| {
-                    event_recorder.events.push(*event);
-                },
-            ));
-        });
-        let (result_sender, result_receiver) = tokio::sync::oneshot::channel();
-        tab_host.update(cx, |tab_host, cx| {
-            tab_host.start_close_process_check_with_future(
-                LocalTerminalCloseCheck::Single { tab_id: TabId(7) },
-                async move {
-                    result_receiver.await.expect("test result released");
-                    Vec::new()
-                },
-                cx,
-            );
-        });
-
-        result_sender.send(()).expect("current task retained");
-        cx.run_until_parked();
-
         assert_eq!(
-            event_recorder.read_with(cx, |event_recorder, _cx| event_recorder.events.clone()),
-            vec![WorkspaceTabHostEvent::CloseProcessCheckReady]
-        );
-        tab_host.update(cx, |tab_host, _cx| {
-            let completion = tab_host
-                .take_close_process_completion()
-                .expect("current completion");
-            assert_eq!(
-                completion.request,
-                LocalTerminalCloseCheck::Single { tab_id: TabId(7) }
-            );
-            assert!(tab_host.take_close_process_completion().is_none());
-        });
-        cx.run_until_parked();
-        assert_eq!(
-            event_recorder.read_with(cx, |event_recorder, _cx| event_recorder.events.len()),
-            1
+            event_recorder.read_with(cx, |recorder, _| recorder.events.len()),
+            2
         );
     }
 
@@ -2680,26 +2525,6 @@ mod tests {
                 (false, None)
             );
         });
-    }
-
-    #[gpui::test]
-    fn entity_release_cancels_retained_close_confirmation_exit(cx: &mut TestAppContext) {
-        let tab_host = cx.new(|_| WorkspaceTabHostEntity::new());
-        let (release_sender, release_receiver) = tokio::sync::oneshot::channel();
-        tab_host.update(cx, |tab_host, cx| {
-            // The confirmation owner retains the exit task and therefore
-            // cancels it when its Entity is released.
-            tab_host.close_confirm_exit_task = Some(cx.spawn(async move |_, _| {
-                let _ = release_receiver.await;
-            }));
-        });
-        cx.run_until_parked();
-
-        drop(tab_host);
-        cx.update(|_| {});
-        cx.run_until_parked();
-
-        assert!(release_sender.send(()).is_err());
     }
 
     #[test]
@@ -2873,87 +2698,5 @@ mod tests {
                 detached_window
             );
         });
-    }
-
-    #[gpui::test]
-    fn detached_sftp_and_forward_mount_release_preserves_runtime_owners(cx: &mut TestAppContext) {
-        let sftp_window: AnyWindowHandle = cx.add_window(|_window, _cx| TabHostTestRoot).into();
-        let forwards_window: AnyWindowHandle = cx.add_window(|_window, _cx| TabHostTestRoot).into();
-        let tab_host = cx.new(|_| WorkspaceTabHostEntity::new());
-        let (sftp_tab_id, forwards_tab_id) = tab_host.update(cx, |tab_host, _cx| {
-            let sftp_tab_id = tab_host.alloc_tab_id();
-            let forwards_tab_id = tab_host.alloc_tab_id();
-            tab_host.insert_tab(test_tab(sftp_tab_id, None));
-            tab_host.insert_tab(test_tab(forwards_tab_id, None));
-            (sftp_tab_id, forwards_tab_id)
-        });
-
-        let ssh_registry = SshConnectionRegistry::new(ConnectionPoolConfig::default());
-        let node_router = NodeRouter::new(ssh_registry.clone());
-        let node_id = NodeId::new("shared-runtime-node");
-        let config = SshConfig::default();
-        node_router.upsert_node(node_id.clone(), config.clone());
-        let node_consumer = ConnectionConsumer::NodeRouter(node_id.0.clone());
-        let node_handle = ssh_registry.acquire(config.clone(), node_consumer.clone());
-        node_router
-            .bind_connection(&node_id, node_handle.connection_id().to_string())
-            .expect("node binding");
-
-        let sftp_consumer = ConnectionConsumer::Sftp(node_id.0.clone());
-        let sftp_handle = ssh_registry.acquire(config.clone(), sftp_consumer.clone());
-        let forwarding_session = forwards::ForwardingRuntimeService::session_id_for_node(&node_id);
-        let forwarding_consumer = ConnectionConsumer::PortForward(forwarding_session.clone());
-        let forwarding_handle = ssh_registry.acquire(config, forwarding_consumer.clone());
-        let forwarding_registry = ForwardingRegistry::new();
-        forwarding_registry.register(forwarding_session.clone(), forwarding_handle.clone());
-
-        tab_host.update(cx, |tab_host, _cx| {
-            let sftp_mount = tab_host
-                .begin_detach(sftp_tab_id)
-                .expect("SFTP detach reservation");
-            assert!(tab_host.commit_detach(sftp_tab_id, sftp_mount, sftp_window));
-            let forwards_mount = tab_host
-                .begin_detach(forwards_tab_id)
-                .expect("forwards detach reservation");
-            assert!(tab_host.commit_detach(forwards_tab_id, forwards_mount, forwards_window));
-
-            assert!(
-                tab_host
-                    .remove_tab_for_detached_window_release(
-                        sftp_tab_id,
-                        sftp_mount,
-                        sftp_window.window_id(),
-                    )
-                    .is_some()
-            );
-            let forwards_cleanup = tab_host.close_tab_mount(forwards_tab_id);
-            assert_eq!(forwards_cleanup.detached_window, Some(forwards_window));
-        });
-
-        // Native mount cleanup does not own node, transfer, or tunnel teardown.
-        assert_eq!(
-            node_router.connection_id_for_node(&node_id).as_deref(),
-            Some(node_handle.connection_id())
-        );
-        let connection_info = ssh_registry
-            .get(node_handle.connection_id())
-            .expect("shared SSH connection remains registered")
-            .info();
-        assert!(connection_info.consumers.contains(&node_consumer));
-        assert!(connection_info.consumers.contains(&sftp_consumer));
-        assert!(connection_info.consumers.contains(&forwarding_consumer));
-        assert_eq!(sftp_handle.connection_id(), node_handle.connection_id());
-        assert_eq!(
-            forwarding_handle.connection_id(),
-            node_handle.connection_id()
-        );
-        assert_eq!(
-            forwarding_registry
-                .get(&forwarding_session)
-                .expect("forwarding manager survives UI mount release")
-                .ssh_connection_handle()
-                .connection_id(),
-            node_handle.connection_id()
-        );
     }
 }

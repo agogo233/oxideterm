@@ -22,7 +22,8 @@ use oxideterm_gpui_ui::{
 };
 use oxideterm_i18n::I18n;
 use oxideterm_quick_commands::{
-    QuickCommandRisk, QuickCommandTemplateError, classify_command_risk,
+    FALLBACK_QUICK_COMMAND_CATEGORY_ID, QuickCommandMatchField, QuickCommandRisk,
+    QuickCommandTargetContext, QuickCommandTemplateError, classify_command_risk,
     quick_command_category_draft_can_save, quick_command_has_runtime_substitutions,
     validate_quick_command_template,
 };
@@ -61,6 +62,36 @@ const QUICK_COMMANDS_MANAGER_WIDTH: f32 = 1120.0;
 const QUICK_COMMANDS_MANAGER_HEIGHT: f32 = 720.0;
 const QUICK_COMMANDS_MANAGER_COMMAND_LIST_WIDTH: f32 = 360.0;
 const QUICK_COMMAND_CATEGORY_PICKER_MAX_HEIGHT: f32 = 72.0;
+
+#[derive(Clone)]
+struct QuickCommandCategoryDrag {
+    id: String,
+    name: String,
+    position: gpui::Point<gpui::Pixels>,
+    tokens: oxideterm_theme::ThemeTokens,
+}
+
+impl gpui::Render for QuickCommandCategoryDrag {
+    fn render(&mut self, _: &mut gpui::Window, _: &mut Context<Self>) -> impl IntoElement {
+        let tokens = self.tokens;
+        div().pl(self.position.x).pt(self.position.y).child(
+            div()
+                .px_3()
+                .py_2()
+                .max_w(px(220.0))
+                .truncate()
+                .rounded(px(tokens.radii.md))
+                .border_1()
+                .border_color(rgb(tokens.ui.accent))
+                .bg(rgb(tokens.ui.bg_panel))
+                .text_color(rgb(tokens.ui.text))
+                .font_family(tokens.metrics.font_family)
+                .text_size(px(tokens.metrics.ui_text_sm))
+                .shadow(oxideterm_gpui_ui::theme_overlay_shadow(&tokens))
+                .child(self.name.clone()),
+        )
+    }
+}
 
 fn quick_command_icon_label_key(icon: QuickCommandIcon) -> String {
     format!(
@@ -374,24 +405,14 @@ pub(super) struct QuickCommandsRenderSnapshot {
 impl TerminalQuickCommandsState {
     fn visible_commands_for_targets(
         &self,
-        target_fields: &[String],
-        protocol: Option<QuickCommandTargetProtocol>,
+        target: Option<&QuickCommandTargetContext>,
     ) -> Vec<QuickCommand> {
-        self.store
-            .visible_commands_for_targets(target_fields)
-            .into_iter()
-            .filter(|command| {
-                command.availability.protocols.is_empty()
-                    || protocol
-                        .is_some_and(|protocol| command.availability.protocols.contains(&protocol))
-            })
-            .collect()
+        self.store.visible_commands_for_targets(target)
     }
 
     pub(in crate::workspace) fn quick_bar_snapshot(
         &self,
-        target_fields: &[String],
-        protocol: Option<QuickCommandTargetProtocol>,
+        target: Option<&QuickCommandTargetContext>,
     ) -> (Vec<QuickCommandCategory>, Vec<QuickCommand>) {
         // QuickBar is a read-only projection of the existing persisted store.
         // Preserve category and command order instead of creating a second model.
@@ -401,13 +422,17 @@ impl TerminalQuickCommandsState {
                 .commands
                 .iter()
                 .filter(|command| {
-                    oxideterm_quick_commands::match_quick_command_host_patterns(
-                        &command.availability.host_patterns,
-                        target_fields,
-                    ) && (command.availability.protocols.is_empty()
-                        || protocol.is_some_and(|protocol| {
-                            command.availability.protocols.contains(&protocol)
-                        }))
+                    target.map_or_else(
+                        || {
+                            command.availability.protocols.is_empty()
+                                && command.availability.host_patterns.is_empty()
+                        },
+                        |target| {
+                            oxideterm_quick_commands::quick_command_available_for_target(
+                                command, target,
+                            )
+                        },
+                    )
                 })
                 .cloned()
                 .collect(),
@@ -549,10 +574,7 @@ impl TerminalQuickCommandsState {
     }
 
     fn request_category_delete(&mut self, category: QuickCommandCategory) {
-        if default_quick_command_categories()
-            .iter()
-            .any(|default| default.id == category.id)
-        {
+        if category.id == FALLBACK_QUICK_COMMAND_CATEGORY_ID {
             return;
         }
         self.pending_category_delete = Some(QuickCommandCategoryDeletePrompt {
@@ -751,11 +773,10 @@ impl TerminalQuickCommandsState {
 
     fn move_highlight(
         &mut self,
-        target_fields: &[String],
-        protocol: Option<QuickCommandTargetProtocol>,
+        target: Option<&QuickCommandTargetContext>,
         direction: QuickCommandKeyDirection,
     ) {
-        let visible_commands = self.visible_commands_for_targets(target_fields, protocol);
+        let visible_commands = self.visible_commands_for_targets(target);
         self.store.highlighted_command = quick_command_keyboard_highlight(
             &visible_commands,
             self.store.highlighted_command.as_deref(),
@@ -763,13 +784,8 @@ impl TerminalQuickCommandsState {
         );
     }
 
-    fn highlight_edge(
-        &mut self,
-        target_fields: &[String],
-        protocol: Option<QuickCommandTargetProtocol>,
-        end: bool,
-    ) {
-        let visible_commands = self.visible_commands_for_targets(target_fields, protocol);
+    fn highlight_edge(&mut self, target: Option<&QuickCommandTargetContext>, end: bool) {
+        let visible_commands = self.visible_commands_for_targets(target);
         self.store.highlighted_command = if end {
             visible_commands.last().map(|command| command.id.clone())
         } else {
@@ -779,10 +795,9 @@ impl TerminalQuickCommandsState {
 
     fn prepare_highlighted_insertion(
         &mut self,
-        target_fields: &[String],
-        protocol: Option<QuickCommandTargetProtocol>,
+        target: Option<&QuickCommandTargetContext>,
     ) -> Option<String> {
-        let visible_commands = self.visible_commands_for_targets(target_fields, protocol);
+        let visible_commands = self.visible_commands_for_targets(target);
         let selected_index = quick_command_highlighted_index(
             &visible_commands,
             self.store.highlighted_command.as_deref(),
@@ -848,6 +863,7 @@ impl TerminalQuickCommandsState {
             category: self.store.active_category.clone(),
             description: String::new(),
             host_patterns: String::new(),
+            match_field: QuickCommandMatchField::Host,
             parameters: Vec::new(),
             protocols: Vec::new(),
             confirmation: QuickCommandConfirmationPolicy::Inherit,
@@ -875,6 +891,7 @@ impl TerminalQuickCommandsState {
             category: command.category,
             description: command.description.unwrap_or_default(),
             host_patterns: command.availability.host_patterns.join(", "),
+            match_field: command.availability.match_field,
             parameters: command
                 .parameters
                 .into_iter()
@@ -1069,13 +1086,12 @@ impl TerminalQuickCommandsState {
 
     fn render_snapshot(
         &self,
-        target_fields: &[String],
-        protocol: Option<QuickCommandTargetProtocol>,
+        target: Option<&QuickCommandTargetContext>,
     ) -> QuickCommandsRenderSnapshot {
         let visible_commands = Arc::new(if self.manager_open {
             self.store.visible_commands_for_management()
         } else {
-            self.visible_commands_for_targets(target_fields, protocol)
+            self.visible_commands_for_targets(target)
         });
         let mut category_counts = HashMap::new();
         for command in &self.store.commands {
@@ -1121,15 +1137,13 @@ impl WorkspaceApp {
         &self,
         cx: &mut Context<Self>,
     ) -> QuickCommandsRenderSnapshot {
-        let target_fields = self.terminal_command_context(cx).target_fields();
-        let protocol = self
+        let target = self
             .active_pane_id(cx)
-            .and_then(|pane_id| self.quick_command_context_for_pane(pane_id, cx))
-            .map(|context| context.protocol);
+            .and_then(|pane_id| self.quick_command_context_for_pane(pane_id, cx));
         self.terminal
             .read(cx)
             .quick_commands
-            .render_snapshot(&target_fields, protocol)
+            .render_snapshot(target.as_ref())
     }
 
     pub(in crate::workspace) fn blur_terminal_quick_commands_input(
@@ -1255,11 +1269,9 @@ impl WorkspaceApp {
         let Some(input) = self.terminal.read(cx).quick_commands.focused_input() else {
             return;
         };
-        let target_fields = self.terminal_command_context(cx).target_fields();
-        let protocol = self
+        let target = self
             .active_pane_id(cx)
-            .and_then(|pane_id| self.quick_command_context_for_pane(pane_id, cx))
-            .map(|context| context.protocol);
+            .and_then(|pane_id| self.quick_command_context_for_pane(pane_id, cx));
         let key = event.keystroke.key.as_str();
         let modifiers = event.keystroke.modifiers;
         if input == QuickCommandInput::Search {
@@ -1279,22 +1291,18 @@ impl WorkspaceApp {
                 }
                 "arrowdown" | "down" if !modifiers.platform && !modifiers.control => {
                     self.terminal.update(cx, |terminal, _cx| {
-                        terminal.quick_commands.move_highlight(
-                            &target_fields,
-                            protocol,
-                            QuickCommandKeyDirection::Next,
-                        )
+                        terminal
+                            .quick_commands
+                            .move_highlight(target.as_ref(), QuickCommandKeyDirection::Next)
                     });
                     cx.notify();
                     return;
                 }
                 "arrowup" | "up" if !modifiers.platform && !modifiers.control => {
                     self.terminal.update(cx, |terminal, _cx| {
-                        terminal.quick_commands.move_highlight(
-                            &target_fields,
-                            protocol,
-                            QuickCommandKeyDirection::Previous,
-                        )
+                        terminal
+                            .quick_commands
+                            .move_highlight(target.as_ref(), QuickCommandKeyDirection::Previous)
                     });
                     cx.notify();
                     return;
@@ -1303,7 +1311,7 @@ impl WorkspaceApp {
                     self.terminal.update(cx, |terminal, _cx| {
                         terminal
                             .quick_commands
-                            .highlight_edge(&target_fields, protocol, false)
+                            .highlight_edge(target.as_ref(), false)
                     });
                     cx.notify();
                     return;
@@ -1312,7 +1320,7 @@ impl WorkspaceApp {
                     self.terminal.update(cx, |terminal, _cx| {
                         terminal
                             .quick_commands
-                            .highlight_edge(&target_fields, protocol, true)
+                            .highlight_edge(target.as_ref(), true)
                     });
                     cx.notify();
                     return;
@@ -1321,7 +1329,7 @@ impl WorkspaceApp {
                     let command = self.terminal.update(cx, |terminal, _cx| {
                         terminal
                             .quick_commands
-                            .prepare_highlighted_insertion(&target_fields, protocol)
+                            .prepare_highlighted_insertion(target.as_ref())
                     });
                     if let Some(command) = command {
                         self.ensure_terminal_command_sender_visible(cx);
@@ -1529,10 +1537,18 @@ impl WorkspaceApp {
             .size_full()
             .child(manager_dialog)
             .when_some(snapshot.pending_category_delete.as_ref(), |root, prompt| {
+                let defaults = default_quick_command_categories();
+                let destination = snapshot
+                    .categories
+                    .iter()
+                    .chain(defaults.iter())
+                    .find(|category| category.id == FALLBACK_QUICK_COMMAND_CATEGORY_ID)
+                    .expect("default categories contain the fallback group");
                 let description = self
                     .i18n
                     .t("terminal.quick_commands.delete_group_description")
-                    .replace("{{name}}", &prompt.name);
+                    .replace("{{name}}", &prompt.name)
+                    .replace("{{destination}}", &destination.name);
                 root.child(confirm_dialog(
                     &self.tokens,
                     ConfirmDialogView {
@@ -1884,11 +1900,13 @@ impl WorkspaceApp {
                 .get(category.id.as_str())
                 .copied()
                 .unwrap_or_default();
-            let can_delete = !default_quick_command_categories()
-                .iter()
-                .any(|default| default.id == category.id);
+            let can_delete = category.id != FALLBACK_QUICK_COMMAND_CATEGORY_ID;
             category_list = category_list.child(
                 div()
+                    .id((
+                        gpui::ElementId::from("quick-command-category"),
+                        category_id.clone(),
+                    ))
                     .group("quick-command-category")
                     .cursor_pointer()
                     .rounded(px(self.tokens.radii.md))
@@ -1921,6 +1939,66 @@ impl WorkspaceApp {
                             }
                         }),
                     )
+                    .when(snapshot.managing, |row| {
+                        let target = category_id.clone();
+                        let drag = QuickCommandCategoryDrag {
+                            id: category_id.clone(),
+                            name: category.name.clone(),
+                            position: gpui::Point::default(),
+                            tokens: self.tokens,
+                        };
+                        row.drag_over::<QuickCommandCategoryDrag>(move |row, drag, _, _| {
+                            if drag.id != target {
+                                row.bg(rgba((theme.accent << 8) | 0x33))
+                            } else {
+                                row
+                            }
+                        })
+                        .on_drop(cx.listener({
+                            let target = category_id.clone();
+                            move |this, drag: &QuickCommandCategoryDrag, _, cx| {
+                                this.terminal.update(cx, |terminal, _| {
+                                    if terminal.quick_commands.manager_open() {
+                                        terminal
+                                            .quick_commands
+                                            .store
+                                            .move_category(&drag.id, &target);
+                                    }
+                                });
+                                cx.stop_propagation();
+                                cx.notify();
+                            }
+                        }))
+                        .child(
+                            div()
+                                .id((
+                                    gpui::ElementId::from("quick-command-category-drag"),
+                                    category_id.clone(),
+                                ))
+                                .size(px(20.0))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(self.tokens.radii.sm))
+                                .cursor(gpui::CursorStyle::OpenHand)
+                                .hover(move |handle| handle.bg(rgb(theme.bg_hover)))
+                                .child(div().w(px(6.0)).flex().flex_wrap().gap(px(2.0)).children(
+                                    (0..6).map(move |_| {
+                                        div()
+                                            .size(px(2.0))
+                                            .rounded(px(1.0))
+                                            .bg(rgb(theme.text_muted))
+                                    }),
+                                ))
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .on_drag(drag, |drag, position, _, cx| {
+                                    let mut preview = drag.clone();
+                                    preview.position = position;
+                                    cx.new(|_| preview)
+                                }),
+                        )
+                    })
                     .child(
                         div()
                             .flex_1()
@@ -2001,6 +2079,16 @@ impl WorkspaceApp {
         }
 
         sidebar
+            .when(snapshot.managing, |sidebar| {
+                sidebar.child(
+                    div()
+                        .px_2()
+                        .pb_2()
+                        .text_size(px(self.tokens.metrics.ui_text_xs))
+                        .text_color(rgb(theme.text_muted))
+                        .child(self.i18n.t("terminal.quick_commands.reorder_groups")),
+                )
+            })
             .child(
                 div()
                     .flex_1()
@@ -2610,7 +2698,11 @@ impl WorkspaceApp {
                             })
                             .when_some(
                                 (!command.availability.host_patterns.is_empty())
-                                    .then(|| command.availability.host_patterns.join(", ")),
+                                    .then(|| format!("{}: {}", self.i18n.t(match command.availability.match_field {
+                                        QuickCommandMatchField::Host => "terminal.quick_commands.match_host",
+                                        QuickCommandMatchField::ConnectionName => "terminal.quick_commands.match_connection",
+                                        QuickCommandMatchField::All => "terminal.quick_commands.match_all",
+                                    }), command.availability.host_patterns.join(", "))),
                                 |row, pattern| {
                                 row.child(
                                     status_pill(
@@ -2964,6 +3056,50 @@ impl WorkspaceApp {
                 }),
             );
         }
+        let mut match_fields = div().flex().items_center().gap(px(4.0)).flex_wrap();
+        for (field, label) in [
+            (
+                QuickCommandMatchField::Host,
+                "terminal.quick_commands.match_host",
+            ),
+            (
+                QuickCommandMatchField::ConnectionName,
+                "terminal.quick_commands.match_connection",
+            ),
+            (
+                QuickCommandMatchField::All,
+                "terminal.quick_commands.match_all",
+            ),
+        ] {
+            let active = draft.match_field == field;
+            match_fields = match_fields.child(
+                self.quick_command_text_button(
+                    self.i18n.t(label),
+                    true,
+                    cx.listener(move |this, _, _, cx| {
+                        this.terminal.update(cx, |terminal, _| {
+                            if let Some(draft) =
+                                terminal.quick_commands.store.command_editor.as_mut()
+                            {
+                                draft.match_field = field;
+                            }
+                        });
+                        cx.stop_propagation();
+                        cx.notify();
+                    }),
+                )
+                .border_color(if active {
+                    rgb(theme.accent)
+                } else {
+                    rgba((theme.border << 8) | 0x99)
+                })
+                .bg(if active {
+                    rgba((theme.accent << 8) | 0x1a)
+                } else {
+                    rgba(0x00000000)
+                }),
+            );
+        }
         let parameters = self.render_quick_command_parameter_editor(draft, snapshot, cx);
         let confirmation_always = draft.confirmation == QuickCommandConfirmationPolicy::Always;
         let scroll = self.terminal.read(cx).quick_commands.editor_scroll.clone();
@@ -3026,14 +3162,33 @@ impl WorkspaceApp {
                         ),
                     )
                     .child(
-                        self.render_quick_command_text_input(
-                            QuickCommandInput::CommandHostPattern,
-                            draft.host_patterns.clone(),
-                            snapshot.focused_input,
-                            self.i18n
-                                .t("terminal.quick_commands.host_pattern_placeholder"),
-                            cx,
-                        ),
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(5.0))
+                            .child(
+                                div()
+                                    .text_size(px(self.tokens.metrics.ui_text_xs))
+                                    .text_color(rgb(theme.text_muted))
+                                    .child(self.i18n.t("terminal.quick_commands.match_field")),
+                            )
+                            .child(match_fields)
+                            .child(
+                                self.render_quick_command_text_input(
+                                    QuickCommandInput::CommandHostPattern,
+                                    draft.host_patterns.clone(),
+                                    snapshot.focused_input,
+                                    self.i18n
+                                        .t("terminal.quick_commands.host_pattern_placeholder"),
+                                    cx,
+                                ),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(self.tokens.metrics.ui_text_xs))
+                                    .text_color(rgb(theme.text_muted))
+                                    .child(self.i18n.t("terminal.quick_commands.match_hint")),
+                            ),
                     )
                     .child(
                         div()
@@ -3575,9 +3730,10 @@ impl WorkspaceApp {
 #[cfg(test)]
 mod terminal_command_bar_quick_command_tests {
     use super::{
-        QuickCommandConfirmationPolicy, QuickCommandEditorDraft, QuickCommandParameterEditorDraft,
-        QuickCommandParameterKind, QuickCommandRiskBadge, quick_command_editor_can_save,
-        quick_command_risk_badge, quick_command_space_inserts_literal,
+        QuickCommandConfirmationPolicy, QuickCommandEditorDraft, QuickCommandMatchField,
+        QuickCommandParameterEditorDraft, QuickCommandParameterKind, QuickCommandRiskBadge,
+        quick_command_editor_can_save, quick_command_risk_badge,
+        quick_command_space_inserts_literal,
     };
     use gpui::{
         Context, InteractiveElement, IntoElement, ParentElement, Render, ScrollHandle, Styled, div,
@@ -3654,30 +3810,11 @@ mod terminal_command_bar_quick_command_tests {
     }
 
     #[test]
-    fn dock_blur_preserves_confirmation_and_explicit_close_clears_it() {
+    fn dock_pinning_keeps_launcher_open_and_blur_preserves_confirmation_until_close() {
         let directory = tempfile::tempdir().unwrap();
         let mut commands =
             super::TerminalQuickCommandsState::load(&directory.path().join("settings.json"));
         let command = oxideterm_quick_commands::default_quick_commands().remove(0);
-        commands.request_execution(command.clone());
-        commands.set_focused_input(super::QuickCommandInput::Search);
-        commands.blur_input();
-        assert!(commands.is_open());
-        assert_eq!(commands.focused_input(), None);
-        assert_eq!(
-            commands.pending_execution.as_ref().unwrap().command.id,
-            command.id
-        );
-        commands.close();
-        assert!(!commands.is_open());
-        assert!(commands.pending_execution.is_none());
-    }
-
-    #[test]
-    fn dock_pin_preserves_launcher_after_fill_and_execution_without_retaining_input_focus() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut commands =
-            super::TerminalQuickCommandsState::load(&directory.path().join("settings.json"));
         for pinned in [false, true] {
             commands.open = true;
             commands.pinned = pinned;
@@ -3688,12 +3825,23 @@ mod terminal_command_bar_quick_command_tests {
             );
             assert_eq!(commands.is_open(), pinned);
             assert_eq!(commands.focused_input(), None);
-            commands
-                .request_execution(oxideterm_quick_commands::default_quick_commands().remove(0));
+            commands.request_execution(command.clone());
+            commands.set_focused_input(super::QuickCommandInput::Search);
+            commands.blur_input();
+            assert!(commands.is_open());
+            assert_eq!(commands.focused_input(), None);
+            assert_eq!(
+                commands.pending_execution.as_ref().unwrap().command.id,
+                command.id
+            );
             commands.set_focused_input(super::QuickCommandInput::ParameterDefault(0));
             commands.finish_execution();
             assert_eq!(commands.is_open(), pinned);
             assert_eq!(commands.focused_input(), None);
+            assert!(commands.pending_execution.is_none());
+            commands.request_execution(command.clone());
+            commands.close();
+            assert!(!commands.is_open());
             assert!(commands.pending_execution.is_none());
         }
     }
@@ -3707,7 +3855,7 @@ mod terminal_command_bar_quick_command_tests {
     }
 
     #[test]
-    fn quick_command_editor_rejects_unknown_template_parameter() {
+    fn quick_command_editor_validates_templates_and_secret_defaults() {
         let mut draft = QuickCommandEditorDraft {
             id: None,
             name: "Deploy".to_string(),
@@ -3715,6 +3863,7 @@ mod terminal_command_bar_quick_command_tests {
             category: "custom".to_string(),
             description: String::new(),
             host_patterns: String::new(),
+            match_field: QuickCommandMatchField::Host,
             parameters: vec![QuickCommandParameterEditorDraft {
                 name: "service".to_string(),
                 label: "Service".to_string(),
@@ -3732,32 +3881,11 @@ mod terminal_command_bar_quick_command_tests {
         assert!(!quick_command_editor_can_save(&draft));
         draft.command = "deploy {{param.service|sh}}".to_string();
         assert!(quick_command_editor_can_save(&draft));
-    }
-
-    #[test]
-    fn quick_command_editor_rejects_secret_defaults() {
-        let draft = QuickCommandEditorDraft {
-            id: None,
-            name: "Login".to_string(),
-            command: "login {{param.password}}".to_string(),
-            category: "custom".to_string(),
-            description: String::new(),
-            host_patterns: String::new(),
-            parameters: vec![QuickCommandParameterEditorDraft {
-                name: "password".to_string(),
-                label: "Password".to_string(),
-                kind: QuickCommandParameterKind::Secret,
-                default_value: "must-not-persist".to_string(),
-                choices: String::new(),
-                required: true,
-            }],
-            protocols: Vec::new(),
-            confirmation: QuickCommandConfirmationPolicy::Inherit,
-            created_at: 1,
-            sort_order: 0,
-        };
-
+        draft.parameters[0].kind = QuickCommandParameterKind::Secret;
+        draft.parameters[0].default_value = "must-not-persist".to_string();
         assert!(!quick_command_editor_can_save(&draft));
+        draft.parameters[0].default_value.clear();
+        assert!(quick_command_editor_can_save(&draft));
     }
 
     #[test]

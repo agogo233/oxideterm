@@ -1,5 +1,36 @@
 {
   "ssh": {
+    "x11": {
+      "accepted": "X11 转发已获服务器接受",
+      "accepted_description": "SSH 服务器已接受当前终端的 X11 转发请求。远端 DISPLAY 由服务器分配。",
+      "unavailable": "X11 转发不可用",
+      "local_display_unavailable": "未找到有效的本地显示地址。请先启动本地 X 服务器并配置 DISPLAY，再启动 OxideTerm。",
+      "local_authorization_unavailable": "无法准备本地 X11 授权。请检查 XAUTHORITY、授权文件和 xauth 是否可用。",
+      "server_rejected": "SSH 服务器拒绝了 X11 转发。请检查服务器转发策略及 xauth 是否已安装。",
+      "request_timed_out": "SSH 服务器未在规定时间内回应 X11 转发请求。",
+      "channel_unavailable": "SSH 通道未能完成 X11 转发协商。",
+      "windows_requirement": "Windows 需要运行本地 X 服务器。请先将 DISPLAY 设置为其地址，再启动 OxideTerm。远端 DISPLAY 由 SSH 服务器单独分配。"
+    },
+    "fido": {
+      "touch_title": "安全密钥",
+      "touch_instructions": "请触摸安全密钥，或在设备上完成验证。",
+      "pin_title": "安全密钥 PIN",
+      "pin_instructions": "请输入安全密钥的 PIN，不会保存此内容。",
+      "pin_retry": "PIN 错误，请核对后再试。",
+      "pin_label": "PIN",
+      "errors": {
+        "unavailable": "请安装并启用 FIDO Security Key 插件以使用此 SSH 密钥。",
+        "cancelled": "已取消安全密钥认证。",
+        "timeout": "安全密钥认证超时。",
+        "invalid_request": "安全密钥签名请求无效。",
+        "incompatible": "安全密钥插件的协议不兼容。",
+        "no_device": "未找到 FIDO 安全密钥，请连接设备后重试。",
+        "credential_not_found": "连接的安全密钥中未找到此 SSH 凭据。",
+        "pin_blocked": "安全密钥的 PIN 已被锁定，请按照设备厂商的说明恢复。",
+        "device_failure": "安全密钥操作失败。",
+        "invalid_signature": "无法验证安全密钥的签名。"
+      }
+    },
     "form": {
       "title": "新建连接",
       "subtitle": "配置一台 SSH 主机，用于终端、SFTP、端口转发和远程文件编辑。",
@@ -33,6 +64,9 @@
       "password": "密码",
       "use_empty_password": "使用空密码",
       "save_password": "保存密码到钥匙串",
+      "save_credentials_after_login": "连接成功后保存认证信息",
+      "credentials_saved": "认证信息已保存",
+      "save_credentials_failed": "保存认证信息失败",
       "group": "分组",
       "notes": "备注",
       "notes_placeholder": "添加此连接的可选说明",
@@ -207,6 +241,9 @@
       }
     },
     "kbi": {
+      "save_password_after_login": "登录成功后保存密码",
+      "password_saved": "SSH 密码已保存",
+      "save_password_failed": "无法保存 SSH 密码，当前连接仍保持打开。",
       "title": "键盘交互认证",
       "continue": "继续",
       "cancelled": "键盘交互认证已取消。"

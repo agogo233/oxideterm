@@ -8,6 +8,11 @@ fn should_retry_password_auth(result: &client::AuthResult) -> bool {
     )
 }
 
+enum PasswordFallbackOutcome {
+    NotAuthenticated,
+    Authenticated { password_confirmed: bool },
+}
+
 async fn try_password_as_keyboard_interactive(
     handle: &mut client::Handle<NativeClientHandler>,
     config: &SshConfig,
@@ -15,18 +20,18 @@ async fn try_password_as_keyboard_interactive(
     password_result: &client::AuthResult,
     prompt_handler: Option<&dyn SshPromptHandler>,
     audit: &mut AuthenticationAudit,
-) -> Result<bool, SshTransportError> {
+) -> Result<PasswordFallbackOutcome, SshTransportError> {
     let client::AuthResult::Failure {
         partial_success: false,
         remaining_methods,
     } = password_result
     else {
-        return Ok(false);
+        return Ok(PasswordFallbackOutcome::NotAuthenticated);
     };
     if !remaining_methods.contains(&MethodKind::KeyboardInteractive)
         || remaining_methods.contains(&MethodKind::Password)
     {
-        return Ok(false);
+        return Ok(PasswordFallbackOutcome::NotAuthenticated);
     }
     tracing::debug!("SSH attempting password-as-keyboard-interactive fallback");
 
@@ -56,8 +61,14 @@ async fn try_password_as_keyboard_interactive(
 
     for _ in 0..MAX_PASSWORD_KBI_FALLBACK_ROUNDS {
         match response {
-            client::KeyboardInteractiveAuthResponse::Success => return Ok(true),
-            client::KeyboardInteractiveAuthResponse::Failure { .. } => return Ok(false),
+            client::KeyboardInteractiveAuthResponse::Success => {
+                return Ok(PasswordFallbackOutcome::Authenticated {
+                    password_confirmed: password_prompt_consumed,
+                });
+            }
+            client::KeyboardInteractiveAuthResponse::Failure { .. } => {
+                return Ok(PasswordFallbackOutcome::NotAuthenticated);
+            }
             client::KeyboardInteractiveAuthResponse::InfoRequest {
                 name,
                 instructions,
@@ -75,14 +86,15 @@ async fn try_password_as_keyboard_interactive(
                     && prompts.len() == 1
                     && !prompts[0].echo
                     && prompt_looks_like_password(&prompts[0].prompt)
+                    && !totp::matches_bound_prompt(config.totp.as_ref(), &prompts[0].prompt).await
                 {
                     password_prompt_consumed = true;
                     vec![password.to_string()]
                 } else {
                     let Some(prompt_handler) = prompt_handler else {
-                        return Ok(false);
+                        return Ok(PasswordFallbackOutcome::NotAuthenticated);
                     };
-                    return continue_keyboard_interactive_flow(
+                    let authenticated = continue_keyboard_interactive_flow(
                         handle,
                         prompt_handler,
                         client::KeyboardInteractiveAuthResponse::InfoRequest {
@@ -93,7 +105,15 @@ async fn try_password_as_keyboard_interactive(
                         false,
                         audit,
                     )
-                    .await;
+                    .await?;
+                    // Further user answers can replace a rejected password; success alone cannot confirm it.
+                    return Ok(if authenticated {
+                        PasswordFallbackOutcome::Authenticated {
+                            password_confirmed: false,
+                        }
+                    } else {
+                        PasswordFallbackOutcome::NotAuthenticated
+                    });
                 };
                 response = audit
                     .interactive("response", async {
@@ -118,7 +138,7 @@ async fn try_password_as_keyboard_interactive(
             }
         }
     }
-    Ok(false)
+    Ok(PasswordFallbackOutcome::NotAuthenticated)
 }
 
 async fn authenticate_keyboard_interactive(
@@ -295,7 +315,7 @@ fn authentication_failure_message(result: &client::AuthResult) -> String {
 enum PrivateKeyAuthErrorKind {
     MissingPassphrase,
     InvalidPassphrase,
-    UnsupportedHardwareKey,
+    InvalidSecurityKey,
     UnsupportedDsaKey,
     UnsupportedFormat,
     Other,
@@ -338,7 +358,7 @@ fn classify_private_key_decode_error(
     passphrase_supplied: bool,
 ) -> PrivateKeyAuthErrorKind {
     if private_key_text_looks_hardware_key(private_key) {
-        return PrivateKeyAuthErrorKind::UnsupportedHardwareKey;
+        return PrivateKeyAuthErrorKind::InvalidSecurityKey;
     }
     if private_key_text_looks_dsa(private_key) {
         return PrivateKeyAuthErrorKind::UnsupportedDsaKey;
@@ -367,9 +387,7 @@ fn private_key_auth_error_message(kind: PrivateKeyAuthErrorKind, fallback: Strin
     match kind {
         PrivateKeyAuthErrorKind::MissingPassphrase => "SSH key requires a passphrase".to_string(),
         PrivateKeyAuthErrorKind::InvalidPassphrase => "Invalid SSH key passphrase".to_string(),
-        PrivateKeyAuthErrorKind::UnsupportedHardwareKey => {
-            "FIDO/security-key SSH private keys require agent-backed signing and are not supported for direct private-key authentication yet".to_string()
-        }
+        PrivateKeyAuthErrorKind::InvalidSecurityKey => "Invalid FIDO/security-key SSH private key".to_string(),
         PrivateKeyAuthErrorKind::UnsupportedDsaKey => {
             "DSA SSH private keys are deprecated and are not supported for direct private-key authentication".to_string()
         }
@@ -389,19 +407,6 @@ fn private_key_auth_error_is_missing_passphrase(error: &SshTransportError) -> bo
         ))
 }
 
-fn reject_direct_hardware_key(key: &PrivateKey) -> Result<(), SshTransportError> {
-    let algorithm = key.algorithm().to_string();
-    if algorithm.starts_with("sk-") {
-        return Err(SshTransportError::AuthenticationFailed(
-            private_key_auth_error_message(
-                PrivateKeyAuthErrorKind::UnsupportedHardwareKey,
-                String::new(),
-            ),
-        ));
-    }
-    Ok(())
-}
-
 fn decode_private_key_for_auth(
     private_key: &str,
     passphrase: Option<&str>,
@@ -415,7 +420,6 @@ fn decode_private_key_for_auth(
                 error.to_string(),
             ))
         })?;
-    reject_direct_hardware_key(&key)?;
     Ok(key)
 }
 
@@ -508,8 +512,28 @@ async fn authenticate_publickey_best_algo(
     handle: &mut client::Handle<NativeClientHandler>,
     username: &str,
     key: Arc<PrivateKey>,
+    prompt_handler: Option<&dyn SshPromptHandler>,
     audit: &mut AuthenticationAudit,
 ) -> Result<client::AuthResult, SshTransportError> {
+    if matches!(
+        key.key_data(),
+        KeypairData::SkEd25519(_) | KeypairData::SkEcdsaSha2NistP256(_)
+    ) {
+        let public_key = key.public_key().clone();
+        let mut signer = SecurityKeySigner::new(key, prompt_handler).await?;
+        return audit
+            .authenticate(
+                "security-key",
+                Some(public_key.algorithm().as_str()),
+                async {
+                    handle
+                        .authenticate_publickey_with(username, public_key, None, &mut signer)
+                        .await
+                        .map_err(|error| SshTransportError::AuthenticationFailed(error.to_string()))
+                },
+            )
+            .await;
+    }
     let algorithms = auth_algorithm_attempt_order(
         matches!(key.algorithm(), Algorithm::Rsa { .. }),
         resolve_server_rsa_preference(handle).await,
@@ -550,8 +574,27 @@ async fn authenticate_certificate_best_algo(
     username: &str,
     key: Arc<PrivateKey>,
     cert: Certificate,
+    prompt_handler: Option<&dyn SshPromptHandler>,
     audit: &mut AuthenticationAudit,
 ) -> Result<client::AuthResult, SshTransportError> {
+    if matches!(
+        key.key_data(),
+        KeypairData::SkEd25519(_) | KeypairData::SkEcdsaSha2NistP256(_)
+    ) {
+        let mut signer = SecurityKeySigner::new(key, prompt_handler).await?;
+        return audit
+            .authenticate(
+                "security-key-certificate",
+                Some(cert.algorithm().as_str()),
+                async {
+                    handle
+                        .authenticate_certificate_with(username, cert.clone(), None, &mut signer)
+                        .await
+                        .map_err(|error| SshTransportError::AuthenticationFailed(error.to_string()))
+                },
+            )
+            .await;
+    }
     let algorithms = auth_algorithm_attempt_order(
         matches!(cert.algorithm(), Algorithm::Rsa { .. }),
         resolve_server_rsa_preference(handle).await,
@@ -803,34 +846,17 @@ mod private_key_auth_error_tests {
     }
 
     #[test]
-    fn private_key_auth_errors_distinguish_missing_and_invalid_passphrases() {
+    fn private_key_auth_errors_distinguish_passphrases_and_unsupported_material() {
         let key = generated_key_text(Some("secret-pass"));
-
-        let missing = decode_private_key_for_auth(&key, None).unwrap_err();
-        let invalid = decode_private_key_for_auth(&key, Some("wrong-pass")).unwrap_err();
-
-        assert!(
-            missing.to_string().contains("requires a passphrase"),
-            "missing passphrase error: {missing}"
-        );
-        assert!(
-            invalid.to_string().contains("Invalid SSH key passphrase"),
-            "invalid passphrase error: {invalid}"
-        );
-    }
-
-    #[test]
-    fn private_key_auth_errors_distinguish_unsupported_formats() {
-        let error = decode_private_key_for_auth("not a private key", None).unwrap_err();
-
-        assert!(error.to_string().contains("Unsupported SSH private key format"));
-    }
-
-    #[test]
-    fn private_key_auth_errors_distinguish_hardware_key_material() {
-        let error = decode_private_key_for_auth("sk-ssh-ed25519", None).unwrap_err();
-
-        assert!(error.to_string().contains("FIDO/security-key"));
+        for (input, passphrase, diagnostic) in [
+            (key.as_str(), None, "requires a passphrase"),
+            (key.as_str(), Some("wrong-pass"), "Invalid SSH key passphrase"),
+            ("not a private key", None, "Unsupported SSH private key format"),
+            ("sk-ssh-ed25519", None, "FIDO/security-key"),
+        ] {
+            let error = decode_private_key_for_auth(input, passphrase).unwrap_err();
+            assert!(error.to_string().contains(diagnostic), "{diagnostic}: {error}");
+        }
     }
 }
 

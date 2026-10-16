@@ -506,7 +506,7 @@ impl MagicScanWindow {
                 continue;
             }
             if marker_crosses_chunk_boundary(&self.tail, chunk, marker)
-                || chunk_contains_marker(chunk, marker)
+                || memchr::memmem::find(chunk, marker).is_some()
             {
                 matches.push(*kind);
             }
@@ -543,17 +543,6 @@ fn marker_crosses_chunk_boundary(tail: &[u8], chunk: &[u8], marker: &[u8]) -> bo
     })
 }
 
-fn chunk_contains_marker(mut chunk: &[u8], marker: &[u8]) -> bool {
-    while let Some(offset) = chunk.iter().position(|byte| *byte == marker[0]) {
-        chunk = &chunk[offset..];
-        if chunk.starts_with(marker) {
-            return true;
-        }
-        chunk = &chunk[1..];
-    }
-    false
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -578,32 +567,36 @@ mod tests {
     }
 
     #[test]
-    fn utf8_guard_flushes_invalid_bytes_unchanged() {
-        let mut guard = Utf8ResidualGuard::default();
-        assert_eq!(
-            guard.push(&[0xff, b'a']).as_deref(),
-            Some(&[0xff, b'a'][..])
+    fn utf8_guard_preserves_complete_invalid_and_unfinished_chunks() {
+        let complete = "plain 中文 🚀".as_bytes();
+        for (bytes, emitted, residual, must_borrow) in [
+            (complete, Some(complete), None, true),
+            (&[0xff, b'a'][..], Some(&[0xff, b'a'][..]), None, false),
+            (&[0xe4, 0xbd][..], None, Some(&[0xe4, 0xbd][..]), false),
+        ] {
+            let mut guard = Utf8ResidualGuard::default();
+            let output = guard.push(bytes);
+            assert_eq!(output.as_deref(), emitted, "{bytes:?}");
+            if must_borrow {
+                assert!(matches!(output, Some(Cow::Borrowed(_))));
+            }
+            assert_eq!(guard.flush().as_deref(), residual, "{bytes:?}");
+            assert_eq!(guard.flush(), None);
+        }
+    }
+
+    #[test]
+    fn magic_scan_detects_complete_markers_and_every_cross_chunk_split() {
+        let mut scan = MagicScanWindow::default();
+        assert!(
+            scan.scan(b"time:12:34 status:ok ::TRZSZ:TRANSFEX:")
+                .is_empty()
         );
-    }
+        assert_eq!(
+            scan.scan(b"time:12:34 status:ok ::TRZSZ:TRANSFER:R:1"),
+            [TerminalMagicKind::TrzszTransfer]
+        );
 
-    #[test]
-    fn utf8_guard_borrows_complete_chunks() {
-        let mut guard = Utf8ResidualGuard::default();
-        let bytes = "plain 中文 🚀".as_bytes();
-
-        assert!(matches!(guard.push(bytes), Some(Cow::Borrowed(value)) if value == bytes));
-    }
-
-    #[test]
-    fn utf8_guard_flushes_residual_on_stream_end() {
-        let mut guard = Utf8ResidualGuard::default();
-        assert_eq!(guard.push(&[0xe4, 0xbd]), None);
-        assert_eq!(guard.flush(), Some(vec![0xe4, 0xbd]));
-        assert_eq!(guard.flush(), None);
-    }
-
-    #[test]
-    fn magic_scan_detects_every_cross_chunk_split() {
         let marker = TerminalMagicKind::TrzszTransfer.marker();
         for split in 1..marker.len() {
             let mut scan = MagicScanWindow::default();
@@ -615,16 +608,6 @@ mod tests {
             );
             assert!(scan.scan(b"ordinary output").is_empty());
         }
-    }
-
-    #[test]
-    fn magic_scan_skips_false_marker_prefixes_in_current_chunk() {
-        let mut scan = MagicScanWindow::default();
-        assert_eq!(
-            scan.scan(b"time:12:34 status:ok ::TRZSZ:TRANSFER:R:1")
-                .len(),
-            1
-        );
     }
 
     #[test]

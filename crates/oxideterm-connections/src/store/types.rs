@@ -3,6 +3,7 @@ use crate::{SecretString, keychain::ConnectionKeychain};
 pub const CONFIG_VERSION: u32 = 1;
 pub const CONNECTION_TOMBSTONE_RETENTION_DAYS: i64 = 30;
 pub const LOCAL_SHELL_PRIVILEGE_CONNECTION_ID: &str = "local-shell:default";
+pub const SSH_COMMON_PRIVILEGE_SCOPE_ID: &str = "ssh:common";
 pub const GLOBAL_UPSTREAM_PROXY_PASSWORD_KEYCHAIN_ID: &str = "oxide_global_upstream_proxy_password";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -340,6 +341,8 @@ impl SshAlgorithmPreferences {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ConnectionOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub totp_credential_id: Option<String>,
     /// Overrides the SSH TCP and protocol-handshake timeout for this host.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connect_timeout_seconds: Option<u64>,
@@ -412,6 +415,8 @@ impl ConnectionOptions {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SavedProxyHop {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub totp_credential_id: Option<String>,
     pub host: String,
     #[serde(default = "default_port")]
     pub port: u16,
@@ -539,6 +544,8 @@ pub struct SavedPrivilegeCredential {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProxyHopInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub totp_credential_id: Option<String>,
     pub host: String,
     pub port: u16,
     pub username: String,
@@ -568,6 +575,7 @@ pub struct ProxyHopInfo {
 impl From<&SavedProxyHop> for ProxyHopInfo {
     fn from(hop: &SavedProxyHop) -> Self {
         Self {
+            totp_credential_id: hop.totp_credential_id.clone(),
             host: hop.host.clone(),
             port: hop.port,
             username: hop.username.clone(),
@@ -681,6 +689,8 @@ impl SavedConnection {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ConnectionInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub totp_credential_id: Option<String>,
     pub id: String,
     pub name: String,
     pub group: Option<String>,
@@ -800,6 +810,7 @@ impl fmt::Debug for SavePrivilegeCredentialRequest {
 impl From<&SavedConnection> for ConnectionInfo {
     fn from(conn: &SavedConnection) -> Self {
         Self {
+            totp_credential_id: conn.options.totp_credential_id.clone(),
             id: conn.id.clone(),
             name: conn.name.clone(),
             group: conn.group.clone(),
@@ -1823,6 +1834,7 @@ fn is_false(value: &bool) -> bool {
 
 #[derive(Clone, Debug)]
 pub struct SaveConnectionRequest {
+    pub totp_credential_id: Option<String>,
     pub id: Option<String>,
     pub name: String,
     pub group: Option<String>,
@@ -1902,6 +1914,8 @@ impl fmt::Debug for SavedConnectionRuntimeSecrets {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ConnectionStoreData {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub totp_credentials: Vec<crate::totp::TotpCredential>,
     #[serde(default = "default_config_version")]
     pub version: u32,
     #[serde(default)]
@@ -1943,6 +1957,8 @@ pub struct ConnectionStoreData {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub local_privilege_credentials: Vec<SavedPrivilegeCredential>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ssh_common_privilege_credentials: Vec<SavedPrivilegeCredential>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_keychain_cleanup: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_privilege_keychain_cleanup: Vec<String>,
@@ -1951,6 +1967,7 @@ pub struct ConnectionStoreData {
 impl Default for ConnectionStoreData {
     fn default() -> Self {
         Self {
+            totp_credentials: Vec::new(),
             version: CONFIG_VERSION,
             connections: Vec::new(),
             cleared_credentials: Vec::new(),
@@ -1971,6 +1988,7 @@ impl Default for ConnectionStoreData {
             standalone_sftp_profiles: Vec::new(),
             remote_desktop_profiles: Vec::new(),
             local_privilege_credentials: Vec::new(),
+            ssh_common_privilege_credentials: Vec::new(),
             pending_keychain_cleanup: Vec::new(),
             pending_privilege_keychain_cleanup: Vec::new(),
         }
@@ -2040,6 +2058,8 @@ pub enum ManagedSshKeyOrigin {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ManagedSshKey {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub certificate: Option<String>,
     pub id: String,
     /// Managed secret ID containing the private key material.
     pub secret_id: String,
@@ -2082,6 +2102,8 @@ pub struct SavedConnectionSyncRecord {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SavedConnectionsSyncSnapshot {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub totp_credentials: Vec<crate::totp::TotpCredential>,
     pub revision: String,
     pub exported_at: String,
     pub records: Vec<SavedConnectionSyncRecord>,
@@ -2111,7 +2133,7 @@ pub struct ApplySavedConnectionsSyncSnapshotResult {
     pub conflicts: usize,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ApplySavedConnectionsSyncOutcome {
     pub result: ApplySavedConnectionsSyncSnapshotResult,
     pub deleted_connection_ids: Vec<String>,

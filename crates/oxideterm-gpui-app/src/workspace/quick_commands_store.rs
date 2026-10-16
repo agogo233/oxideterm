@@ -42,14 +42,9 @@ impl QuickCommandsState {
 
     pub(super) fn visible_commands_for_targets(
         &self,
-        target_fields: &[String],
+        target: Option<&oxideterm_quick_commands::QuickCommandTargetContext>,
     ) -> Vec<QuickCommand> {
-        visible_quick_commands(
-            &self.commands,
-            &self.active_category,
-            &self.query,
-            target_fields,
-        )
+        visible_quick_commands(&self.commands, &self.active_category, &self.query, target)
     }
 
     pub(super) fn visible_commands_for_management(&self) -> Vec<QuickCommand> {
@@ -116,6 +111,7 @@ impl QuickCommandsState {
                 })
                 .collect(),
             availability: QuickCommandAvailability {
+                match_field: draft.match_field,
                 protocols: draft.protocols,
                 host_patterns: split_host_patterns(&draft.host_patterns),
             },
@@ -237,12 +233,73 @@ impl QuickCommandsState {
     }
 
     pub(super) fn delete_category(&mut self, id: &str) -> bool {
-        if !delete_quick_command_category(&mut self.categories, &mut self.commands, id) {
+        let mut categories = self.categories.clone();
+        let mut commands = self.commands.clone();
+        if !delete_quick_command_category(&mut categories, &mut commands, id) {
             return false;
         }
-        self.ensure_active_category();
-        self.persist();
-        true
+        let snapshot = QuickCommandsSnapshot {
+            version: QUICK_COMMANDS_SCHEMA_VERSION,
+            categories,
+            commands,
+            updated_at: now_ms(),
+        };
+        match oxideterm_quick_commands::save_snapshot(&self.settings_path, &snapshot) {
+            Ok(()) => {
+                self.categories = snapshot.categories;
+                self.commands = snapshot.commands;
+                self.ensure_active_category();
+                self.last_persist_error = None;
+                true
+            }
+            Err(error) => {
+                self.last_persist_error = Some(error);
+                false
+            }
+        }
+    }
+
+    pub(super) fn move_category(&mut self, source_id: &str, target_id: &str) -> bool {
+        let Some(source) = self
+            .categories
+            .iter()
+            .position(|category| category.id == source_id)
+        else {
+            return false;
+        };
+        let Some(target) = self
+            .categories
+            .iter()
+            .position(|category| category.id == target_id)
+        else {
+            return false;
+        };
+        if source == target {
+            return false;
+        }
+        let mut categories = self.categories.clone();
+        let category = categories.remove(source);
+        categories.insert(target, category);
+        for (index, category) in categories.iter_mut().enumerate() {
+            category.sort_order = index as i64;
+        }
+        let snapshot = QuickCommandsSnapshot {
+            version: QUICK_COMMANDS_SCHEMA_VERSION,
+            categories,
+            commands: self.commands.clone(),
+            updated_at: now_ms(),
+        };
+        match oxideterm_quick_commands::save_snapshot(&self.settings_path, &snapshot) {
+            Ok(()) => {
+                self.categories = snapshot.categories;
+                self.last_persist_error = None;
+                true
+            }
+            Err(error) => {
+                self.last_persist_error = Some(error);
+                false
+            }
+        }
     }
 
     pub(in crate::workspace) fn export_snapshot_json(&self) -> Result<String, String> {
@@ -328,8 +385,7 @@ fn split_choices(value: &str) -> Vec<String> {
 mod quick_command_tests {
     use super::{
         QUICK_COMMANDS_SCHEMA_VERSION, QuickCommand, QuickCommandCategoryDraft, QuickCommandDraft,
-        QuickCommandImportStrategy, QuickCommandsSnapshot, QuickCommandsState,
-        default_quick_command_categories, default_quick_commands, now_ms,
+        QuickCommandImportStrategy, QuickCommandsSnapshot, QuickCommandsState, now_ms,
     };
     use crate::workspace::quick_commands::{QuickCommandCategory, QuickCommandIcon};
     use std::fs;
@@ -354,7 +410,8 @@ mod quick_command_tests {
             description: Some("root listing".to_string()),
             parameters: None,
             protocols: None,
-            host_patterns: None,
+            host_patterns: Some(vec!["prod-*".into()]),
+            match_field: Some(oxideterm_quick_commands::QuickCommandMatchField::ConnectionName),
             confirmation: None,
         });
 
@@ -363,6 +420,9 @@ mod quick_command_tests {
             command.name == "List root"
                 && command.command == "ls /"
                 && command.description.as_deref() == Some("root listing")
+                && command.availability.match_field
+                    == oxideterm_quick_commands::QuickCommandMatchField::ConnectionName
+                && command.availability.host_patterns == ["prod-*"]
         }));
         let _ = fs::remove_dir_all(settings_path.parent().unwrap());
     }
@@ -395,10 +455,10 @@ mod quick_command_tests {
     }
 
     #[test]
-    fn deleting_custom_category_moves_its_commands_to_the_default_group() {
+    fn deleting_categories_preserves_commands_in_the_custom_group_after_reload() {
         let settings_path = temp_settings_path("delete-category");
         let mut state = QuickCommandsState::load(&settings_path);
-        assert!(!state.delete_category("system"));
+        assert!(!state.delete_category("custom"));
         let custom = state.upsert_category(QuickCommandCategoryDraft {
             id: None,
             name: "Ops".to_string(),
@@ -413,21 +473,30 @@ mod quick_command_tests {
             parameters: None,
             protocols: None,
             host_patterns: None,
+            match_field: None,
             confirmation: None,
         });
-        assert!(state.delete_category(&custom));
+        let mut expected_commands = state.commands.clone();
+        for command in &mut expected_commands {
+            command.category = "custom".into();
+        }
+        for id in ["system", "network", "files", "docker", custom.as_str()] {
+            assert!(state.delete_category(id), "{id} should be removable");
+        }
         let reloaded = QuickCommandsState::load(&settings_path);
-        assert!(
-            !reloaded
+        assert_eq!(
+            reloaded
                 .categories
                 .iter()
-                .any(|category| category.id == custom)
+                .map(|category| category.id.as_str())
+                .collect::<Vec<_>>(),
+            ["custom"]
         );
         assert!(
-            reloaded.commands.iter().any(|command| {
-                command.name == "Restart service" && command.category == "custom"
-            })
+            reloaded.commands == expected_commands,
+            "deletion must preserve every command field except its category"
         );
+        assert_eq!(reloaded.active_category, "custom");
         let _ = fs::remove_dir_all(settings_path.parent().unwrap());
     }
 
@@ -477,6 +546,70 @@ mod quick_command_tests {
     }
 
     #[test]
+    fn moving_categories_preserves_commands_and_persists_the_order() {
+        let directory = tempfile::tempdir().unwrap();
+        let settings_path = directory.path().join("settings.json");
+        let mut state = QuickCommandsState::load(&settings_path);
+        state.active_category = "docker".into();
+        let commands = state.commands.clone();
+        for (source, target, expected) in [
+            (
+                "custom",
+                "system",
+                ["custom", "system", "network", "files", "docker"],
+            ),
+            (
+                "custom",
+                "docker",
+                ["system", "network", "files", "docker", "custom"],
+            ),
+            (
+                "files",
+                "network",
+                ["system", "files", "network", "docker", "custom"],
+            ),
+        ] {
+            assert!(state.move_category(source, target));
+            assert_eq!(
+                state
+                    .categories
+                    .iter()
+                    .map(|category| category.id.as_str())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            let reloaded = QuickCommandsState::load(&settings_path);
+            assert_eq!(
+                reloaded
+                    .categories
+                    .iter()
+                    .map(|category| category.id.as_str())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            assert!(
+                reloaded.commands == commands,
+                "reordering groups must preserve commands"
+            );
+            assert_eq!(state.active_category, "docker");
+        }
+        let categories = state.categories.clone();
+        assert!(!state.move_category("files", "files"));
+        assert!(!state.move_category("missing", "system"));
+        assert!(!state.move_category("system", "missing"));
+        assert_eq!(state.categories, categories);
+
+        // A regular file in the parent path forces a real write failure on all platforms.
+        fs::write(directory.path().join("blocked"), b"blocked").unwrap();
+        state.settings_path = directory.path().join("blocked/settings.json");
+        assert!(!state.move_category("custom", "system"));
+        assert!(!state.delete_category("docker"));
+        assert_eq!(state.categories, categories);
+        assert!(state.commands == commands);
+        assert_eq!(state.active_category, "docker");
+    }
+
+    #[test]
     fn import_snapshot_rename_preserves_conflicting_existing_command() {
         let settings_path = temp_settings_path("import-rename");
         let mut state = QuickCommandsState::load(&settings_path);
@@ -520,33 +653,6 @@ mod quick_command_tests {
                 .iter()
                 .any(|command| command.command == "exa -la")
         );
-        let _ = fs::remove_dir_all(settings_path.parent().unwrap());
-    }
-
-    #[test]
-    fn import_snapshot_rename_does_not_duplicate_builtin_roundtrip_records() {
-        let settings_path = temp_settings_path("import-rename-roundtrip");
-        let mut state = QuickCommandsState::load(&settings_path);
-        let json = state.export_snapshot_json().unwrap();
-
-        let result = state.apply_snapshot_json(&json, QuickCommandImportStrategy::Rename);
-
-        assert_eq!(result.errors, Vec::<String>::new());
-        assert_eq!(result.imported, 0);
-        assert_eq!(
-            state.categories.len(),
-            default_quick_command_categories().len()
-        );
-        assert_eq!(state.commands.len(), default_quick_commands().len());
-        assert_eq!(
-            state
-                .categories
-                .iter()
-                .filter(|category| category.id == "system")
-                .count(),
-            1
-        );
-
         let _ = fs::remove_dir_all(settings_path.parent().unwrap());
     }
 

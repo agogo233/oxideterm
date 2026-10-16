@@ -28,8 +28,6 @@ use oxideterm_settings::{
 };
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use crate::SettingsInput;
-
 pub fn ai_provider_views(settings: &PersistedSettings) -> Vec<AiProviderView> {
     ai_provider_views_from_values(&settings.ai.providers)
 }
@@ -142,6 +140,7 @@ struct AcpAgentPresetTemplate {
     display_name: &'static str,
     command: &'static str,
     args: &'static [&'static str],
+    plugin_id: Option<&'static str>,
 }
 
 impl AcpAgentPreset {
@@ -158,14 +157,16 @@ impl AcpAgentPreset {
             Self::ClaudeCode => AcpAgentPresetTemplate {
                 base_id: "claude-code",
                 display_name: "Claude Code",
-                command: "oxideterm-native",
-                args: &["--acp-adapter", "claude-code"],
+                command: "",
+                args: &[],
+                plugin_id: Some("com.oxideterm.acp.claude-code"),
             },
             Self::Codex => AcpAgentPresetTemplate {
                 base_id: "codex",
                 display_name: "Codex",
-                command: "oxideterm-native",
-                args: &["--acp-adapter", "codex"],
+                command: "",
+                args: &[],
+                plugin_id: Some("com.oxideterm.acp.codex"),
             },
             Self::GeminiCli => AcpAgentPresetTemplate {
                 base_id: "gemini-cli",
@@ -173,6 +174,7 @@ impl AcpAgentPreset {
                 command: "gemini",
                 // Gemini CLI exposes its native ACP server over stdio.
                 args: &["--acp"],
+                plugin_id: None,
             },
             Self::GithubCopilot => AcpAgentPresetTemplate {
                 base_id: "github-copilot",
@@ -180,6 +182,7 @@ impl AcpAgentPreset {
                 command: "copilot",
                 // GitHub Copilot CLI exposes a native ACP stdio server.
                 args: &["--acp", "--stdio"],
+                plugin_id: None,
             },
             Self::OpenCode => AcpAgentPresetTemplate {
                 base_id: "opencode",
@@ -187,6 +190,7 @@ impl AcpAgentPreset {
                 command: "opencode",
                 // OpenCode exposes its native ACP server over stdio.
                 args: &["acp"],
+                plugin_id: None,
             },
         }
     }
@@ -586,6 +590,7 @@ pub fn ai_add_acp_agent(settings: &mut PersistedSettings) {
     settings.ai.acp_agents.push(AcpAgentConfig {
         id: format!("acp-agent-{now}"),
         display_name: String::new(),
+        plugin_id: None,
         command: String::new(),
         args: Vec::new(),
         env: BTreeMap::new(),
@@ -604,6 +609,7 @@ pub fn ai_add_acp_agent_preset(settings: &mut PersistedSettings, preset: AcpAgen
     settings.ai.acp_agents.push(AcpAgentConfig {
         id,
         display_name: template.display_name.to_string(),
+        plugin_id: template.plugin_id.map(str::to_string),
         command: template.command.to_string(),
         args: template.args.iter().map(|arg| (*arg).to_string()).collect(),
         env: BTreeMap::new(),
@@ -636,6 +642,46 @@ fn ai_unique_acp_agent_id(settings: &PersistedSettings, base_id: &str) -> String
         }
     }
     unreachable!("unbounded suffix search should always find a free ACP agent id")
+}
+
+pub fn ai_add_acp_plugin_agent(settings: &mut PersistedSettings, plugin_id: &str, name: &str) {
+    if settings
+        .ai
+        .acp_agents
+        .iter()
+        .any(|agent| agent.plugin_id.as_deref() == Some(plugin_id))
+    {
+        return;
+    }
+    // Preserve conversation identity when the built-in OpenCode preset becomes a plugin.
+    if plugin_id == "com.oxideterm.acp.opencode" {
+        let mut migrated = false;
+        for agent in &mut settings.ai.acp_agents {
+            if agent.plugin_id.is_none() && agent.command == "opencode" && agent.args == ["acp"] {
+                agent.plugin_id = Some(plugin_id.into());
+                agent.command.clear();
+                agent.args.clear();
+                migrated = true;
+            }
+        }
+        if migrated {
+            return;
+        }
+    }
+    let id = ai_unique_acp_agent_id(settings, plugin_id);
+    settings.ai.acp_agents.push(AcpAgentConfig {
+        id,
+        display_name: name.into(),
+        plugin_id: Some(plugin_id.into()),
+        command: String::new(),
+        args: Vec::new(),
+        env: Default::default(),
+        cwd: None,
+        enabled: true,
+        auth: Default::default(),
+        capability_policy: Default::default(),
+        status: Default::default(),
+    });
 }
 
 pub fn ai_delete_acp_agent(settings: &mut PersistedSettings, index: usize) {
@@ -730,23 +776,6 @@ mod tests {
     }
 
     #[test]
-    fn ai_mcp_record_cleaning_and_arg_split_are_model_owned() {
-        let record = ai_mcp_clean_record(&[
-            ("TOKEN".to_string(), "abc".to_string()),
-            (" ".to_string(), "ignored".to_string()),
-        ])
-        .unwrap();
-        assert_eq!(
-            record.get("TOKEN").and_then(serde_json::Value::as_str),
-            Some("abc")
-        );
-        assert_eq!(
-            ai_mcp_split_args("node server.js --stdio"),
-            vec!["node", "server.js", "--stdio"]
-        );
-    }
-
-    #[test]
     fn ai_mcp_draft_debug_redacts_secret_values() {
         let mut draft = AiMcpServerDraft::default();
         draft.command = "command-secret".to_string();
@@ -783,32 +812,6 @@ mod tests {
         assert!(draft.env.is_empty());
         assert!(draft.auth_token.is_empty());
         assert!(draft.headers.is_empty());
-    }
-
-    #[test]
-    fn ai_mcp_draft_input_adapter_trims_identity_fields_only() {
-        let mut draft = AiMcpServerDraft::default();
-        draft.env = vec![(String::new(), String::new())];
-
-        assert!(apply_ai_mcp_draft_input(
-            Some(&mut draft),
-            SettingsInput::AiMcpName,
-            " demo "
-        ));
-        assert!(apply_ai_mcp_draft_input(
-            Some(&mut draft),
-            SettingsInput::AiMcpEnvValue(0),
-            " value "
-        ));
-
-        assert_eq!(
-            ai_mcp_draft_input_value(Some(&draft), SettingsInput::AiMcpName),
-            Some("demo")
-        );
-        assert_eq!(
-            ai_mcp_draft_input_value(Some(&draft), SettingsInput::AiMcpEnvValue(0)),
-            Some(" value ")
-        );
     }
 
     #[test]
@@ -889,20 +892,19 @@ mod tests {
 
         let claude = &settings.ai.acp_agents[0];
         assert_eq!(claude.id, "claude-code");
-        assert_eq!(claude.command, "oxideterm-native");
         assert_eq!(
-            claude.args,
-            vec!["--acp-adapter".to_string(), "claude-code".to_string()]
+            claude.plugin_id.as_deref(),
+            Some("com.oxideterm.acp.claude-code")
         );
+        assert_eq!(claude.command, "");
+        assert_eq!(claude.args, Vec::<String>::new());
         assert!(!claude.capability_policy.terminal);
 
         let codex = &settings.ai.acp_agents[1];
         assert_eq!(codex.id, "codex");
-        assert_eq!(codex.command, "oxideterm-native");
-        assert_eq!(
-            codex.args,
-            vec!["--acp-adapter".to_string(), "codex".to_string()]
-        );
+        assert_eq!(codex.plugin_id.as_deref(), Some("com.oxideterm.acp.codex"));
+        assert_eq!(codex.command, "");
+        assert_eq!(codex.args, Vec::<String>::new());
 
         let gemini = &settings.ai.acp_agents[2];
         assert_eq!(gemini.id, "gemini-cli");
@@ -927,6 +929,60 @@ mod tests {
         assert!(opencode.env.is_empty());
 
         assert_eq!(settings.ai.acp_agents[5].id, "codex-2");
+    }
+
+    #[test]
+    fn installed_acp_registration_preserves_custom_agents_and_deduplicates_plugin_bindings() {
+        let mut settings = PersistedSettings::default();
+        ai_add_acp_agent(&mut settings);
+        settings.ai.acp_agents[0].id = "com.example.agent".into();
+        settings.ai.acp_agents[0].command = "custom-command".into();
+        ai_add_acp_plugin_agent(&mut settings, "com.example.agent", "Installed Agent");
+        settings.ai.acp_agents[1].cwd = Some("/my/project".into());
+        settings.ai.acp_agents[1].enabled = false;
+        ai_add_acp_plugin_agent(&mut settings, "com.example.agent", "Renamed Plugin");
+        assert_eq!(
+            settings
+                .ai
+                .acp_agents
+                .iter()
+                .map(|agent| (
+                    agent.id.as_str(),
+                    agent.plugin_id.as_deref(),
+                    agent.command.as_str()
+                ))
+                .collect::<Vec<_>>(),
+            [
+                ("com.example.agent", None, "custom-command"),
+                ("com.example.agent-2", Some("com.example.agent"), ""),
+            ]
+        );
+        assert_eq!(settings.ai.acp_agents[1].display_name, "Installed Agent");
+        assert_eq!(
+            settings.ai.acp_agents[1].cwd.as_deref(),
+            Some("/my/project")
+        );
+        assert!(!settings.ai.acp_agents[1].enabled);
+
+        ai_add_acp_agent_preset(&mut settings, AcpAgentPreset::OpenCode);
+        let index = settings.ai.acp_agents.len() - 1;
+        settings.ai.acp_agents[index].cwd = Some("/work/project".into());
+        settings.ai.acp_agents[index]
+            .capability_policy
+            .fs_read_text_file = true;
+        settings.ai.active_acp_agent_id = Some("opencode".into());
+        ai_add_acp_plugin_agent(&mut settings, "com.oxideterm.acp.opencode", "OpenCode");
+        let migrated = &settings.ai.acp_agents[index];
+        assert_eq!(migrated.id, "opencode");
+        assert_eq!(
+            migrated.plugin_id.as_deref(),
+            Some("com.oxideterm.acp.opencode")
+        );
+        assert_eq!(migrated.command, "");
+        assert_eq!(migrated.args, Vec::<String>::new());
+        assert_eq!(migrated.cwd.as_deref(), Some("/work/project"));
+        assert!(migrated.capability_policy.fs_read_text_file);
+        assert_eq!(settings.ai.active_acp_agent_id.as_deref(), Some("opencode"));
     }
 }
 
@@ -1092,80 +1148,6 @@ pub fn ai_mcp_draft_valid_for_names(
         && !configured_names.contains(name)
 }
 
-pub fn ai_mcp_draft_input_value(
-    draft: Option<&AiMcpServerDraft>,
-    input: SettingsInput,
-) -> Option<&str> {
-    let draft = draft?;
-    match input {
-        SettingsInput::AiMcpName => Some(&draft.name),
-        SettingsInput::AiMcpCommand => Some(&draft.command),
-        SettingsInput::AiMcpArgs => Some(&draft.args),
-        SettingsInput::AiMcpUrl => Some(&draft.url),
-        SettingsInput::AiMcpAuthHeaderName => Some(&draft.auth_header_name),
-        SettingsInput::AiMcpAuthToken => Some(&draft.auth_token),
-        SettingsInput::AiMcpEnvKey(index) => draft.env.get(index).map(|(key, _)| key.as_str()),
-        SettingsInput::AiMcpEnvValue(index) => {
-            draft.env.get(index).map(|(_, value)| value.as_str())
-        }
-        SettingsInput::AiMcpHeaderKey(index) => {
-            draft.headers.get(index).map(|(key, _)| key.as_str())
-        }
-        SettingsInput::AiMcpHeaderValue(index) => {
-            draft.headers.get(index).map(|(_, value)| value.as_str())
-        }
-        _ => None,
-    }
-}
-
-pub fn apply_ai_mcp_draft_input(
-    draft: Option<&mut AiMcpServerDraft>,
-    input: SettingsInput,
-    value: &str,
-) -> bool {
-    let Some(draft) = draft else {
-        return false;
-    };
-    match input {
-        SettingsInput::AiMcpName => draft.name = value.trim().to_string(),
-        SettingsInput::AiMcpCommand => draft.command = value.trim().to_string(),
-        SettingsInput::AiMcpArgs => draft.args = value.to_string(),
-        SettingsInput::AiMcpUrl => draft.url = value.trim().to_string(),
-        SettingsInput::AiMcpAuthHeaderName => draft.auth_header_name = value.trim().to_string(),
-        SettingsInput::AiMcpAuthToken => {
-            // Auth tokens are draft-only secret input values; callers own
-            // zeroizing their transient input buffer when focus leaves.
-            draft.auth_token = value.to_string();
-        }
-        SettingsInput::AiMcpEnvKey(index) => {
-            let Some((key, _)) = draft.env.get_mut(index) else {
-                return false;
-            };
-            *key = value.trim().to_string();
-        }
-        SettingsInput::AiMcpEnvValue(index) => {
-            let Some((_, env_value)) = draft.env.get_mut(index) else {
-                return false;
-            };
-            *env_value = value.to_string();
-        }
-        SettingsInput::AiMcpHeaderKey(index) => {
-            let Some((key, _)) = draft.headers.get_mut(index) else {
-                return false;
-            };
-            *key = value.trim().to_string();
-        }
-        SettingsInput::AiMcpHeaderValue(index) => {
-            let Some((_, header_value)) = draft.headers.get_mut(index) else {
-                return false;
-            };
-            *header_value = value.to_string();
-        }
-        _ => return false,
-    }
-    true
-}
-
 pub fn ai_mcp_transport_label(transport: McpTransport) -> String {
     match transport {
         McpTransport::Stdio => "stdio",
@@ -1189,21 +1171,6 @@ pub fn ai_mcp_auth_mode_value(mode: McpAuthHeaderMode) -> &'static str {
         McpAuthHeaderMode::Raw => "raw",
         McpAuthHeaderMode::None => "none",
     }
-}
-
-pub fn ai_mcp_clean_record(entries: &[(String, String)]) -> Option<serde_json::Value> {
-    let mut map = serde_json::Map::new();
-    for (key, value) in entries {
-        let key = key.trim();
-        if !key.is_empty() {
-            map.insert(key.to_string(), serde_json::json!(value));
-        }
-    }
-    (!map.is_empty()).then(|| serde_json::Value::Object(map))
-}
-
-pub fn ai_mcp_split_args(args: &str) -> Vec<String> {
-    args.split_whitespace().map(str::to_string).collect()
 }
 
 pub struct AiProviderKeyStatusDelivery {

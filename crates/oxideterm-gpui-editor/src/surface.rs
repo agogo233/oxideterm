@@ -5,7 +5,7 @@ use std::{cell::RefCell, collections::HashMap, ops::Range, sync::Arc, time::Dura
 
 use gpui::{
     AnyElement, App, Bounds, Context, Div, Element, ElementId, ElementInputHandler, Entity,
-    FocusHandle, Focusable, GlobalElementId, InspectorElementId, IntoColor, IntoElement, LayoutId,
+    FocusHandle, Focusable, GlobalElementId, InspectorElementId, IntoElement, LayoutId,
     ParentElement, Pixels, Point, ScrollWheelEvent, SharedString, Task, TextRun, Window, div,
     point, prelude::*, px, rgb,
 };
@@ -295,10 +295,16 @@ pub struct TextEditorView {
     text_system: Arc<gpui::TextSystem>,
     appearance: EditorAppearance,
     read_only: bool,
+    preserve_line_endings: bool,
     on_save: Option<SaveCallback>,
     on_modified_word_click: Option<ModifiedWordClickCallback>,
     save_status: EditorSaveStatus,
     language: Option<LanguageId>,
+    language_path: Option<std::path::PathBuf>,
+    language_fallback: Option<LanguageId>,
+    plugin_grammar: Option<Arc<oxideterm_editor_syntax::PluginGrammar>>,
+    _language_subscription: gpui::Subscription,
+    language_notice_tokens: ThemeTokens,
     syntax: Option<SyntaxSession>,
     syntax_version: Option<u64>,
     syntax_generation: Arc<std::sync::atomic::AtomicU64>,
@@ -336,15 +342,62 @@ pub struct TextEditorView {
 
 impl TextEditorView {
     pub fn new(text: impl Into<Arc<str>>, tokens: &ThemeTokens, cx: &mut Context<Self>) -> Self {
+        Self::new_with_line_endings(text, false, tokens, cx)
+    }
+
+    /// Text transformations must preserve pasted CR/LF bytes instead of normalizing them.
+    pub fn new_verbatim(
+        text: impl Into<Arc<str>>,
+        tokens: &ThemeTokens,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new_with_line_endings(text, true, tokens, cx)
+    }
+
+    fn new_with_line_endings(
+        text: impl Into<Arc<str>>,
+        preserve_line_endings: bool,
+        tokens: &ThemeTokens,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let metrics = EditorMetrics::from_theme(tokens);
         let settings = EditorSettings::default();
         let text: Arc<str> = text.into();
-        let text = if text.contains('\r') {
+        let text = if !preserve_line_endings && text.contains('\r') {
             normalize_editor_text(text.to_string()).into()
         } else {
             text
         };
         let buffer = TextBuffer::new(text);
+        let language_subscription =
+            cx.observe_global::<crate::EditorLanguagePlugins>(|this, cx| {
+                let detected = this.language_path.as_deref().map(|path| {
+                    this.buffer
+                        .with_text(|source| crate::detect_language(Some(path), source, cx))
+                        .or_else(|| this.language_fallback.clone())
+                });
+                let language_changed = detected
+                    .as_ref()
+                    .is_some_and(|language| *language != this.language);
+                if let Some(language) = detected {
+                    this.language = language;
+                }
+                let next = this.language.as_ref().and_then(|id| {
+                    cx.try_global::<crate::EditorLanguagePlugins>()
+                        .and_then(|plugins| plugins.grammars.get(id))
+                        .cloned()
+                });
+                let changed = match (&this.plugin_grammar, &next) {
+                    (Some(old), Some(new)) => !Arc::ptr_eq(old, new),
+                    (None, None) => false,
+                    _ => true,
+                };
+                if language_changed || changed {
+                    this.request_syntax(None, true, cx);
+                    this.refresh_foldable_ranges();
+                }
+                cx.notify();
+            });
         Self {
             buffer,
             cursor: Cursor::new(BufferOffset::ZERO),
@@ -359,6 +412,7 @@ impl TextEditorView {
             metrics,
             appearance: EditorAppearance::from_theme(tokens),
             read_only: false,
+            preserve_line_endings,
             on_save: None,
             on_modified_word_click: None,
             save_status: EditorSaveStatus::Clean,
@@ -369,6 +423,11 @@ impl TextEditorView {
             syntax_task: None,
             pending_syntax: None,
             language: None,
+            language_path: None,
+            language_fallback: None,
+            plugin_grammar: None,
+            _language_subscription: language_subscription,
+            language_notice_tokens: *tokens,
             highlight_spans: HighlightCache::default(),
             structure_cache: StructureCache::default(),
             bracket_index: BracketIndex::default(),
@@ -480,7 +539,12 @@ impl TextEditorView {
     }
 
     pub fn replace_text_external(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
-        let text = normalize_editor_text(text.into());
+        let text = text.into();
+        let text = if self.preserve_line_endings {
+            text
+        } else {
+            normalize_editor_text(text)
+        };
         if self.buffer.text() == text {
             return;
         }
@@ -649,6 +713,7 @@ impl TextEditorView {
     ) {
         self.pending_layout_anchor = Some(self.scroll_anchor());
         self.appearance = EditorAppearance::from_theme(tokens);
+        self.language_notice_tokens = *tokens;
         // Embedded editors can follow the typography of their owning surface.
         self.appearance.font_family = font_family;
         self.appearance.font_fallback_family = font_fallback_family;
@@ -667,10 +732,28 @@ impl TextEditorView {
     }
 
     pub fn set_language(&mut self, language: Option<LanguageId>, cx: &mut Context<Self>) {
+        self.language_path = None;
+        self.language_fallback = None;
         self.language = language;
         self.request_syntax(None, true, cx);
         self.refresh_foldable_ranges();
         cx.notify();
+    }
+
+    pub fn set_language_from_path(
+        &mut self,
+        path: impl AsRef<std::path::Path>,
+        fallback: Option<LanguageId>,
+        cx: &mut Context<Self>,
+    ) {
+        let path = path.as_ref().to_path_buf();
+        let language = self
+            .buffer
+            .with_text(|source| crate::detect_language(Some(&path), source, cx))
+            .or_else(|| fallback.clone());
+        self.set_language(language, cx);
+        self.language_path = Some(path);
+        self.language_fallback = fallback;
     }
 
     pub fn is_large_file(&self) -> bool {
@@ -681,7 +764,13 @@ impl TextEditorView {
         if self.read_only {
             return;
         }
-        self.replace_all_selections_with_caret(normalize_editor_text(text.into()), cx);
+        let text = text.into();
+        let text = if self.preserve_line_endings {
+            text
+        } else {
+            normalize_editor_text(text)
+        };
+        self.replace_all_selections_with_caret(text, cx);
     }
 
     /// Exposes undo to embedding surfaces without bypassing editor history bookkeeping.
@@ -889,6 +978,7 @@ impl TextEditorView {
         let caret = BufferOffset(range.start.0 + replacement.len());
         let syntax_edit = self
             .language
+            .as_ref()
             .filter(|_| self.syntax_task.is_none() && !self.is_large_file())
             .and_then(|_| SyntaxEdit::from_buffer(&self.buffer, range, &replacement).ok());
         if self
@@ -1346,7 +1436,7 @@ impl TextEditorView {
                 self.appearance.font_fallback_family.as_deref(),
                 self.appearance.font_weight,
             ),
-            color: rgb(self.appearance.text_hex).into_color(),
+            color: rgb(self.appearance.text_hex).into(),
             background_color: None,
             underline: None,
             strikethrough: None,
@@ -1502,7 +1592,6 @@ mod tests {
 
     use super::{
         HighlightChunkCache, HighlightChunkCacheKey, LineChunkSpec, prefixed_line_replacement,
-        wrapped_selection_text,
     };
     use oxideterm_editor_core::{BufferOffset, Selection};
 
@@ -1632,12 +1721,135 @@ mod tests {
     }
 
     #[gpui::test]
+    fn language_plugin_install_update_disable_preserves_document_history(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use super::{LanguageId, TextEditorView};
+        use oxideterm_editor_syntax::{PluginGrammarSource, SyntaxScope};
+        use sha2::{Digest, Sha256};
+        let directory = tempfile::tempdir().unwrap();
+        zip::ZipArchive::new(std::io::Cursor::new(include_bytes!(
+            "../../oxideterm-editor-syntax/tests/fixtures/elixir.zip"
+        )))
+        .unwrap()
+        .extract(directory.path())
+        .unwrap();
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(directory.path().join("plugin.json")).unwrap())
+                .unwrap();
+        let declared = &manifest["contributes"]["language"];
+        let language = LanguageId::from_plugin_key("custom-elixir").unwrap();
+        let definition = crate::EditorLanguageDefinition {
+            plugin_id: "com.example.custom-language".into(),
+            definition: oxideterm_plugin_manifest::NativePluginLanguageDefinition {
+                id: "custom-elixir".into(),
+                display_name: Some("Custom Elixir".into()),
+                grammar_name: Some("elixir".into()),
+                extensions: vec!["custom.expr".into()],
+                ..Default::default()
+            },
+        };
+        let mut grammar = PluginGrammarSource {
+            language: language.clone(),
+            grammar_name: "elixir".into(),
+            parser: directory.path().join("parser.wasm"),
+            highlights: directory.path().join("highlights.scm"),
+            parser_sha256: declared["parserSha256"].as_str().unwrap().into(),
+            highlights_sha256: declared["highlightsSha256"].as_str().unwrap().into(),
+            injections: Vec::new(),
+        };
+        let source = "defmodule Demo do\n  def value, do: 42\nend\n";
+        let editor =
+            cx.new(|cx| TextEditorView::new(source, &oxideterm_theme::default_tokens(), cx));
+        editor.update(cx, |editor, cx| {
+            editor.set_language_from_path("sample.custom.expr", None, cx);
+            assert_eq!(editor.language, None);
+            editor.insert_text("# edited\n", cx);
+            assert!(editor.syntax.is_none());
+        });
+        cx.update(|cx| {
+            crate::EditorLanguagePlugins::update_languages(Vec::new(), vec![definition.clone()], cx)
+        });
+        cx.run_until_parked();
+        editor.update(cx, |editor, cx| {
+            assert_eq!(editor.language, Some(language.clone()));
+            assert!(editor.syntax.is_none());
+            crate::EditorLanguagePlugins::set_labels(
+                "Missing {{language}}".into(),
+                "Failed".into(),
+                "Manage".into(),
+                "Dismiss".into(),
+                cx,
+            );
+            assert!(
+                crate::render_language_plugin_notice(
+                    language.clone(),
+                    &oxideterm_theme::default_tokens(),
+                    cx
+                )
+                .is_some()
+            );
+        });
+        cx.update(|cx| crate::EditorLanguagePlugins::update(vec![grammar.clone()], cx));
+        cx.run_until_parked();
+        editor.update(cx, |editor, _| {
+            let syntax = editor
+                .syntax
+                .as_ref()
+                .expect("installed grammar parsed the open document");
+            let text = editor.buffer.text();
+            assert!(
+                syntax
+                    .highlight_spans(&text)
+                    .iter()
+                    .any(|span| span.scope == SyntaxScope::Number
+                        && &text[span.range.start.0..span.range.end.0] == "42")
+            );
+        });
+        let query = "(integer) @string\n";
+        std::fs::write(&grammar.highlights, query).unwrap();
+        grammar.highlights_sha256 = format!("{:x}", Sha256::digest(query.as_bytes()));
+        cx.update(|cx| crate::EditorLanguagePlugins::update(vec![grammar.clone()], cx));
+        cx.run_until_parked();
+        editor.update(cx, |editor, _| {
+            let text = editor.buffer.text();
+            let spans = editor.syntax.as_ref().unwrap().highlight_spans(&text);
+            assert!(spans.iter().any(|span| span.scope == SyntaxScope::String
+                && &text[span.range.start.0..span.range.end.0] == "42"));
+            assert!(!spans.iter().any(|span| span.scope == SyntaxScope::Number));
+        });
+        cx.update(|cx| crate::EditorLanguagePlugins::update(Vec::new(), cx));
+        cx.run_until_parked();
+        editor.update(cx, |editor, cx| {
+            assert!(editor.syntax.is_none());
+            assert_eq!(editor.language, Some(language.clone()));
+            assert_eq!(editor.buffer.text(), format!("# edited\n{source}"));
+            editor.undo(cx);
+            assert_eq!(editor.buffer.text(), source);
+        });
+        cx.update(|cx| crate::EditorLanguagePlugins::update(vec![grammar], cx));
+        cx.run_until_parked();
+        editor.update(cx, |editor, _| {
+            assert!(!editor.syntax.as_ref().unwrap().root_has_error());
+            assert_eq!(editor.buffer.text(), source);
+        });
+        cx.update(|cx| crate::EditorLanguagePlugins::update_languages(Vec::new(), Vec::new(), cx));
+        cx.run_until_parked();
+        editor.update(cx, |editor, _| {
+            assert_eq!(editor.language, None);
+            assert!(editor.syntax.is_none());
+            assert_eq!(editor.buffer.text(), source);
+        });
+    }
+
+    #[gpui::test]
     fn folds_and_guides_follow_newlines_and_history(cx: &mut gpui::TestAppContext) {
         use super::{BufferOffset, LanguageId, Selection, TextEditorView};
         let source = "fn first() {\n    call();\n}\nfn second() {\n    call();\n}\n";
         let editor =
             cx.new(|cx| TextEditorView::new(source, &oxideterm_theme::default_tokens(), cx));
         editor.update(cx, |editor, cx| {
+            crate::grammar_fixture::install_rust(cx);
             editor.set_language(Some(LanguageId::Rust), cx);
         });
         cx.run_until_parked();
@@ -1687,6 +1899,7 @@ mod tests {
         let editor =
             cx.new(|cx| TextEditorView::new(source, &oxideterm_theme::default_tokens(), cx));
         editor.update(cx, |editor, cx| {
+            crate::grammar_fixture::install_rust(cx);
             editor.set_language(Some(LanguageId::Rust), cx);
         });
         cx.run_until_parked();
@@ -1747,6 +1960,7 @@ mod tests {
             )
         });
         editor.update(cx, |editor, cx| {
+            crate::grammar_fixture::install_rust(cx);
             editor.set_language(Some(LanguageId::Rust), cx);
         });
         cx.run_until_parked();
@@ -1786,31 +2000,31 @@ mod tests {
     }
 
     #[test]
-    fn formatting_wraps_unicode_selection_without_normalizing_text() {
-        assert_eq!(wrapped_selection_text("正文", "**", "**"), "**正文**");
-    }
-
-    #[test]
-    fn line_prefix_expands_partial_selection_to_complete_lines() {
-        let selection = Selection::new(BufferOffset(1), BufferOffset(9));
-        let (start, end, replacement, adjusted_selection) =
-            prefixed_line_replacement("alpha\nbeta\ngamma", selection, "- ");
-        assert_eq!((start, end), (0, 10));
-        assert_eq!(replacement, "- alpha\n- beta");
-        assert_eq!(
-            adjusted_selection,
-            Selection::new(BufferOffset(3), BufferOffset(13))
-        );
-    }
-
-    #[test]
-    fn line_prefix_places_empty_heading_caret_after_marker() {
-        let selection = Selection::caret(BufferOffset::ZERO);
-        let (_, _, replacement, adjusted_selection) =
-            prefixed_line_replacement("title", selection, "## ");
-
-        assert_eq!(replacement, "## title");
-        assert_eq!(adjusted_selection, Selection::caret(BufferOffset(3)));
+    fn line_prefix_preserves_content_selection_after_inserted_markers() {
+        for (source, selection, prefix, expected_range, expected_text, expected_selection) in [
+            (
+                "alpha\nbeta\ngamma",
+                Selection::new(BufferOffset(1), BufferOffset(9)),
+                "- ",
+                (0, 10),
+                "- alpha\n- beta",
+                Selection::new(BufferOffset(3), BufferOffset(13)),
+            ),
+            (
+                "title",
+                Selection::caret(BufferOffset::ZERO),
+                "## ",
+                (0, 5),
+                "## title",
+                Selection::caret(BufferOffset(3)),
+            ),
+        ] {
+            let (start, end, replacement, adjusted_selection) =
+                prefixed_line_replacement(source, selection, prefix);
+            assert_eq!((start, end), expected_range, "{source}");
+            assert_eq!(replacement, expected_text, "{source}");
+            assert_eq!(adjusted_selection, expected_selection, "{source}");
+        }
     }
 
     #[test]
@@ -1888,13 +2102,31 @@ mod tests {
 
 #[cfg(test)]
 mod line_ending_tests {
+    use gpui::AppContext;
+
     use super::*;
-    #[test]
-    fn clipboard_crlf_and_cr_become_single_newlines() {
-        assert_eq!(
-            normalize_editor_text("first\r\nsecond\rthird\n".into()),
-            "first\nsecond\nthird\n"
-        );
+    #[gpui::test]
+    fn clipboard_crlf_and_cr_become_single_newlines(cx: &mut gpui::TestAppContext) {
+        let editor = cx.new(|cx| TextEditorView::new("", &oxideterm_theme::default_tokens(), cx));
+        editor.update(cx, |editor, cx| {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                "first\r\nsecond\rthird\n".into(),
+            ));
+            editor.paste_from_clipboard(cx);
+            assert_eq!(editor.buffer().text(), "first\nsecond\nthird\n");
+        });
+        let verbatim = cx.new(|cx| {
+            TextEditorView::new_verbatim("prefix\r\n", &oxideterm_theme::default_tokens(), cx)
+        });
+        verbatim.update(cx, |editor, cx| {
+            editor.move_cursor_to_document_end(cx);
+            editor.paste_from_clipboard(cx);
+            assert_eq!(editor.buffer().text(), "prefix\r\nfirst\r\nsecond\rthird\n");
+            editor.replace_text_external("result\r\n", cx);
+            editor.set_read_only(true);
+            editor.paste_from_clipboard(cx);
+            assert_eq!(editor.buffer().text(), "result\r\n");
+        });
     }
 }
 

@@ -1,5 +1,36 @@
 {
   "ssh": {
+    "x11": {
+      "accepted": "Encaminhamento X11 aceito",
+      "accepted_description": "O servidor SSH aceitou o encaminhamento X11 para este terminal. O servidor atribui o DISPLAY remoto.",
+      "unavailable": "Encaminhamento X11 indisponível",
+      "local_display_unavailable": "Nenhum endereço de exibição local válido foi encontrado. Inicie um servidor X local e configure DISPLAY antes de iniciar o OxideTerm.",
+      "local_authorization_unavailable": "Não foi possível preparar a autorização X11 local. Verifique XAUTHORITY, o arquivo de autorização e a disponibilidade de xauth.",
+      "server_rejected": "O servidor SSH rejeitou o encaminhamento X11. Verifique a política de encaminhamento e a instalação do xauth no servidor.",
+      "request_timed_out": "O servidor SSH não respondeu a tempo à solicitação de encaminhamento X11.",
+      "channel_unavailable": "O canal SSH não conseguiu concluir a negociação do encaminhamento X11.",
+      "windows_requirement": "O Windows precisa de um servidor X local em execução. Defina DISPLAY com o endereço dele antes de iniciar o OxideTerm. O servidor SSH atribui o DISPLAY remoto separadamente."
+    },
+    "fido": {
+      "touch_title": "Chave de segurança",
+      "touch_instructions": "Toque na chave de segurança ou conclua a verificação no dispositivo.",
+      "pin_title": "PIN da chave de segurança",
+      "pin_instructions": "Digite o PIN da chave de segurança. Ele não será salvo.",
+      "pin_retry": "PIN incorreto. Confira antes de tentar novamente.",
+      "pin_label": "PIN",
+      "errors": {
+        "unavailable": "Instale e ative o plugin FIDO Security Key para usar esta chave SSH.",
+        "cancelled": "Autenticação com chave de segurança cancelada.",
+        "timeout": "A autenticação com chave de segurança excedeu o tempo limite.",
+        "invalid_request": "Solicitação de assinatura da chave de segurança inválida.",
+        "incompatible": "O protocolo do plugin da chave de segurança é incompatível.",
+        "no_device": "Nenhuma chave FIDO encontrada. Conecte o dispositivo e tente novamente.",
+        "credential_not_found": "Esta credencial SSH não foi encontrada na chave de segurança conectada.",
+        "pin_blocked": "O PIN está bloqueado. Siga as instruções de recuperação do fabricante.",
+        "device_failure": "A operação da chave de segurança falhou.",
+        "invalid_signature": "Não foi possível verificar a assinatura da chave de segurança."
+      }
+    },
     "form": {
       "title": "Nova conexão",
       "subtitle": "Configure um host SSH para terminais, SFTP, encaminhamento de portas e edição de arquivos remotos.",
@@ -20,6 +51,9 @@
       "password": "Senha",
       "use_empty_password": "Usar senha vazia",
       "save_password": "Salvar senha no chaveiro",
+      "save_credentials_after_login": "Salvar as informações de autenticação após o login bem-sucedido",
+      "credentials_saved": "Informações de autenticação salvas",
+      "save_credentials_failed": "Falha ao salvar as informações de autenticação",
       "group": "Grupo",
       "notes": "Observações",
       "notes_placeholder": "Adicione informações opcionais sobre esta conexão",
@@ -207,6 +241,9 @@
       }
     },
     "kbi": {
+      "save_password_after_login": "Salvar a senha após entrar com sucesso",
+      "password_saved": "Senha SSH salva",
+      "save_password_failed": "Não foi possível salvar a senha SSH. A conexão permanece aberta.",
       "title": "Autenticação interativa por teclado",
       "continue": "Continuar",
       "cancelled": "A autenticação interativa por teclado foi cancelada."

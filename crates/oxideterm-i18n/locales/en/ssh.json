@@ -1,5 +1,36 @@
 {
   "ssh": {
+    "x11": {
+      "accepted": "X11 forwarding accepted",
+      "accepted_description": "The SSH server accepted X11 forwarding for this terminal. The remote DISPLAY is assigned by the server.",
+      "unavailable": "X11 forwarding unavailable",
+      "local_display_unavailable": "No valid local display address was found. Start a local X server and configure DISPLAY before starting OxideTerm.",
+      "local_authorization_unavailable": "Local X11 authorization could not be prepared. Check XAUTHORITY, the authorization file and xauth availability.",
+      "server_rejected": "The SSH server rejected X11 forwarding. Check the server forwarding policy and xauth installation.",
+      "request_timed_out": "The SSH server did not respond to the X11 forwarding request in time.",
+      "channel_unavailable": "The SSH channel could not complete X11 forwarding negotiation.",
+      "windows_requirement": "Windows requires a running local X server. Set DISPLAY to its address before starting OxideTerm. The remote DISPLAY is assigned separately by the SSH server."
+    },
+    "fido": {
+      "touch_title": "Security key",
+      "touch_instructions": "Touch your security key or complete verification on the device.",
+      "pin_title": "Security-key PIN",
+      "pin_instructions": "Enter your security-key PIN. It will not be saved.",
+      "pin_retry": "Incorrect PIN. Check it before trying again.",
+      "pin_label": "PIN",
+      "errors": {
+        "unavailable": "Install and enable the FIDO Security Key plugin to use this SSH key.",
+        "cancelled": "Security-key authentication cancelled.",
+        "timeout": "Security-key authentication timed out.",
+        "invalid_request": "Invalid security-key signing request.",
+        "incompatible": "The security-key plugin protocol is incompatible.",
+        "no_device": "No FIDO security key found. Connect your device and try again.",
+        "credential_not_found": "This SSH credential was not found on the connected security key.",
+        "pin_blocked": "Security-key PIN is blocked. Follow the device vendor’s recovery instructions.",
+        "device_failure": "The security-key operation failed.",
+        "invalid_signature": "The security-key signature could not be verified."
+      }
+    },
     "form": {
       "title": "New Connection",
       "subtitle": "Configure an SSH host for terminals, SFTP, port forwarding, and remote file editing.",
@@ -33,6 +64,9 @@
       "password": "Password",
       "use_empty_password": "Use an empty password",
       "save_password": "Save password to keychain",
+      "save_credentials_after_login": "Save authentication information after successful login",
+      "credentials_saved": "Authentication information saved",
+      "save_credentials_failed": "Failed to save authentication information",
       "group": "Group",
       "notes": "Notes",
       "notes_placeholder": "Add optional context for this connection",
@@ -207,6 +241,9 @@
       }
     },
     "kbi": {
+      "save_password_after_login": "Save password after successful login",
+      "password_saved": "SSH password saved",
+      "save_password_failed": "Unable to save the SSH password. The connection remains open.",
       "title": "Keyboard-Interactive Authentication",
       "continue": "Continue",
       "cancelled": "Keyboard-interactive authentication was cancelled."

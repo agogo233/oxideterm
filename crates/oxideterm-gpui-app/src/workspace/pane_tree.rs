@@ -51,6 +51,12 @@ fn terminal_split_supported(
     }
 }
 
+fn terminal_auto_closes_on_exit(kind: oxideterm_terminal::TerminalSessionKind) -> bool {
+    // A remote channel or device can end independently of the user's task. Retain
+    // its pane and scrollback until explicitly closed, even if the node stays connected.
+    kind == oxideterm_terminal::TerminalSessionKind::LocalPty
+}
+
 fn serial_profile_line_ending(
     line_ending: oxideterm_terminal::SerialLineEnding,
 ) -> oxideterm_connections::SerialLineEnding {
@@ -215,6 +221,7 @@ impl WorkspaceApp {
         self.ai_runtime_context.update(cx, |runtime, _cx| {
             runtime.register_terminal_session(session_id, terminal_label);
         });
+        self.refresh_native_plugin_terminal_hooks(cx);
     }
 
     pub(super) fn handle_terminal_pane_delivery(
@@ -226,6 +233,12 @@ impl WorkspaceApp {
         cx: &mut Context<Self>,
     ) {
         match event {
+            TerminalPaneEvent::X11ForwardingStatus(status) => {
+                self.push_workspace_notice(x11_forwarding_notice(status, &self.i18n), cx);
+            }
+            TerminalPaneEvent::InputActivity => {
+                oxideterm_gpui_background::note_input_activity(window_handle.window_id(), cx);
+            }
             TerminalPaneEvent::Exited { .. } => {
                 self.queue_auto_close_terminal_session(session_id, cx);
             }
@@ -430,15 +443,24 @@ impl WorkspaceApp {
         session_id: TerminalSessionId,
         cx: &mut Context<Self>,
     ) {
-        // Serial sessions report port failures through the same terminal event;
-        // keep local transport panes visible so users can inspect the error
-        // text and reconnect without recreating the whole tab.
-        if self.serial_terminal_configs.contains_key(&session_id) {
+        if !self.terminal_session_auto_closes_on_exit(session_id, cx) {
             return;
         }
         if self.pending_auto_close_terminal_sessions.insert(session_id) {
             cx.notify();
         }
+    }
+
+    fn terminal_session_auto_closes_on_exit(
+        &self,
+        session_id: TerminalSessionId,
+        cx: &App,
+    ) -> bool {
+        self.tab_host
+            .read(cx)
+            .terminal_location(session_id)
+            .and_then(|location| self.terminal_kind_for_pane(location.pane_id, cx))
+            .is_some_and(terminal_auto_closes_on_exit)
     }
 
     pub(super) fn schedule_pending_auto_close_terminal_sessions(
@@ -468,7 +490,7 @@ impl WorkspaceApp {
     ) {
         let session_ids: Vec<_> = self.pending_auto_close_terminal_sessions.drain().collect();
         for session_id in session_ids {
-            if self.serial_terminal_configs.contains_key(&session_id) {
+            if !self.terminal_session_auto_closes_on_exit(session_id, cx) {
                 continue;
             }
             self.close_terminal_session(session_id, window, cx);
@@ -1030,6 +1052,10 @@ impl WorkspaceApp {
         let active_pane_id = tab_id
             .and_then(|tab_id| self.tab_by_id(tab_id, cx))
             .and_then(|tab| tab.active_pane_id);
+        let split = tab_id
+            .and_then(|id| self.tab_by_id(id, cx))
+            .and_then(|tab| tab.root_pane.as_ref())
+            .is_some_and(|root| root.pane_count() > 1);
         let content = match node {
             PaneNode::Page {
                 pane_id,
@@ -1040,11 +1066,14 @@ impl WorkspaceApp {
                 };
                 let (pane_id, page_id) = (*pane_id, *page_id);
                 let container = tab_id.unwrap_or(page_id);
-                let content = match page.kind {
-                    TabKind::Sftp => self.render_sftp_surface_for_tab(page_id, window, cx),
-                    TabKind::Ide => self.render_ide_surface_for_tab(page_id, cx),
-                    TabKind::Forwards => self.render_forwards_surface_for_tab(page_id, window, cx),
-                    _ => div().into_any_element(),
+                let content = if page.kind == TabKind::Knowledge {
+                    self.render_knowledge_workspace_surface(
+                        KnowledgeWorkspaceLayout::SplitPane,
+                        window,
+                        cx,
+                    )
+                } else {
+                    self.render_tab_content_for_id(page_id, &page.kind, None, window, cx)
                 };
                 div()
                     .id(("workspace-page", pane_id.0))
@@ -1053,6 +1082,10 @@ impl WorkspaceApp {
                     .flex_col()
                     .overflow_hidden()
                     .capture_any_mouse_down(cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                        let previous = this.tab_host.read(cx).focused_page_id(container);
+                        if previous != page_id {
+                            this.release_remote_desktop_inputs_for_tab(previous, cx);
+                        }
                         if this
                             .tab_host
                             .update(cx, |host, _| host.set_active_pane(Some(container), pane_id))
@@ -1064,12 +1097,14 @@ impl WorkspaceApp {
                         }
                         cx.notify();
                     }))
-                    .child(self.render_workspace_page_header(
-                        page_id,
-                        &page.title,
-                        Some(pane_id) == active_pane_id,
-                        cx,
-                    ))
+                    .when(split, |frame| {
+                        frame.child(self.render_workspace_page_header(
+                            page_id,
+                            &page.title,
+                            Some(pane_id) == active_pane_id,
+                            cx,
+                        ))
+                    })
                     .child(div().flex_1().min_h_0().relative().child(content))
                     .into_any_element()
             }
@@ -1079,10 +1114,6 @@ impl WorkspaceApp {
                     return div().size_full().into_any_element();
                 };
                 let sync_header = self.render_terminal_sync_member_header(*pane_id, cx);
-                let split = tab_id
-                    .and_then(|id| self.tab_by_id(id, cx))
-                    .and_then(|tab| tab.root_pane.as_ref())
-                    .is_some_and(|root| root.pane_count() > 1);
                 let terminal_top = if sync_header.is_some() {
                     terminal_command_bar::TERMINAL_SYNC_HEADER_HEIGHT
                 } else {
@@ -1119,6 +1150,7 @@ impl WorkspaceApp {
                                 // Release logical input ownership before focusing the native pane.
                                 this.blur_text_inputs(cx);
                                 if let Some(tab_id) = tab_id {
+                                    this.release_remote_desktop_inputs_for_tab(tab_id, cx);
                                     this.tab_host.update(cx, |tab_host, _| {
                                         tab_host.set_active_pane(Some(tab_id), pane_id);
                                     });
@@ -1235,7 +1267,10 @@ impl WorkspaceApp {
                         let line_color = if active_drag {
                             rgba((self.tokens.ui.accent << 8) | SPLIT_HANDLE_ACTIVE_LINE_ALPHA)
                         } else {
-                            rgba((self.tokens.ui.divider << 8) | SPLIT_HANDLE_LINE_ALPHA)
+                            self.workspace_divider_color(
+                                self.tokens.ui.divider,
+                                SPLIT_HANDLE_LINE_ALPHA,
+                            )
                         };
                         let line_width = if active_drag {
                             SPLIT_HANDLE_ACTIVE_LINE_WIDTH
@@ -1361,9 +1396,93 @@ impl WorkspaceApp {
     }
 }
 
+fn x11_forwarding_notice(
+    status: oxideterm_ssh::X11ForwardingStatus,
+    i18n: &I18n,
+) -> TerminalNotice {
+    use oxideterm_ssh::{X11ForwardingFailure, X11ForwardingStatus};
+    let (title, description, variant) = match status {
+        X11ForwardingStatus::Accepted => (
+            "ssh.x11.accepted",
+            "ssh.x11.accepted_description",
+            TerminalNoticeVariant::Success,
+        ),
+        X11ForwardingStatus::Unavailable(failure) => (
+            "ssh.x11.unavailable",
+            match failure {
+                X11ForwardingFailure::LocalDisplayUnavailable => {
+                    "ssh.x11.local_display_unavailable"
+                }
+                X11ForwardingFailure::LocalAuthorizationUnavailable => {
+                    "ssh.x11.local_authorization_unavailable"
+                }
+                X11ForwardingFailure::ServerRejected => "ssh.x11.server_rejected",
+                X11ForwardingFailure::RequestTimedOut => "ssh.x11.request_timed_out",
+                X11ForwardingFailure::ChannelUnavailable => "ssh.x11.channel_unavailable",
+            },
+            TerminalNoticeVariant::Warning,
+        ),
+    };
+    TerminalNotice {
+        title: i18n.t(title),
+        description: Some(i18n.t(description)),
+        status_text: matches!(status, X11ForwardingStatus::Unavailable(_))
+            .then(|| i18n.t("settings_view.connections.shell_integration.terminal_unaffected")),
+        variant,
+        progress: None,
+    }
+}
+
 #[cfg(test)]
-mod split_tests {
+mod tests {
     use super::*;
+
+    #[test]
+    fn x11_notices_distinguish_acceptance_and_optional_forwarding_failures() {
+        use oxideterm_ssh::{X11ForwardingFailure, X11ForwardingStatus};
+        let i18n = I18n::new(oxideterm_i18n::Locale::En);
+        let accepted = x11_forwarding_notice(X11ForwardingStatus::Accepted, &i18n);
+        assert_eq!(accepted.title, "X11 forwarding accepted");
+        assert_eq!(accepted.variant, TerminalNoticeVariant::Success);
+        assert_eq!(accepted.status_text, None);
+        for (failure, description) in [
+            (
+                X11ForwardingFailure::LocalDisplayUnavailable,
+                "No valid local display address was found. Start a local X server and configure DISPLAY before starting OxideTerm.",
+            ),
+            (
+                X11ForwardingFailure::ServerRejected,
+                "The SSH server rejected X11 forwarding. Check the server forwarding policy and xauth installation.",
+            ),
+            (
+                X11ForwardingFailure::RequestTimedOut,
+                "The SSH server did not respond to the X11 forwarding request in time.",
+            ),
+        ] {
+            let notice = x11_forwarding_notice(X11ForwardingStatus::Unavailable(failure), &i18n);
+            assert_eq!(notice.title, "X11 forwarding unavailable");
+            assert_eq!(notice.description.as_deref(), Some(description));
+            assert_eq!(notice.variant, TerminalNoticeVariant::Warning);
+            assert_eq!(
+                notice.status_text.as_deref(),
+                Some("SSH terminal use is unaffected.")
+            );
+        }
+    }
+
+    #[test]
+    fn remote_terminal_exit_does_not_request_auto_close() {
+        use oxideterm_terminal::TerminalSessionKind::*;
+        for (kind, auto_close) in [
+            (LocalPty, true),
+            (SshPty, false),
+            (Telnet, false),
+            (Mosh, false),
+            (Serial, false),
+        ] {
+            assert_eq!(terminal_auto_closes_on_exit(kind), auto_close, "{kind:?}");
+        }
+    }
 
     #[test]
     fn terminal_split_support_matches_transport_ownership() {

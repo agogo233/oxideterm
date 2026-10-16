@@ -17,9 +17,9 @@ use oxideterm_settings_model::{
     SETTINGS_SECTION_HEADER_ITEM_COUNT, SemanticClass, SemanticRuleContext, SemanticRuleDefinition,
     SemanticSchemeDocument, SettingsDynamicSectionCounts, SettingsInputDraftApply,
     TERMINAL_THEME_COLOR_FIELDS, ThemeColorField, ThemeEditorSection, ThemeEditorState,
-    UI_THEME_COLOR_FIELDS, add_custom_semantic_rule, ai_add_acp_agent, ai_add_acp_agent_preset,
-    ai_delete_acp_agent, ai_mcp_configs, ai_mcp_server_signature, ai_mcp_transport_label,
-    ai_model_context_window_panels,
+    ThemeTarget, UI_THEME_COLOR_FIELDS, add_custom_semantic_rule, ai_add_acp_agent,
+    ai_add_acp_agent_preset, ai_delete_acp_agent, ai_mcp_configs, ai_mcp_server_signature,
+    ai_mcp_transport_label, ai_model_context_window_panels,
     ai_model_context_window_row as ai_model_context_window_row_model, ai_provider_card_signature,
     ai_provider_model_chip_rows, ai_provider_model_row_signature, ai_provider_views,
     ai_tool_auto_approve_total_count, ai_tool_auto_approved_count, ai_tool_policy_groups,
@@ -81,9 +81,9 @@ use oxideterm_ai::{
 use oxideterm_connections::{
     ConnectionImportApplyRequest, ConnectionImportDuplicateStrategy, ConnectionImportPreview,
     ConnectionImportSource, ImportedConnectionAuthType, LOCAL_SHELL_PRIVILEGE_CONNECTION_ID,
-    ManagedSshKeyInfo, ManagedSshKeyOrigin, ManagedSshKeyUsage, SavePrivilegeCredentialRequest,
-    SecretString, SshConfigHost, apply_connection_import, list_available_ssh_keys,
-    list_ssh_config_hosts, preview_connection_import,
+    ManagedSshKeyInfo, ManagedSshKeyOrigin, ManagedSshKeyUsage, SSH_COMMON_PRIVILEGE_SCOPE_ID,
+    SavePrivilegeCredentialRequest, SecretString, SshConfigHost, apply_connection_import,
+    list_available_ssh_keys, list_ssh_config_hosts, preview_connection_import,
 };
 use oxideterm_gpui_platform::vibrancy::{NativeVibrancyMode, VibrancySupport, available_modes};
 use oxideterm_gpui_settings_view::*;
@@ -194,6 +194,7 @@ pub(in crate::workspace) const APPEARANCE_UI_FONT_SIZE_MAX: f32 = 20.0;
 
 mod ai_page;
 mod appearance;
+mod background;
 mod cards;
 mod cli_companion;
 mod connections_page;
@@ -229,6 +230,7 @@ mod surface;
 mod terminal_controls;
 mod terminal_display;
 mod terminal_triggers;
+mod totp_credentials_page;
 pub(in crate::workspace) use terminal_triggers::TerminalTriggersSettingsState;
 
 use ai_page::AI_PROVIDER_SELECT_W;
@@ -248,7 +250,7 @@ use pages::settings_keybinding_scope_matches;
 pub(in crate::workspace) use remote_shell_integration::{
     RemoteShellIntegrationAction, RemoteShellIntegrationCardSnapshot,
     RemoteShellIntegrationConfirmSnapshot, RemoteShellIntegrationConfirmSource,
-    RemoteShellIntegrationGateOutcome, RemoteShellIntegrationNotice,
+    RemoteShellIntegrationFailure, RemoteShellIntegrationGateOutcome, RemoteShellIntegrationNotice,
     RemoteShellIntegrationRuntimeState,
 };
 

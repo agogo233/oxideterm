@@ -23,6 +23,111 @@ mod tests {
         ConnectionStore::load(path).unwrap()
     }
 
+    #[test]
+    fn embedded_certificate_migrates_into_protected_managed_auth() {
+        let mut rng = UnwrapErr(SysRng);
+        let private = PrivateKey::random(&mut rng, Algorithm::Ed25519).unwrap();
+        let ca = PrivateKey::random(&mut rng, Algorithm::Ed25519).unwrap();
+        let mut builder = russh::keys::ssh_key::certificate::Builder::new_with_random_nonce(
+            &mut rng,
+            private.public_key(),
+            1,
+            u64::MAX,
+        )
+        .unwrap();
+        builder.valid_principal("deploy").unwrap();
+        let certificate = builder.sign(&ca).unwrap().to_openssh().unwrap();
+        let private_text = private
+            .encrypt(&mut rng, "certificate-passphrase")
+            .unwrap()
+            .to_openssh(LineEnding::LF)
+            .unwrap();
+        let mut source = temp_store("certificate-source");
+        let mut connection = saved_connection("certificate", "Certificate host");
+        connection.auth = SavedAuth::Agent;
+        connection.proxy_chain.clear();
+        source.upsert_imported_connection(connection).unwrap();
+        let bytes = export_connections_to_oxide(
+            &source,
+            &["certificate".into()],
+            "secret!",
+            Default::default(),
+        )
+        .unwrap();
+        let file = OxideFile::from_bytes(&bytes).unwrap();
+        let (metadata, mut payload) =
+            super::super::crypto::decrypt_oxide_archive_with_context_and_progress(
+                &file,
+                &mut OxideBatchDecryptionContext::new("secret!").unwrap(),
+                |_| {},
+            )
+            .unwrap();
+        payload.connections[0].auth = EncryptedAuth::Certificate {
+            key_path: "/original/private".into(),
+            cert_path: "/original/certificate".into(),
+            passphrase: Some(Zeroizing::new("certificate-passphrase".into())),
+            embedded_key: Some(Zeroizing::new(BASE64.encode(private_text.as_bytes()))),
+            embedded_cert: Some(Zeroizing::new(BASE64.encode(certificate.as_bytes()))),
+            managed_key: None,
+        };
+        let mut decoded =
+            decode_archive_sync_connections(&source, payload.connections.clone()).unwrap();
+        let key = decoded.managed_keys.pop().unwrap();
+        assert_eq!(
+            key.metadata.certificate.as_deref(),
+            Some(certificate.as_str())
+        );
+        assert_eq!(key.private_key.expose_secret(), private_text.as_str());
+        assert!(source.managed_ssh_keys().is_empty());
+        payload.checksum = compute_checksum(&payload).unwrap();
+        let bytes = encrypt_oxide_file(&payload, "secret!", metadata)
+            .unwrap()
+            .to_bytes()
+            .unwrap();
+        let mut target = temp_store("certificate-target");
+        let ordinary = target
+            .create_managed_ssh_key_from_text(
+                SecretString::from(private_text.as_str()),
+                Some("Ordinary key".into()),
+                Some(SecretString::from("certificate-passphrase")),
+            )
+            .unwrap();
+        apply_oxide_import_with_options(&mut target, &bytes, "secret!", Default::default())
+            .unwrap();
+        let SavedAuth::ManagedKey { key_id, .. } = &target.connections()[0].auth else {
+            panic!("certificate must use protected managed auth");
+        };
+        assert_ne!(key_id, &ordinary.id);
+        assert_eq!(
+            target
+                .managed_ssh_key_metadata(key_id)
+                .unwrap()
+                .certificate
+                .as_deref(),
+            Some(certificate.as_str())
+        );
+        assert_eq!(
+            target
+                .resolve_managed_ssh_key_private_key(key_id)
+                .unwrap()
+                .expose_secret(),
+            private_text.as_str()
+        );
+        assert_eq!(
+            target
+                .get_saved_auth_passphrase(&target.connections()[0].auth)
+                .unwrap()
+                .unwrap()
+                .expose_secret(),
+            "certificate-passphrase"
+        );
+        assert!(
+            !fs::read_to_string(target.path())
+                .unwrap()
+                .contains("BEGIN OPENSSH PRIVATE KEY")
+        );
+    }
+
     fn generated_private_key_text() -> String {
         let key_path =
             std::env::temp_dir().join(format!("oxideterm-managed-key-{}.key", Uuid::new_v4()));
@@ -51,6 +156,7 @@ mod tests {
                 plaintext_passphrase: Some(SecretString::from("phrase")),
             },
             proxy_chain: vec![SavedProxyHop {
+                totp_credential_id: None,
                 host: "jump.example.com".to_string(),
                 port: 22,
                 username: "jump".to_string(),
@@ -64,6 +170,7 @@ mod tests {
             upstream_proxy: SavedUpstreamProxyPolicy::UseGlobal,
             proxy_command: None,
             options: ConnectionOptions {
+                totp_credential_id: None,
                 connect_timeout_seconds: Some(120),
                 keep_alive_interval: 30,
                 compression: true,
@@ -161,9 +268,10 @@ mod tests {
         .unwrap();
 
         let file = OxideFile::from_bytes(&bytes).unwrap();
-        assert_eq!(file.metadata.num_connections, 1);
-        assert_eq!(file.metadata.quick_commands_count, Some(1));
-        assert_eq!(file.metadata.quick_command_categories_count, Some(1));
+        let (metadata,_) = super::super::crypto::decrypt_oxide_archive_with_context_and_progress(&file,&mut OxideBatchDecryptionContext::new("secret!").unwrap(),|_|{}).unwrap();
+        assert_eq!(metadata.num_connections, 1);
+        assert_eq!(metadata.quick_commands_count, Some(1));
+        assert_eq!(metadata.quick_command_categories_count, Some(1));
 
         let preview = preview_oxide_import(
             &temp_store("preview"),
@@ -309,10 +417,11 @@ mod tests {
         // Re-encrypt a checksum-valid archive whose connection fails only in
         // the final store upsert, after the profile stage has been persisted.
         let exported_file = OxideFile::from_bytes(&exported).unwrap();
+        let (metadata,_) = super::super::crypto::decrypt_oxide_archive_with_context_and_progress(&exported_file,&mut OxideBatchDecryptionContext::new(IMPORT_PASSWORD).unwrap(),|_|{}).unwrap();
         let mut payload = decrypt_payload(&exported, IMPORT_PASSWORD).unwrap();
         payload.connections[0].host.clear();
         payload.checksum = compute_checksum(&payload).unwrap();
-        let bytes = encrypt_oxide_file(&payload, IMPORT_PASSWORD, exported_file.metadata)
+        let bytes = encrypt_oxide_file(&payload, IMPORT_PASSWORD, metadata)
             .unwrap()
             .to_bytes()
             .unwrap();
@@ -431,8 +540,9 @@ mod tests {
         )
         .unwrap();
         let file = OxideFile::from_bytes(&bytes).unwrap();
-        assert_eq!(file.metadata.serial_profiles_count, Some(1));
-        assert_eq!(file.metadata.telnet_profiles_count, Some(1));
+        let (metadata,_) = super::super::crypto::decrypt_oxide_archive_with_context_and_progress(&file,&mut OxideBatchDecryptionContext::new("secret!").unwrap(),|_|{}).unwrap();
+        assert_eq!(metadata.serial_profiles_count, Some(1));
+        assert_eq!(metadata.telnet_profiles_count, Some(1));
 
         let preview = preview_oxide_import(
             &temp_store("serial-profile-preview"),
@@ -524,7 +634,8 @@ mod tests {
         )
         .unwrap();
         let file = OxideFile::from_bytes(&bytes).unwrap();
-        assert_eq!(file.metadata.mosh_profiles_count, Some(1));
+        let (metadata,_) = super::super::crypto::decrypt_oxide_archive_with_context_and_progress(&file,&mut OxideBatchDecryptionContext::new("secret!").unwrap(),|_|{}).unwrap();
+        assert_eq!(metadata.mosh_profiles_count, Some(1));
         let preview = preview_oxide_import(
             &temp_store("mosh-profile-preview"),
             &bytes,
@@ -588,6 +699,7 @@ mod tests {
             secondary_endpoint: None,
         };
         request.proxy_chain.push(SavedProxyHop {
+            totp_credential_id: None,
             host: "jump.example.test".to_string(),
             port: 22,
             username: "jump".to_string(),
@@ -642,7 +754,8 @@ mod tests {
         )
         .unwrap();
         let file = OxideFile::from_bytes(&bytes).unwrap();
-        assert_eq!(file.metadata.standalone_sftp_profiles_count, Some(2));
+        let (metadata,_) = super::super::crypto::decrypt_oxide_archive_with_context_and_progress(&file,&mut OxideBatchDecryptionContext::new("secret!").unwrap(),|_|{}).unwrap();
+        assert_eq!(metadata.standalone_sftp_profiles_count, Some(2));
         let preview = preview_oxide_import(
             &temp_store("standalone-sftp-profile-preview"),
             &bytes,
@@ -738,8 +851,9 @@ mod tests {
         )
         .unwrap();
         let file = OxideFile::from_bytes(&bytes).unwrap();
-        assert_eq!(file.metadata.remote_desktop_profiles_count, Some(1));
-        assert!(!serde_json::to_string(&file.metadata).unwrap().contains(CREDENTIAL));
+        let (metadata,_) = super::super::crypto::decrypt_oxide_archive_with_context_and_progress(&file,&mut OxideBatchDecryptionContext::new("secret!").unwrap(),|_|{}).unwrap();
+        assert_eq!(metadata.remote_desktop_profiles_count, Some(1));
+        assert!(!serde_json::to_string(&metadata).unwrap().contains(CREDENTIAL));
         let payload = decrypt_payload(&bytes, "secret!").unwrap();
         assert!(
             !payload
@@ -832,6 +946,29 @@ mod tests {
             })
             .unwrap();
 
+        source
+            .save_privilege_credential(SavePrivilegeCredentialRequest {
+                connection_id: crate::SSH_COMMON_PRIVILEGE_SCOPE_ID.into(),
+                credential_id: Some("shared-sudo".into()),
+                label: "Shared sudo".into(),
+                kind: PrivilegeCredentialKind::SudoPassword,
+                username_hint: None,
+                prompt_patterns: Vec::new(),
+                secret: Some(SecretString::from("common-secret")),
+                enabled: false,
+                require_click_to_send: true,
+            })
+            .unwrap();
+        assert!(
+            export_privilege_credentials(
+                &source,
+                source.get("conn-1").unwrap(),
+                &OxideExportOptions::default()
+            )
+            .unwrap()
+            .is_empty()
+        );
+
         let bytes = export_connections_to_oxide(
             &source,
             &["conn-1".to_string()],
@@ -859,7 +996,25 @@ mod tests {
             .find(|connection| connection.name == "Prod")
             .unwrap();
 
-        assert_eq!(imported.privilege_credentials.len(), 1);
+        assert_eq!(
+            imported
+                .privilege_credentials
+                .iter()
+                .map(|credential| credential.id.as_str())
+                .collect::<Vec<_>>(),
+            ["sudo-prod", "ssh-common:shared-sudo"]
+        );
+        let owners = [imported.id.clone()].into_iter().collect();
+        let common = target.export_privilege_sync_records(&owners).unwrap().into_iter()
+            .find(|record| record.metadata.id == "ssh-common:shared-sudo").unwrap();
+        assert!(!common.metadata.enabled);
+        assert_eq!(common.secret.unwrap(), "common-secret");
+        assert!(
+            target
+                .list_privilege_credentials(crate::SSH_COMMON_PRIVILEGE_SCOPE_ID)
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(
             target
                 .get_privilege_credential_secret(&imported.id, "sudo-prod")
@@ -869,7 +1024,7 @@ mod tests {
     }
 
     #[test]
-    fn managed_key_export_import_restores_managed_key_store_entry() {
+    fn managed_key_archive_supports_store_restore_and_file_extraction() {
         let mut source = temp_store("managed-source");
         let private_key = generated_private_key_text();
         let managed_key = source
@@ -896,7 +1051,8 @@ mod tests {
         )
         .unwrap();
         let file = OxideFile::from_bytes(&bytes).unwrap();
-        assert_eq!(file.metadata.managed_key_count, Some(1));
+        let (metadata,_) = super::super::crypto::decrypt_oxide_archive_with_context_and_progress(&file,&mut OxideBatchDecryptionContext::new("secret!").unwrap(),|_|{}).unwrap();
+        assert_eq!(metadata.managed_key_count, Some(1));
         let payload = decrypt_payload(&bytes, "secret!").unwrap();
         assert!(matches!(
             payload.connections[0].auth,
@@ -929,35 +1085,6 @@ mod tests {
             .resolve_managed_ssh_key_private_key(&keys[0].id)
             .unwrap();
         assert_eq!(restored_key.expose_secret(), private_key);
-    }
-
-    #[test]
-    fn managed_key_import_can_extract_embedded_key_when_restore_disabled() {
-        let mut source = temp_store("managed-fallback-source");
-        let private_key = generated_private_key_text();
-        let managed_key = source
-            .create_managed_ssh_key_from_text(
-                SecretString::from(private_key),
-                Some("Deploy key".to_string()),
-                None,
-            )
-            .unwrap();
-        let mut connection = saved_connection("conn-1", "Prod");
-        connection.auth = SavedAuth::ManagedKey {
-            key_id: managed_key.id,
-            passphrase_keychain_id: None,
-            plaintext_passphrase: None,
-        };
-        connection.proxy_chain.clear();
-        source.upsert_imported_connection(connection).unwrap();
-
-        let bytes = export_connections_to_oxide(
-            &source,
-            &["conn-1".to_string()],
-            "secret!",
-            OxideExportOptions::default(),
-        )
-        .unwrap();
         let mut target = temp_store("managed-fallback-target");
         let result = apply_oxide_import_with_options(
             &mut target,
@@ -973,9 +1100,12 @@ mod tests {
         assert_eq!(result.imported, 1);
         assert!(target.managed_ssh_keys().is_empty());
         let imported = target.connections().first().unwrap();
-        assert!(
-            matches!(&imported.auth, SavedAuth::Key { key_path, .. } if key_path.contains(".ssh/imported"))
-        );
+        let SavedAuth::Key { key_path, .. } = &imported.auth else {
+            panic!("disabled managed key restore should extract a key file");
+        };
+        assert!(key_path.contains(".ssh/imported"));
+        assert_eq!(fs::read_to_string(key_path).unwrap(), private_key);
+        fs::remove_file(key_path).unwrap();
     }
 
     #[test]
@@ -1102,41 +1232,7 @@ mod tests {
     }
 
     #[test]
-    fn rename_strategy_matches_copy_suffix_contract() {
-        let mut store = temp_store("rename");
-        store
-            .upsert_imported_connection(saved_connection("conn-1", "Prod"))
-            .unwrap();
-
-        let payload = vec![EncryptedConnection {
-            source_connection_id: None,
-            name: "Prod".to_string(),
-            group: None,
-            notes: None,
-            host: "example.org".to_string(),
-            port: 22,
-            username: "me".to_string(),
-            auth: EncryptedAuth::Agent,
-            color: None,
-            icon_background_color: None,
-            icon: None,
-            tags: Vec::new(),
-            options: ConnectionOptions::default(),
-            upstream_proxy: EncryptedUpstreamProxyPolicy::UseGlobal,
-            proxy_chain: Vec::new(),
-            forwards: Vec::new(),
-            privilege_credentials: Vec::new(),
-        }];
-
-        let plans = plan_import(&store, &payload, ImportConflictStrategy::Rename);
-        assert!(matches!(
-            plans.first(),
-            Some(PlannedImportAction::Rename(name)) if name == "Prod (Copy)"
-        ));
-    }
-
-    #[test]
-    fn replace_strategy_only_replaces_first_same_name_record() {
+    fn import_planning_renames_collisions_and_replaces_only_first_duplicate() {
         let mut store = temp_store("replace-duplicate");
         store
             .upsert_imported_connection(saved_connection("conn-1", "Prod"))
@@ -1147,10 +1243,15 @@ mod tests {
             encrypted_agent_connection("Prod", "two.example.com"),
         ];
 
+        let renamed = plan_import(&store, &payload[..1], ImportConflictStrategy::Rename);
+        assert!(matches!(
+            renamed.first(),
+            Some(PlannedImportAction::Rename(name)) if name == "Prod (Copy)"
+        ));
         let plans = plan_import(&store, &payload, ImportConflictStrategy::Replace);
         assert!(matches!(
             plans.first(),
-            Some(PlannedImportAction::Replace(_))
+            Some(PlannedImportAction::Replace(id)) if id == "conn-1"
         ));
         assert!(matches!(
             plans.get(1),
@@ -1274,7 +1375,7 @@ mod tests {
     }
 
     #[test]
-    fn preflight_blocks_managed_key_connections_when_excluded() {
+    fn preflight_requires_managed_key_export_for_managed_key_connections() {
         let mut source = temp_store("preflight-managed-key-excluded");
         let managed_key = source
             .create_managed_ssh_key_from_text(
@@ -1297,27 +1398,6 @@ mod tests {
         assert!(!result.can_export);
         assert_eq!(result.managed_key_count, 1);
         assert_eq!(result.blocked_managed_key_connections, vec!["Prod"]);
-    }
-
-    #[test]
-    fn preflight_allows_managed_key_connections_when_included() {
-        let mut source = temp_store("preflight-managed-key-included");
-        let managed_key = source
-            .create_managed_ssh_key_from_text(
-                SecretString::from(generated_private_key_text()),
-                Some("Deploy key".to_string()),
-                None,
-            )
-            .unwrap();
-        let mut connection = saved_connection("conn-1", "Prod");
-        connection.auth = SavedAuth::ManagedKey {
-            key_id: managed_key.id,
-            passphrase_keychain_id: None,
-            plaintext_passphrase: None,
-        };
-        connection.proxy_chain.clear();
-        source.upsert_imported_connection(connection).unwrap();
-
         let result = preflight_export(&source, &["conn-1".to_string()], false, true, 0);
 
         assert!(result.can_export);

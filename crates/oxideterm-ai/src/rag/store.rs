@@ -620,33 +620,6 @@ impl RagStore {
         Ok(false)
     }
 
-    /// Check whether a matching content hash exists in the collection, excluding
-    /// the provided document ID. Used when updating a document so the current
-    /// document does not trip the duplicate-content guard.
-    pub fn check_content_hash_exists_excluding_doc(
-        &self,
-        collection_id: &str,
-        content_hash: &str,
-        excluded_doc_id: &str,
-    ) -> Result<bool, RagError> {
-        let doc_ids = self.get_collection_doc_ids(collection_id)?;
-        let txn = self.db.begin_read()?;
-        let meta_t = txn.open_table(DOC_METADATA_TABLE)?;
-
-        for doc_id in &doc_ids {
-            if doc_id == excluded_doc_id {
-                continue;
-            }
-            if let Some(guard) = meta_t.get(doc_id.as_str())? {
-                let meta: DocMetadata = rmp_serde::from_slice(guard.value())?;
-                if meta.content_hash == content_hash {
-                    return Ok(true);
-                }
-            }
-        }
-        Ok(false)
-    }
-
     /// Add a document (metadata + chunks) and update the collection's doc list.
     pub fn add_document(
         &self,
@@ -1616,62 +1589,7 @@ mod tests {
     }
 
     #[test]
-    fn check_content_hash_exists_excluding_doc_ignores_same_doc_and_detects_other_docs() {
-        let store = temp_store("content_hash_excluding_doc");
-        store.create_collection(&make_collection("col-1")).unwrap();
-        store
-            .add_document(&make_doc("doc-1", "col-1", "hash-a"), &[], Some("alpha"))
-            .unwrap();
-        store
-            .add_document(&make_doc("doc-2", "col-1", "hash-b"), &[], Some("beta"))
-            .unwrap();
-
-        assert!(
-            !store
-                .check_content_hash_exists_excluding_doc("col-1", "hash-a", "doc-1")
-                .unwrap()
-        );
-        assert!(
-            store
-                .check_content_hash_exists_excluding_doc("col-1", "hash-b", "doc-1")
-                .unwrap()
-        );
-    }
-
-    #[test]
-    fn stale_document_version_leaves_committed_content_unchanged() {
-        let store = temp_store("stale_document_version");
-        store.create_collection(&make_collection("col-1")).unwrap();
-        store
-            .add_document(&make_doc("doc-1", "col-1", "hash-0"), &[], Some("initial"))
-            .unwrap();
-
-        let updated = store
-            .update_document("doc-1", "first", &[], "hash-1", 10, Some(0))
-            .unwrap();
-        let error = store
-            .update_document("doc-1", "stale", &[], "hash-stale", 11, Some(0))
-            .unwrap_err();
-
-        assert!(matches!(
-            error,
-            RagError::VersionConflict {
-                expected: 0,
-                actual: 1
-            }
-        ));
-        assert_eq!(updated.version, 1);
-        assert_eq!(
-            store.get_raw_content("doc-1").unwrap().as_deref(),
-            Some("first")
-        );
-        let metadata = store.get_doc_metadata("doc-1").unwrap().unwrap();
-        assert_eq!(metadata.version, 1);
-        assert_eq!(metadata.content_hash, "hash-1");
-    }
-
-    #[test]
-    fn concurrent_same_version_document_updates_allow_only_one_commit() {
+    fn concurrent_same_version_updates_allow_one_commit_and_reject_later_stale_writes() {
         let store = temp_store("concurrent_document_version");
         store.create_collection(&make_collection("col-1")).unwrap();
         store
@@ -1707,6 +1625,26 @@ mod tests {
         let metadata = store.get_doc_metadata("doc-1").unwrap().unwrap();
         let content = store.get_raw_content("doc-1").unwrap().unwrap();
         assert_eq!(metadata.version, 1);
-        assert!(matches!(content.as_str(), "alpha" | "beta"));
+        let (expected_content, expected_hash) = if results[0].is_ok() {
+            ("alpha", "hash-alpha")
+        } else {
+            ("beta", "hash-beta")
+        };
+        assert_eq!(content, expected_content);
+        assert_eq!(metadata.content_hash, expected_hash);
+        assert!(matches!(
+            store.update_document("doc-1", "stale", &[], "hash-stale", 11, Some(0)),
+            Err(RagError::VersionConflict {
+                expected: 0,
+                actual: 1
+            })
+        ));
+        assert_eq!(
+            store.get_raw_content("doc-1").unwrap().as_deref(),
+            Some(expected_content)
+        );
+        let metadata = store.get_doc_metadata("doc-1").unwrap().unwrap();
+        assert_eq!(metadata.version, 1);
+        assert_eq!(metadata.content_hash, expected_hash);
     }
 }

@@ -1,5 +1,23 @@
 {
   "terminal": {
+    "history": {
+      "save": "Save command history on this device",
+      "save_hint": "Save complete commands for saved SSH, Telnet, Mosh and serial connections in an unencrypted local file, including passwords or tokens in arguments. Saving starts when enabled.",
+      "retention": "Retention (days)",
+      "retention_hint": "0 keeps history indefinitely. Up to 10,000 entries are stored across saved connections.",
+      "current": "Current connection",
+      "all": "All connections",
+      "pause": "Pause history for this connection",
+      "resume": "Resume history for this connection",
+      "clear_current": "Clear this connection's history",
+      "clear_all": "Clear all saved connection history",
+      "clear_confirm": "Delete saved and in-memory command history for all saved connections? This does not change shell history files.",
+      "clear_confirm_current": "Delete this connection's saved and in-memory history? This does not change shell history files.",
+      "delete": "Delete from history",
+      "empty": "No matching commands",
+      "error": "Command history could not be loaded or saved. Recent commands remain available in memory."
+    },
+    "reconnect_hint": "Session disconnected · Press Enter to reconnect",
     "control_bar": {
       "show_controls": "Show controls",
       "hide_controls": "Hide controls"
@@ -139,6 +157,11 @@
     "typeLocal": "Local",
     "typeSsh": "SSH",
     "paste": {
+      "edit": "Edit",
+      "edit_title": "Edit before pasting",
+      "strip_fence": "Remove code block markers",
+      "undo": "Undo",
+      "redo": "Redo",
       "title": "Multiple lines detected ({{count}} lines)",
       "more_lines": "... {{count}} more lines",
       "confirm": "Confirm",
@@ -172,6 +195,12 @@
       "clear_screen": "Clear screen"
     },
     "modem": {
+      "timeout": "The peer did not respond in time. Start its transfer program, then retry.",
+      "protocol_error": "The peer sent invalid or unexpected transfer data.",
+      "file_error": "Unable to read or write the transfer file. Check permissions and free space.",
+      "file_too_large": "The file exceeds this protocol's size limit.",
+      "buffer_overflow": "The peer sent more data than the transfer buffer can hold.",
+      "worker_stopped": "The transfer worker stopped unexpectedly. Please retry.",
       "binary_transfer": "Binary transfer",
       "xmodem_upload": "XMODEM upload",
       "xmodem_receive": "XMODEM receive",
@@ -320,7 +349,12 @@
       "command_placeholder": "Command",
       "template_hint": "Use {{param.name}} or {{ctx.host}}; add |sh for POSIX shell quoting.",
       "description_placeholder": "Description",
-      "host_pattern_placeholder": "Host pattern, e.g. *.prod",
+      "match_field": "Match by",
+      "match_host": "Host address",
+      "match_connection": "Connection name",
+      "match_all": "All fields",
+      "match_hint": "Leave empty for any target. Use * and separate rules with commas. All fields includes addresses, usernames, connection names and terminal titles.",
+      "host_pattern_placeholder": "Pattern, e.g. prod-*",
       "confirm_title": "Run quick command?",
       "confirm_description": "Run: {{command}}",
       "confirm_risky_description": "This command may be destructive or sensitive. Run: {{command}}",
@@ -328,7 +362,8 @@
       "add_group": "Add group",
       "edit_group": "Edit group",
       "delete_group": "Delete group",
-      "delete_group_description": "Commands in \"{{name}}\" will be moved to the default group before deletion.",
+      "delete_group_description": "Commands in \"{{name}}\" will be moved to \"{{destination}}\" before this group is deleted.",
+      "reorder_groups": "Drag the handle to reorder groups",
       "save_group": "Save group",
       "group_name_placeholder": "Group name",
       "icon_terminal": "Terminal",
@@ -538,6 +573,8 @@
       "regenerate": "Retry"
     },
     "privilege_helper": {
+      "choose_hint": "Press Enter to choose a privilege credential",
+      "choose_title": "Choose a privilege credential",
       "fill": "Fill password",
       "filling": "Filling...",
       "fill_title": "Fill {{label}}",

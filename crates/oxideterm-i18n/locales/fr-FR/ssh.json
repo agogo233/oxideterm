@@ -1,5 +1,36 @@
 {
   "ssh": {
+    "x11": {
+      "accepted": "Transfert X11 accepté",
+      "accepted_description": "Le serveur SSH a accepté le transfert X11 pour ce terminal. Le serveur attribue la valeur DISPLAY distante.",
+      "unavailable": "Transfert X11 indisponible",
+      "local_display_unavailable": "Aucune adresse d’affichage locale valide n’a été trouvée. Démarrez un serveur X local et configurez DISPLAY avant de lancer OxideTerm.",
+      "local_authorization_unavailable": "Impossible de préparer l’autorisation X11 locale. Vérifiez XAUTHORITY, le fichier d’autorisation et la disponibilité de xauth.",
+      "server_rejected": "Le serveur SSH a refusé le transfert X11. Vérifiez sa politique de transfert et l’installation de xauth.",
+      "request_timed_out": "Le serveur SSH n’a pas répondu à temps à la demande de transfert X11.",
+      "channel_unavailable": "Le canal SSH n’a pas pu terminer la négociation du transfert X11.",
+      "windows_requirement": "Windows nécessite un serveur X local en cours d’exécution. Définissez DISPLAY sur son adresse avant de lancer OxideTerm. Le serveur SSH attribue séparément la valeur DISPLAY distante."
+    },
+    "fido": {
+      "touch_title": "Clé de sécurité",
+      "touch_instructions": "Touchez votre clé de sécurité ou terminez la vérification sur l’appareil.",
+      "pin_title": "Code PIN de la clé de sécurité",
+      "pin_instructions": "Saisissez le code PIN de votre clé de sécurité. Il ne sera pas enregistré.",
+      "pin_retry": "Code PIN incorrect. Vérifiez-le avant de réessayer.",
+      "pin_label": "Code PIN",
+      "errors": {
+        "unavailable": "Installez et activez le module FIDO Security Key pour utiliser cette clé SSH.",
+        "cancelled": "Authentification par clé de sécurité annulée.",
+        "timeout": "L’authentification par clé de sécurité a expiré.",
+        "invalid_request": "Demande de signature par clé de sécurité non valide.",
+        "incompatible": "Le protocole du module de clé de sécurité est incompatible.",
+        "no_device": "Aucune clé FIDO trouvée. Branchez votre appareil et réessayez.",
+        "credential_not_found": "Cet identifiant SSH est introuvable sur la clé de sécurité connectée.",
+        "pin_blocked": "Le code PIN est bloqué. Suivez les instructions de récupération du fabricant.",
+        "device_failure": "L’opération de la clé de sécurité a échoué.",
+        "invalid_signature": "La signature de la clé de sécurité n’a pas pu être vérifiée."
+      }
+    },
     "form": {
       "title": "Nouvelle connexion",
       "subtitle": "Configurez un hôte SSH pour les terminaux, SFTP, les redirections de ports et l’édition de fichiers distants.",
@@ -20,6 +51,9 @@
       "password": "Mot de passe",
       "use_empty_password": "Utiliser un mot de passe vide",
       "save_password": "Enregistrer le mot de passe dans le trousseau",
+      "save_credentials_after_login": "Enregistrer les informations d’authentification après une connexion réussie",
+      "credentials_saved": "Informations d’authentification enregistrées",
+      "save_credentials_failed": "Échec de l’enregistrement des informations d’authentification",
       "group": "Groupe",
       "notes": "Notes",
       "notes_placeholder": "Ajouter des informations facultatives sur cette connexion",
@@ -207,6 +241,9 @@
       }
     },
     "kbi": {
+      "save_password_after_login": "Enregistrer le mot de passe après une connexion réussie",
+      "password_saved": "Mot de passe SSH enregistré",
+      "save_password_failed": "Impossible d’enregistrer le mot de passe SSH. La connexion reste ouverte.",
       "title": "Authentification clavier interactive",
       "continue": "Continuer",
       "cancelled": "L’authentification clavier interactive a été annulée."

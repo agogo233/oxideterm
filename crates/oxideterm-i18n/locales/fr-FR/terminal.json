@@ -1,5 +1,23 @@
 {
   "terminal": {
+    "history": {
+      "save": "Enregistrer l’historique sur cet appareil",
+      "save_hint": "Enregistre les commandes complètes des connexions SSH, Telnet, Mosh et série enregistrées dans un fichier local non chiffré, y compris les mots de passe ou jetons dans les arguments. L’enregistrement commence à l’activation.",
+      "retention": "Conservation (jours)",
+      "retention_hint": "0 signifie sans limite de durée. Jusqu’à 10 000 entrées sont conservées pour l’ensemble des connexions enregistrées.",
+      "current": "Connexion actuelle",
+      "all": "Toutes les connexions",
+      "pause": "Suspendre l’historique de cette connexion",
+      "resume": "Reprendre l’historique de cette connexion",
+      "clear_current": "Effacer l’historique de cette connexion",
+      "clear_all": "Effacer l’historique de toutes les connexions enregistrées",
+      "clear_confirm": "Supprimer l’historique des commandes enregistré et en mémoire de toutes les connexions enregistrées ? Les fichiers d’historique des shells restent inchangés.",
+      "clear_confirm_current": "Supprimer l’historique enregistré et en mémoire de cette connexion ? Les fichiers d’historique des shells restent inchangés.",
+      "delete": "Supprimer de l’historique",
+      "empty": "Aucune commande correspondante",
+      "error": "Impossible de charger ou d’enregistrer l’historique. Les commandes récentes restent disponibles en mémoire."
+    },
+    "reconnect_hint": "Session déconnectée · Appuyez sur Entrée pour vous reconnecter",
     "control_bar": {
       "show_controls": "Afficher les commandes",
       "hide_controls": "Masquer les commandes"
@@ -51,6 +69,11 @@
       "risk_configured": "configuré"
     },
     "paste": {
+      "edit": "Modifier",
+      "edit_title": "Modifier avant de coller",
+      "strip_fence": "Retirer les délimiteurs du bloc de code",
+      "undo": "Annuler",
+      "redo": "Rétablir",
       "title": "Lignes multiples détectées ({{count}} lignes)",
       "more_lines": "... {{count}} lignes supplémentaires",
       "confirm": "Confirmer",
@@ -84,6 +107,12 @@
       "clear_screen": "Effacer l'écran"
     },
     "modem": {
+      "timeout": "Le correspondant n’a pas répondu à temps. Lancez son programme de transfert, puis réessayez.",
+      "protocol_error": "Le correspondant a envoyé des données de transfert invalides ou inattendues.",
+      "file_error": "Impossible de lire ou d’écrire le fichier. Vérifiez les permissions et l’espace disponible.",
+      "file_too_large": "Le fichier dépasse la taille maximale autorisée par ce protocole.",
+      "buffer_overflow": "Le correspondant a envoyé plus de données que le tampon de transfert ne peut en contenir.",
+      "worker_stopped": "Le processus de transfert s’est arrêté de façon inattendue. Veuillez réessayer.",
       "binary_transfer": "Transfert binaire",
       "xmodem_upload": "Envoi XMODEM",
       "xmodem_receive": "Réception XMODEM",
@@ -258,7 +287,12 @@
       "command_placeholder": "Command",
       "template_hint": "Use {{param.name}} or {{ctx.host}}; add |sh for POSIX shell quoting.",
       "description_placeholder": "Description",
-      "host_pattern_placeholder": "Host pattern, e.g. *.prod",
+      "match_field": "Critère de correspondance",
+      "match_host": "Adresse de l’hôte",
+      "match_connection": "Nom de connexion",
+      "match_all": "Tous les champs",
+      "match_hint": "Laisser vide pour toute cible. Utiliser * et séparer les règles par des virgules. Tous les champs inclut adresses, noms d’utilisateur, noms de connexion et titres des terminaux.",
+      "host_pattern_placeholder": "Motif, par ex. prod-*",
       "confirm_title": "Run quick command?",
       "confirm_description": "Run: {{command}}",
       "confirm_risky_description": "This command may be destructive or sensitive. Run: {{command}}",
@@ -266,7 +300,8 @@
       "add_group": "Add group",
       "edit_group": "Edit group",
       "delete_group": "Delete group",
-      "delete_group_description": "Les commandes de « {{name}} » seront déplacées vers le groupe par défaut avant sa suppression.",
+      "delete_group_description": "Les commandes de « {{name}} » seront déplacées vers « {{destination}} » avant la suppression de ce groupe.",
+      "reorder_groups": "Faites glisser la poignée pour réorganiser les groupes",
       "save_group": "Save group",
       "group_name_placeholder": "Group name",
       "icon_terminal": "Terminal",
@@ -538,6 +573,8 @@
     "typeLocal": "LOCAL",
     "typeSsh": "SSH",
     "privilege_helper": {
+      "choose_hint": "Appuyez sur Entrée pour choisir un identifiant d’élévation",
+      "choose_title": "Choisir un identifiant d’élévation",
       "fill": "Remplir le mot de passe",
       "filling": "Remplissage...",
       "fill_title": "Remplir {{label}}",

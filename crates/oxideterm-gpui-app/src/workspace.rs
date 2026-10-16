@@ -19,6 +19,7 @@ mod graphics;
 mod graphics_vnc;
 mod history_quit;
 pub(crate) use history_quit::request_app_quit;
+mod acp_plugins;
 mod ide;
 mod ime;
 mod knowledge;
@@ -34,6 +35,7 @@ mod path_completion;
 mod plugin_entity;
 mod plugin_lifecycle;
 mod plugin_manager;
+mod plugin_preview;
 mod plugin_ui;
 mod public_mcp;
 mod quick_commands;
@@ -107,10 +109,10 @@ use anyhow::Result;
 use gpui::{
     AnchoredPositionMode, Animation, AnimationExt, AnyElement, AnyWindowHandle, App, Bounds,
     ClipboardEntry, ClipboardItem, Context, Corner, CursorStyle, Entity, FocusHandle, Focusable,
-    FollowMode, Image, ImageFormat, IntoColor, IntoElement, KeyDownEvent, KeyUpEvent,
-    ListAlignment, ListState, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ObjectFit, ParentElement, PathPromptOptions, Pixels, Point, Render, RenderImage,
-    Rgba, ScrollHandle, ScrollWheelEvent, SharedString, Styled, StyledImage, Subscription, Task,
+    FollowMode, Image, ImageFormat, IntoElement, KeyDownEvent, KeyUpEvent, ListAlignment,
+    ListState, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    ObjectFit, ParentElement, PathPromptOptions, Pixels, Point, Render, RenderImage, Rgba,
+    ScrollHandle, ScrollWheelEvent, SharedString, Styled, StyledImage, Subscription, Task,
     TextLayout, Timer, UniformListScrollHandle, Window, anchored, canvas, deferred, div,
     prelude::*, px, relative, rgb, rgba, svg,
 };
@@ -177,13 +179,13 @@ use oxideterm_gpui_terminal::{
     TerminalBackgroundFit, TerminalBackgroundPreferences, TerminalBroadcastInputKind,
     TerminalCommandSelectionLabels, TerminalContextAction, TerminalHighlightMatchScope,
     TerminalHighlightRenderMode, TerminalHighlightRule as UiHighlightRule,
-    TerminalHighlightRuleSetOverride, TerminalInputBroadcaster, TerminalInputInterceptor,
-    TerminalInputInterceptorResult, TerminalKittyFileTransmissionLabels, TerminalModemLabels,
-    TerminalNotice, TerminalNoticeVariant, TerminalOutputProcessor, TerminalPane,
-    TerminalPaneEvent, TerminalPasteLabels, TerminalRecordingState, TerminalRecordingStatus,
-    TerminalSearchStatus, TerminalSerialControlLabels, TerminalSessionLogContext,
-    TerminalSessionLogLabels, TerminalSessionLogOptions, TerminalSessionLogState,
-    TerminalSessionLogStatus, TerminalTmuxLabels, TerminalTrzszLabels,
+    TerminalHighlightRuleSetOverride, TerminalHistoryStore, TerminalInputBroadcaster,
+    TerminalInputInterceptor, TerminalInputInterceptorResult, TerminalKittyFileTransmissionLabels,
+    TerminalModemLabels, TerminalNotice, TerminalNoticeVariant, TerminalOutputProcessor,
+    TerminalPane, TerminalPaneEvent, TerminalPasteLabels, TerminalRecordingState,
+    TerminalRecordingStatus, TerminalSearchStatus, TerminalSerialControlLabels,
+    TerminalSessionLogContext, TerminalSessionLogLabels, TerminalSessionLogOptions,
+    TerminalSessionLogState, TerminalSessionLogStatus, TerminalTmuxLabels, TerminalTrzszLabels,
     TerminalUiPreferenceOverrides, TerminalUiPreferences, TerminalUiTheme,
     TerminalWorkingDirectorySource, detect_custom_privilege_prompt, prune_terminal_session_logs,
     resolved_terminal_semantic_scheme, terminal_semantic_line_band,
@@ -766,6 +768,7 @@ pub(crate) struct WorkspaceApp {
     _tab_host_subscription: Subscription,
     search: actions::TerminalSearchState,
     terminal_recording_menu_open: bool,
+    privilege_credential_picker: Option<terminal_command_bar::PrivilegeCredentialPicker>,
     terminal_highlight_popover_open: bool,
     // Settings keep the source pane stable while editing session-only trigger overrides.
     terminal_trigger_settings_pane: Option<PaneId>,
@@ -782,7 +785,10 @@ pub(crate) struct WorkspaceApp {
     terminal_command_sender: Entity<terminal_command_sender::TerminalCommandSenderEntity>,
     _terminal_command_sender_observation: Subscription,
     local_terminal_command_history: SharedTerminalCommandHistory,
-    // Runtime history follows NodeRouter identity without owning or prolonging the transport.
+    terminal_history_store: TerminalHistoryStore,
+    _terminal_history_updates: Task<()>,
+    terminal_history_all_connections: bool,
+    // Active nodes retain history handles without owning or prolonging the transport.
     ssh_terminal_command_histories: HashMap<NodeId, SharedTerminalCommandHistory>,
     detached_local_terminals: HashMap<TerminalSessionId, DetachedLocalTerminalSession>,
     detached_local_terminal_order: Vec<TerminalSessionId>,
@@ -823,6 +829,7 @@ pub(crate) struct WorkspaceApp {
     context_sidebar_motion: oxideterm_gpui_ui::motion::SidebarMotion,
     ai_entity: Entity<ai_state::AiWorkspaceEntity>,
     acp_entity: Entity<acp_workspace::AcpWorkspaceEntity>,
+    mosh_plugin_sessions: Arc<oxideterm_mosh::MoshPluginSessions>,
     skill_registry: std::sync::Arc<parking_lot::RwLock<oxideterm_skills::SkillRegistry>>,
     skill_workspace_root: Option<std::path::PathBuf>,
     loaded_conversation_skills: HashMap<String, HashMap<String, String>>,
@@ -947,6 +954,9 @@ pub(crate) struct WorkspaceApp {
     _cloud_sync_subscription: Subscription,
     i18n: I18n,
     tokens: ThemeTokens,
+    system_dark: bool,
+    appearance_edit_dark: Option<bool>,
+    active_background: oxideterm_settings::BackgroundStyle,
     detected_graphics: DetectedGraphics,
     render_profile_override: Option<RenderProfile>,
     render_policy: EffectiveRenderPolicy,

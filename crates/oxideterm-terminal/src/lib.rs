@@ -13,7 +13,7 @@ use alacritty_terminal::{
     grid::{Dimensions, Scroll},
     index::Line,
     sync::FairMutex,
-    term::{Config, Osc52, Term, TermDamage, cell::Flags},
+    term::{Config, Osc52, Term, TermDamage, cell::Flags, color::Colors},
     tty::{self, Shell},
 };
 use anyhow::{Context, Result};
@@ -86,8 +86,8 @@ pub use privilege_prompt::{
 pub use process::{TerminalLifecycle, TerminalProcessInfo, TerminalProcessProbe};
 pub use remote_shell_integration::{
     REMOTE_SHELL_INTEGRATION_RELATIVE_DIR, REMOTE_SHELL_INTEGRATION_VERSION,
-    RemoteShellIntegrationState, RemoteShellIntegrationStatus, RemoteShellKind,
-    inspect_remote_shell_integration, install_remote_shell_integration,
+    RemoteShellIntegrationError, RemoteShellIntegrationState, RemoteShellIntegrationStatus,
+    RemoteShellKind, inspect_remote_shell_integration, install_remote_shell_integration,
     remove_remote_shell_integration,
 };
 pub use search::TerminalSearchSource;
@@ -113,9 +113,9 @@ pub use shell_integration::{
     TerminalCommandMarkEvent,
 };
 
+pub use color::TerminalPalette;
 use color::{
-    OXIDETERM_DARK_THEME, attrs_from_flags, color_for_alacritty_request_with_override,
-    style_colors_for_cell, style_origin_for_cell,
+    attrs_from_flags, color_for_alacritty_request, style_colors_for_cell, style_origin_for_cell,
 };
 use local_graphics_event_loop::{
     LocalGraphicsEventLoop, LocalGraphicsMsg, LocalGraphicsNotifier, LocalPtyReadReport,

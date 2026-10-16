@@ -3,7 +3,10 @@
 
 use std::fmt;
 
-use alacritty_terminal::term::cell::{Cell as AlacrittyCell, Flags};
+use alacritty_terminal::{
+    term::cell::{Cell as AlacrittyCell, Flags},
+    vte::ansi::Color,
+};
 use fernomade_predict::{
     PredictionAction, PredictionContext, PredictionDisplay, PredictionOverlay,
     PredictionReconciliation,
@@ -26,9 +29,11 @@ pub struct MoshTerminalSession {
     resize: TerminalResize,
     lifecycle: TerminalLifecycle,
     command_tx: tokio::sync::mpsc::Sender<MoshTerminalCommand>,
+    startup_cancellation: Option<oxideterm_mosh::MoshSessionCancellation>,
     connection_status: MoshConnectionStatus,
     graphics_ingress: GraphicsIngress,
     graphics: TerminalGraphicsState,
+    palette: TerminalPalette,
     graphics_alt_screen_active: bool,
     output_queue: VecDeque<crate::backpressure::ByteBoundedItem<MoshTerminalWorkerEvent>>,
     output_processor: Option<TerminalOutputProcessor>,
@@ -134,7 +139,11 @@ impl MoshTerminalSession {
             MoshPredictionDisplay::Always => PredictionDisplay::Always,
             MoshPredictionDisplay::Never => PredictionDisplay::Never,
         };
+        let lease = config.plugin_sessions.acquire();
+        let startup_cancellation = lease.as_ref().ok().map(|lease| lease.cancellation());
         config.task_runtime.spawn(run_mosh_terminal_worker(
+            config.executable,
+            lease,
             config.bootstrap,
             config.bootstrap_context,
             resize,
@@ -157,9 +166,11 @@ impl MoshTerminalSession {
             resize,
             lifecycle: TerminalLifecycle::Running,
             command_tx,
+            startup_cancellation,
             connection_status: MoshConnectionStatus::Connecting,
             graphics_ingress: GraphicsIngress::new(graphics_options),
             graphics: TerminalGraphicsState::default(),
+            palette: TerminalPalette::default(),
             graphics_alt_screen_active: false,
             output_queue: VecDeque::new(),
             output_processor: None,
@@ -263,6 +274,9 @@ impl MoshTerminalSession {
 
             match event.into_inner() {
                 MoshTerminalWorkerEvent::Connected => {
+                    // Connected sessions close through the protocol; only pending
+                    // bootstrap needs immediate cancellation when its pane disappears.
+                    self.startup_cancellation = None;
                     self.connected = true;
                     if let Some(operation) = self.connect_audit.take() {
                         operation.finish(
@@ -534,10 +548,20 @@ impl MoshTerminalSession {
                 self.pending_events.push(TerminalEvent::ClipboardLoad(formatter));
                 false
             }
-            AlacEvent::ColorRequest(_, _)
-            | AlacEvent::TextAreaSizeRequest(_)
-            | AlacEvent::ChildExit(_)
-            | AlacEvent::Exit => false,
+            AlacEvent::ColorSchemeRequest => {
+                let _ = self.write_protocol_bytes(self.palette.color_scheme_report().as_bytes());
+                false
+            }
+            AlacEvent::ColorRequest(index, formatter) => {
+                let color = crate::color_for_alacritty_request(
+                    index,
+                    &self.palette,
+                    self.term.lock().colors(),
+                );
+                let _ = self.write_protocol_bytes(formatter(color).as_bytes());
+                false
+            }
+            AlacEvent::TextAreaSizeRequest(_) | AlacEvent::ChildExit(_) | AlacEvent::Exit => false,
         }
     }
 }
@@ -616,6 +640,16 @@ impl TerminalSessionBackend for MoshTerminalSession {
             text.as_bytes().to_vec()
         };
         self.queue_user_input(&bytes, PredictionAction::Barrier)
+    }
+
+    fn set_palette(&mut self, palette: TerminalPalette) {
+        if self.palette == palette {
+            return;
+        }
+        self.palette = palette;
+        // Unchanged rows still hold colors resolved from the old palette.
+        self.term.lock().mark_fully_damaged();
+        self.term.lock().notify_palette_changed();
     }
 
     fn set_encoding(&mut self, _encoding: TerminalEncoding) {
@@ -704,6 +738,7 @@ impl TerminalSessionBackend for MoshTerminalSession {
                 cell_height: self.resize.cell_height,
             },
             &self.graphics,
+            &self.palette,
             delta,
             previous,
         )
@@ -763,6 +798,7 @@ impl TerminalSessionBackend for MoshTerminalSession {
                 cell_height: self.resize.cell_height,
             },
             &self.graphics,
+            &self.palette,
         )
     }
 
@@ -776,6 +812,7 @@ impl TerminalSessionBackend for MoshTerminalSession {
                 cell_height: self.resize.cell_height,
             },
             &self.graphics,
+            &self.palette,
             previous,
         )
     }
@@ -790,6 +827,7 @@ impl TerminalSessionBackend for MoshTerminalSession {
                 cell_height: self.resize.cell_height,
             },
             &self.graphics,
+            &self.palette,
             display_offset,
             rows,
         )
@@ -802,6 +840,7 @@ impl TerminalSessionBackend for MoshTerminalSession {
         if matches!(self.lifecycle, TerminalLifecycle::Closed) {
             return;
         }
+        if let Some(cancellation) = self.startup_cancellation.take() { cancellation.cancel(); }
         if let Some(sink) = &self.recording_sink {
             sink.interrupt();
         }
@@ -832,6 +871,8 @@ impl TerminalSessionBackend for MoshTerminalSession {
 }
 
 async fn run_mosh_terminal_worker(
+    executable: std::path::PathBuf,
+    lease: Result<oxideterm_mosh::MoshSessionLease, oxideterm_mosh::MoshSessionStartError>,
     mut bootstrap: oxideterm_mosh::MoshBootstrapConfig,
     bootstrap_context: oxideterm_mosh::MoshBootstrapContext,
     initial_resize: TerminalResize,
@@ -840,7 +881,22 @@ async fn run_mosh_terminal_worker(
 ) {
     bootstrap.terminal_columns = u16::try_from(initial_resize.cols).unwrap_or(u16::MAX);
     bootstrap.terminal_rows = u16::try_from(initial_resize.rows).unwrap_or(u16::MAX);
-    let bootstrap = match oxideterm_mosh::bootstrap_mosh(bootstrap, bootstrap_context).await {
+    let mut lease = match lease {
+        Ok(lease) => lease,
+        Err(error) => {
+            let _ = worker_tx.send_control(MoshTerminalWorkerEvent::Failed(error.to_string()));
+            return;
+        }
+    };
+    let bootstrap = tokio::select! {
+        biased;
+        _ = lease.cancelled() => {
+            let _ = worker_tx.send_control(MoshTerminalWorkerEvent::Closed(false));
+            return;
+        }
+        result = oxideterm_mosh::bootstrap_mosh(bootstrap, bootstrap_context) => result,
+    };
+    let bootstrap = match bootstrap {
         Ok(bootstrap) => bootstrap,
         Err(error) => {
             let _ = worker_tx.send_control(MoshTerminalWorkerEvent::Failed(error.to_string()));
@@ -848,6 +904,8 @@ async fn run_mosh_terminal_worker(
         }
     };
     let session_config = oxideterm_mosh::MoshSessionConfig {
+        executable,
+        lease,
         remote_host: bootstrap.remote_host,
         remote_port: bootstrap.remote_port,
         ip_family: bootstrap.ip_family,
@@ -1000,15 +1058,25 @@ fn prediction_attributes(cell: &AlacrittyCell) -> Vec<u8> {
     if cell.flags.contains(Flags::STRIKEOUT) {
         codes.push("9".to_string());
     }
-    let foreground = crate::color::color_to_rgb(cell.fg);
-    let background = crate::color::color_to_rgb(cell.bg);
-    codes.push(format!(
-        "38;2;{};{};{}",
-        foreground.r, foreground.g, foreground.b
-    ));
-    codes.push(format!(
-        "48;2;{};{};{}",
-        background.r, background.g, background.b
-    ));
+    // Replaying the source color kind keeps predicted text themed like confirmed output.
+    codes.push(sgr_color_code(cell.fg, false));
+    codes.push(sgr_color_code(cell.bg, true));
     format!("\u{1b}[{}m", codes.join(";")).into_bytes()
+}
+
+fn sgr_color_code(color: Color, background: bool) -> String {
+    let (base, bright_base, default_code) = if background {
+        (40, 100, 49)
+    } else {
+        (30, 90, 39)
+    };
+    match color {
+        Color::Named(named) if (named as usize) < 8 => (base + named as usize).to_string(),
+        Color::Named(named) if (named as usize) < 16 => {
+            (bright_base + named as usize - 8).to_string()
+        }
+        Color::Named(_) => default_code.to_string(),
+        Color::Indexed(index) => format!("{};5;{index}", base + 8),
+        Color::Spec(rgb) => format!("{};2;{};{};{}", base + 8, rgb.r, rgb.g, rgb.b),
+    }
 }

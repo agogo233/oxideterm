@@ -37,6 +37,15 @@ pub enum ThemeEditorTextInputKind {
     InlineColor,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ThemePreviewPage {
+    Connections,
+    #[default]
+    Terminal,
+    Sftp,
+    NewConnection,
+}
+
 pub fn settings_appearance_card_shell(
     tokens: &ThemeTokens,
     background_active: bool,
@@ -182,53 +191,360 @@ pub fn settings_appearance_radius_control(
 pub fn settings_appearance_theme_preview(
     tokens: &ThemeTokens,
     settings: &PersistedSettings,
-    terminal: TerminalTheme,
-    name: String,
+    application_name: String,
+    terminal_name: String,
+    description: String,
     i18n: &I18n,
+    page: ThemePreviewPage,
+    background: Option<AnyElement>,
+    background_scope: oxideterm_settings::BackgroundScope,
+    on_select: impl Fn(ThemePreviewPage, &mut gpui::Window, &mut gpui::App) + Clone + 'static,
 ) -> AnyElement {
-    // This is a static terminal sample, so it can live outside WorkspaceApp
-    // without knowing anything about panes, sessions, or live terminal state.
+    // The caller resolves the candidate application and terminal palettes independently.
+    // Sharing one frame makes their contrast visible without changing the live workspace.
+    let ui = tokens.ui;
+    let window_background =
+        background.is_some() && background_scope == oxideterm_settings::BackgroundScope::Window;
+    let (window_layer, content_layer) = if window_background {
+        (background, None)
+    } else {
+        (None, background)
+    };
+    let sidebar_item = |id: &'static str, key: &str, target: ThemePreviewPage| {
+        let on_select = on_select.clone();
+        oxideterm_gpui_ui::select::select_inline_option_row(tokens, page == target, false)
+            .id(id)
+            .debug_selector(move || id.into())
+            .on_click(move |_, window, cx| {
+                on_select(target, window, cx);
+                cx.stop_propagation();
+            })
+            .child(div().min_w_0().truncate().child(i18n.t(key)))
+    };
+    let tab = |id: &'static str, label: String, target: ThemePreviewPage| {
+        let on_select = on_select.clone();
+        oxideterm_gpui_ui::tabs::tabs_trigger(tokens, label, page == target)
+            .when(window_background, |tab| {
+                tab.bg(if page == target {
+                    rgba((ui.bg << 8) | SETTINGS_BG_ACTIVE_SURFACE_ALPHA)
+                } else {
+                    rgba(0x00000000)
+                })
+            })
+            .id(id)
+            .debug_selector(move || id.into())
+            .min_w_0()
+            .truncate()
+            .text_size(px(tokens.metrics.ui_text_xs))
+            .on_click(move |_, window, cx| {
+                on_select(target, window, cx);
+                cx.stop_propagation();
+            })
+    };
+    let content = match page {
+        ThemePreviewPage::Terminal => {
+            settings_terminal_theme_sample(tokens, settings, i18n, content_layer, window_background)
+        }
+        _ => {
+            settings_application_theme_sample(tokens, page, i18n, content_layer, window_background)
+        }
+    };
     div()
+        .relative()
         .w_full()
+        .min_w_0()
+        .flex_none()
         .mt(px(tokens.metrics.settings_font_preview_margin_top))
         .rounded(px(tokens.radii.md))
         .border_1()
-        .border_color(rgb(tokens.ui.border))
-        .bg(rgb(terminal.background))
-        .p(px(tokens.metrics.settings_theme_preview_padding))
+        .border_color(rgb(ui.border))
+        // Background media and effects share one rounded clip with the preview chrome.
+        .clip_rounded()
+        .bg(rgb(ui.bg_panel))
+        .text_size(px(tokens.metrics.ui_text_xs))
+        .text_color(rgb(ui.text))
+        .overflow_hidden()
         .flex()
         .flex_col()
-        .gap(px(8.0))
+        .when_some(window_layer, |preview, background| {
+            preview.child(background)
+        })
         .child(
             div()
+                .relative()
+                .px(px(tokens.metrics.settings_theme_preview_padding))
+                .py(px(tokens.spacing.two))
+                .border_b_1()
+                .border_color(rgb(ui.border))
                 .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(tokens.metrics.settings_theme_preview_dot_gap))
-                .child(settings_appearance_preview_dot(
-                    terminal.red,
-                    tokens.metrics.settings_theme_preview_dot_size,
-                ))
-                .child(settings_appearance_preview_dot(
-                    terminal.yellow,
-                    tokens.metrics.settings_theme_preview_dot_size,
-                ))
-                .child(settings_appearance_preview_dot(
-                    terminal.green,
-                    tokens.metrics.settings_theme_preview_dot_size,
-                ))
-                .child(div().flex_1())
-                .child(
-                    div()
-                        .text_size(px(tokens.metrics.ui_text_xs))
-                        .text_color(rgb(terminal.foreground))
-                        .min_w_0()
-                        .truncate()
-                        .child(name),
-                ),
+                .flex_col()
+                .gap(px(tokens.spacing.one))
+                .child(div().min_w_0().truncate().child(application_name))
+                .child(div().text_color(rgb(ui.text_muted)).child(description)),
         )
         .child(
             div()
+                .relative()
+                .flex()
+                .child(
+                    div()
+                        .w(relative(0.28))
+                        .flex_none()
+                        .min_w_0()
+                        .p(px(tokens.spacing.two))
+                        .border_r_1()
+                        .border_color(rgb(ui.border))
+                        .flex()
+                        .flex_col()
+                        .gap(px(tokens.spacing.one))
+                        .child(sidebar_item(
+                            "theme-preview-connections",
+                            "settings_view.tabs.connections",
+                            ThemePreviewPage::Connections,
+                        ))
+                        .child(sidebar_item(
+                            "theme-preview-terminal",
+                            "settings_view.tabs.terminal",
+                            ThemePreviewPage::Terminal,
+                        ))
+                        .child(sidebar_item(
+                            "theme-preview-sftp",
+                            "settings_view.tabs.sftp",
+                            ThemePreviewPage::Sftp,
+                        ))
+                        .child(div().flex_1())
+                        .child(
+                            oxideterm_gpui_ui::button::toolbar_button(
+                                tokens,
+                                String::new(),
+                                None,
+                                oxideterm_gpui_ui::button::ToolbarButtonOptions {
+                                    button: oxideterm_gpui_ui::button::ButtonOptions {
+                                        variant: oxideterm_gpui_ui::button::ButtonVariant::Default,
+                                        size: oxideterm_gpui_ui::button::ButtonSize::Sm,
+                                        ..Default::default()
+                                    },
+                                    show_label: false,
+                                    background: Some(rgb(tokens.ui.accent)),
+                                    text_color: Some(rgb(tokens.ui.accent_text)),
+                                    hover_background: Some(rgb(tokens.ui.accent_hover)),
+                                    ..Default::default()
+                                },
+                            )
+                            .id("theme-preview-new-connection")
+                            .debug_selector(|| "theme-preview-new-connection".into())
+                            .max_w_full()
+                            .min_w_0()
+                            .on_click({
+                                let on_select = on_select.clone();
+                                move |_, window, cx| {
+                                    on_select(ThemePreviewPage::NewConnection, window, cx);
+                                    cx.stop_propagation();
+                                }
+                            })
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .child(i18n.t("layout.empty.new_connection")),
+                            ),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .flex()
+                        .flex_col()
+                        .when(
+                            matches!(page, ThemePreviewPage::Terminal | ThemePreviewPage::Sftp),
+                            |body| {
+                                body.child(
+                                    oxideterm_gpui_ui::tabs::tabs_list(tokens)
+                                        .when(window_background, |tabs| tabs.bg(rgba(0x00000000)))
+                                        .rounded_none()
+                                        .border_b_1()
+                                        .border_color(rgb(ui.border))
+                                        .child(tab(
+                                            "theme-preview-terminal-tab",
+                                            terminal_name,
+                                            ThemePreviewPage::Terminal,
+                                        ))
+                                        .child(tab(
+                                            "theme-preview-sftp-tab",
+                                            i18n.t("settings_view.tabs.sftp"),
+                                            ThemePreviewPage::Sftp,
+                                        )),
+                                )
+                            },
+                        )
+                        .child(content),
+                ),
+        )
+        .into_any_element()
+}
+
+fn settings_application_theme_sample(
+    tokens: &ThemeTokens,
+    page: ThemePreviewPage,
+    i18n: &I18n,
+    background: Option<AnyElement>,
+    window_background: bool,
+) -> AnyElement {
+    let (title, header, rows) = match page {
+        ThemePreviewPage::Connections => (
+            "settings_view.tabs.connections",
+            Some(("sessionManager.table.host", "sessionManager.table.username")),
+            vec![("example.com", "demo"), ("build.example.com", "builder")],
+        ),
+        ThemePreviewPage::NewConnection => (
+            "layout.empty.new_connection",
+            None,
+            vec![
+                ("ssh.form.host", "example.com"),
+                ("ssh.form.username", "demo"),
+                ("ssh.form.port", "22"),
+            ],
+        ),
+        ThemePreviewPage::Sftp => (
+            "settings_view.tabs.sftp",
+            Some(("sftp.file_list.col_name", "sftp.file_list.col_size")),
+            vec![("src/", "—"), ("theme.toml", "2.4 KB")],
+        ),
+        ThemePreviewPage::Terminal => unreachable!(),
+    };
+    div()
+        .relative()
+        .id("theme-preview-application-sample")
+        .debug_selector(move || match page {
+            ThemePreviewPage::Connections => "theme-preview-connections-sample".into(),
+            ThemePreviewPage::Sftp => "theme-preview-sftp-sample".into(),
+            ThemePreviewPage::NewConnection => "theme-preview-new-connection-sample".into(),
+            ThemePreviewPage::Terminal => unreachable!(),
+        })
+        .flex_1()
+        .min_w_0()
+        .p(px(tokens.metrics.settings_theme_preview_padding))
+        .rounded_br(px(oxideterm_gpui_ui::modal::rounded_shell_child_radius(
+            tokens.radii.md,
+        )))
+        .bg(if window_background {
+            // The composed window layer already supplies the preview's readability tint.
+            rgba(0x00000000)
+        } else {
+            rgb(tokens.ui.bg)
+        })
+        .flex()
+        .flex_col()
+        .gap(px(tokens.spacing.two))
+        .when_some(background, |sample, background| sample.child(background))
+        .child(
+            div()
+                .relative()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .child(i18n.t(title)),
+        )
+        .when_some(header, |sample, (left, right)| {
+            sample.child(
+                div()
+                    .relative()
+                    .flex()
+                    .justify_between()
+                    .gap(px(tokens.spacing.two))
+                    .pb(px(tokens.spacing.one))
+                    .border_b_1()
+                    .border_color(rgb(tokens.ui.border))
+                    .text_color(rgb(tokens.ui.text_muted))
+                    .child(i18n.t(left))
+                    .child(i18n.t(right)),
+            )
+        })
+        .children(rows.into_iter().map(|(key, value)| {
+            div()
+                .relative()
+                .flex()
+                .justify_between()
+                .gap(px(tokens.spacing.two))
+                .child(div().text_color(rgb(tokens.ui.text_muted)).child(
+                    if page == ThemePreviewPage::NewConnection {
+                        i18n.t(key)
+                    } else {
+                        key.to_owned()
+                    },
+                ))
+                .child(div().min_w_0().truncate().child(value))
+        }))
+        .into_any_element()
+}
+
+pub fn settings_application_palette_swatch(tokens: &ThemeTokens, ui: AppUiColors) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(3.0))
+        .rounded(px(tokens.radii.xs))
+        .border_1()
+        .border_color(rgb(ui.border))
+        .bg(rgb(ui.bg))
+        .px(px(5.0))
+        .py(px(2.0))
+        .child(
+            div()
+                .text_size(px(tokens.metrics.ui_text_xs))
+                .text_color(rgb(ui.text))
+                .child("Aa"),
+        )
+        .child(
+            div()
+                .px(px(5.0))
+                .rounded(px(tokens.radii.xs))
+                .bg(rgb(ui.accent))
+                .text_size(px(tokens.metrics.ui_text_xs))
+                .text_color(rgb(ui.accent_text))
+                .child("Aa"),
+        )
+        .children([ui.bg_panel, ui.border, ui.text_muted].map(|color| {
+            div()
+                .flex_none()
+                .size(px(9.0))
+                .rounded(px(tokens.radii.xs))
+                .bg(rgb(color))
+        }))
+}
+
+fn settings_terminal_theme_sample(
+    tokens: &ThemeTokens,
+    settings: &PersistedSettings,
+    i18n: &I18n,
+    background: Option<AnyElement>,
+    window_background: bool,
+) -> AnyElement {
+    // This is a static terminal sample, so it can live outside WorkspaceApp
+    // without knowing anything about panes, sessions, or live terminal state.
+    let terminal = tokens.terminal;
+    div()
+        .relative()
+        .id("theme-preview-terminal-sample")
+        .debug_selector(|| "theme-preview-terminal-sample".into())
+        .flex_1()
+        .min_w_0()
+        .rounded_br(px(oxideterm_gpui_ui::modal::rounded_shell_child_radius(
+            tokens.radii.md,
+        )))
+        .bg(if window_background {
+            // Live terminal panes let the window background provide its own readability tint.
+            rgba(0x00000000)
+        } else {
+            rgb(terminal.background)
+        })
+        .p(px(tokens.metrics.settings_theme_preview_padding))
+        .flex()
+        .flex_col()
+        .when_some(background, |sample, background| sample.child(background))
+        .child(
+            div()
+                .relative()
                 .font_family(
                     settings
                         .terminal
@@ -238,6 +554,8 @@ pub fn settings_appearance_theme_preview(
                 .text_size(px(tokens.metrics.ui_text_xs))
                 .line_height(px(tokens.metrics.settings_theme_preview_line_height))
                 .text_color(rgb(terminal.foreground))
+                .whitespace_nowrap()
+                .overflow_hidden()
                 .flex()
                 .flex_col()
                 .child(
@@ -319,25 +637,37 @@ pub fn settings_theme_editor_preview(
     terminal: TerminalTheme,
     ui: AppUiColors,
     mono_font_family: SharedString,
+    background: Option<AnyElement>,
+    background_scope: oxideterm_settings::BackgroundScope,
 ) -> AnyElement {
     // The editor preview renders candidate colors directly from the draft
     // palette; save/delete/cancel behavior remains in the app modal wrapper.
+    let window_background =
+        background.is_some() && background_scope == oxideterm_settings::BackgroundScope::Window;
     div()
+        .relative()
         // The scroll body may contain a much taller UI palette. Keep the
         // preview at its intrinsic height instead of letting flexbox collapse it.
         .flex_none()
         .rounded(px(tokens.radii.sm))
+        .clip_rounded()
         .border_1()
         .border_color(rgb(tokens.ui.border))
         .bg(rgb(terminal.background))
         .overflow_hidden()
         .flex()
         .flex_col()
+        .when_some(background, |preview, background| preview.child(background))
         .child(
             div()
+                .relative()
                 .px(px(12.0))
                 .py(px(6.0))
-                .bg(rgb(ui.bg_panel))
+                .bg(if window_background {
+                    rgba(0x00000000)
+                } else {
+                    rgb(ui.bg_panel)
+                })
                 .flex()
                 .flex_row()
                 .items_center()
@@ -364,6 +694,7 @@ pub fn settings_theme_editor_preview(
         )
         .child(
             div()
+                .relative()
                 .p(px(12.0))
                 .font_family(mono_font_family)
                 .text_size(px(tokens.metrics.ui_text_xs))
@@ -416,11 +747,16 @@ pub fn settings_theme_editor_preview(
         )
         .child(
             div()
+                .relative()
                 .px(px(12.0))
                 .py(px(6.0))
                 .border_t_1()
                 .border_color(rgb(ui.border))
-                .bg(rgb(ui.bg))
+                .bg(if window_background {
+                    rgba(0x00000000)
+                } else {
+                    rgb(ui.bg)
+                })
                 .flex()
                 .items_center()
                 .gap(px(8.0))
@@ -706,13 +1042,14 @@ pub fn settings_background_empty_hint(tokens: &ThemeTokens, label: String) -> An
 pub fn settings_background_thumbnail_frame(
     tokens: &ThemeTokens,
     image_path: &str,
+    image_source: gpui::ImageSource,
     active: bool,
     active_label: String,
+    format_label: String,
     image_fallback_icon: impl Fn() -> AnyElement + 'static,
 ) -> Div {
     // The frame owns crop, fallback, active border, and badge. Select/remove
     // mouse handlers are intentionally attached by the app after construction.
-    let image_source = std::path::PathBuf::from(image_path);
     let fallback_label = std::path::Path::new(image_path)
         .file_name()
         .and_then(|name| name.to_str())
@@ -723,6 +1060,10 @@ pub fn settings_background_thumbnail_frame(
     let fallback_bg = tokens.ui.bg_sunken;
     let thumbnail_radius = tokens.radii.md;
     let image = img(image_source)
+        // An absolute image uses the resolved aspect-ratio frame height instead
+        // of contributing its intrinsic height and losing its lower corners to overflow.
+        .absolute()
+        .inset_0()
         .w_full()
         .h_full()
         .object_fit(ObjectFit::Cover)
@@ -768,13 +1109,29 @@ pub fn settings_background_thumbnail_frame(
         .cursor_pointer()
         // Keep the crop owned by the wrapper so the rounded border and image
         // match the browser BackgroundImageSection thumbnail.
-        .child(image);
+        .child(image)
+        .child(
+            oxideterm_gpui_ui::badge::status_pill(
+                tokens,
+                format_label,
+                oxideterm_gpui_ui::badge::StatusPillOptions::new(
+                    oxideterm_gpui_ui::badge::StatusTone::Neutral,
+                )
+                .compact(),
+            )
+            .absolute()
+            .top(px(6.0))
+            .left(px(6.0))
+            .rounded(px(tokens.radii.sm))
+            .bg(rgba((tokens.ui.bg_elevated << 8) | 0xe6))
+            .text_color(rgb(tokens.ui.text)),
+        );
     thumbnail.style().aspect_ratio = Some(BACKGROUND_THUMBNAIL_ASPECT_RATIO);
     thumbnail.when(active, |thumb| {
         thumb.child(
             div()
                 .absolute()
-                .top(px(8.0))
+                .bottom(px(8.0))
                 .left(px(8.0))
                 .rounded(px(tokens.radii.sm))
                 .bg(rgb(tokens.ui.accent))

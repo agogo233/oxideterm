@@ -93,8 +93,8 @@ struct GammaParams {
 
 @group(0) @binding(0) var<uniform> globals: GlobalParams;
 @group(0) @binding(1) var<uniform> gamma_params: GammaParams;
-@group(1) @binding(1) var t_sprite: texture_2d<f32>;
-@group(1) @binding(2) var s_sprite: sampler;
+@group(2) @binding(0) var t_sprite: texture_2d<f32>;
+@group(2) @binding(1) var s_sprite: sampler;
 
 const M_PI_F: f32 = 3.1415926;
 const GRAYSCALE_FACTORS: vec3<f32> = vec3<f32>(0.2126, 0.7152, 0.0722);
@@ -407,7 +407,7 @@ fn prepare_gradient_color(tag: u32, color_space: u32,
 
     if (tag == 0u || tag == 2u || tag == 3u) {
         result.solid = hsla_to_rgba(solid);
-    } else if (tag == 1u) {
+    } else if (tag == 1u || tag == 4u) {
         // The hsla_to_rgba is returns a linear sRGB color
         result.color0 = hsla_to_rgba(colors[0].color);
         result.color1 = hsla_to_rgba(colors[1].color);
@@ -426,6 +426,15 @@ fn prepare_gradient_color(tag: u32, color_space: u32,
     }
 
     return result;
+}
+
+fn mineral_noise(cell: vec2<f32>) -> f32 {
+    let p = vec2<u32>(floor(cell));
+    var h = p.x * 0x9e3779b9u ^ p.y * 0x85ebca6bu;
+    h ^= h >> 16u;
+    h *= 0x7feb352du;
+    h ^= h >> 15u;
+    return f32(h & 0xffffu) / 65535.0;
 }
 
 fn gradient_color(background: Background, position: vec2<f32>, bounds: Bounds,
@@ -509,6 +518,23 @@ fn gradient_color(background: Background, position: vec2<f32>, bounds: Bounds,
             background_color = solid_color;
             background_color.a *= saturate(should_be_colored);
         }
+        case 4u: {
+            let local = position - bounds.origin;
+            let uv = local / bounds.size;
+            let grain_size = background.gradient_angle_or_pattern_height;
+            let roughness = background.colors[0].percentage;
+            let phase = background.colors[1].percentage;
+            let grain = mineral_noise(local / grain_size);
+            let field = mineral_noise(local / (grain_size * 12.0));
+            let sheen = pow(sin(uv.x * 3.0 + uv.y * 1.7 + phase) * 0.5 + 0.5, 5.0);
+            let mixed = mix(color0, color1, field * 0.7 + grain * 0.3);
+            if (background.color_space == 1u) {
+                background_color = oklab_to_linear_srgb(mixed);
+            } else {
+                background_color = srgba_to_linear(mixed);
+            }
+            background_color.a *= min(1.0, 0.08 + grain * roughness * 0.80 + sheen * background.solid.h * 0.38);
+        }
     }
 
     return background_color;
@@ -526,7 +552,6 @@ struct Quad {
     corner_radii: Corners,
     border_widths: Edges,
 }
-@group(1) @binding(0) var<storage, read> b_quads: array<Quad>;
 
 struct QuadVarying {
     @builtin(position) position: vec4<f32>,
@@ -542,7 +567,7 @@ struct QuadVarying {
 @vertex
 fn vs_quad(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) instance_id: u32) -> QuadVarying {
     let unit_vertex = vec2<f32>(f32(vertex_id & 1u), 0.5 * f32(vertex_id & 2u));
-    let quad = b_quads[instance_id];
+    let quad = load_quad(instance_id);
 
     var out = QuadVarying();
     out.position = to_device_position(unit_vertex, quad.bounds);
@@ -569,7 +594,7 @@ fn fs_quad(input: QuadVarying) -> @location(0) vec4<f32> {
         return vec4<f32>(0.0);
     }
 
-    let quad = b_quads[input.quad_id];
+    let quad = load_quad(input.quad_id);
 
     let background_color = gradient_color(quad.background, input.position.xy, quad.bounds,
         input.background_solid, input.background_color0, input.background_color1);
@@ -964,7 +989,6 @@ struct Shadow {
     inset: u32,
     pad: u32, // align to 8 bytes
 }
-@group(1) @binding(0) var<storage, read> b_shadows: array<Shadow>;
 
 struct ShadowVarying {
     @builtin(position) position: vec4<f32>,
@@ -977,7 +1001,7 @@ struct ShadowVarying {
 @vertex
 fn vs_shadow(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) instance_id: u32) -> ShadowVarying {
     let unit_vertex = vec2<f32>(f32(vertex_id & 1u), 0.5 * f32(vertex_id & 2u));
-    var shadow = b_shadows[instance_id];
+    var shadow = load_shadow(instance_id);
 
     var geometry: Bounds;
     if (shadow.inset != 0u) {
@@ -1005,7 +1029,7 @@ fn fs_shadow(input: ShadowVarying) -> @location(0) vec4<f32> {
         return vec4<f32>(0.0);
     }
 
-    let shadow = b_shadows[input.shadow_id];
+    let shadow = load_shadow(input.shadow_id);
     let half_size = shadow.bounds.size / 2.0;
     let center = shadow.bounds.origin + half_size;
     let center_to_point = input.position.xy - center;
@@ -1056,7 +1080,6 @@ struct PathRasterizationVertex {
     bounds: Bounds,
 }
 
-@group(1) @binding(0) var<storage, read> b_path_vertices: array<PathRasterizationVertex>;
 
 struct PathRasterizationVarying {
     @builtin(position) position: vec4<f32>,
@@ -1068,7 +1091,7 @@ struct PathRasterizationVarying {
 
 @vertex
 fn vs_path_rasterization(@builtin(vertex_index) vertex_id: u32) -> PathRasterizationVarying {
-    let v = b_path_vertices[vertex_id];
+    let v = load_path_vertex(vertex_id);
 
     var out = PathRasterizationVarying();
     out.position = to_device_position_impl(v.xy_position);
@@ -1086,7 +1109,7 @@ fn fs_path_rasterization(input: PathRasterizationVarying) -> @location(0) vec4<f
         return vec4<f32>(0.0);
     }
 
-    let v = b_path_vertices[input.vertex_id];
+    let v = load_path_vertex(input.vertex_id);
     let background = v.color;
     let bounds = v.bounds;
 
@@ -1116,7 +1139,6 @@ fn fs_path_rasterization(input: PathRasterizationVarying) -> @location(0) vec4<f
 struct PathSprite {
     bounds: Bounds,
 }
-@group(1) @binding(0) var<storage, read> b_path_sprites: array<PathSprite>;
 
 struct PathVarying {
     @builtin(position) position: vec4<f32>,
@@ -1126,7 +1148,7 @@ struct PathVarying {
 @vertex
 fn vs_path(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) instance_id: u32) -> PathVarying {
     let unit_vertex = vec2<f32>(f32(vertex_id & 1u), 0.5 * f32(vertex_id & 2u));
-    let sprite = b_path_sprites[instance_id];
+    let sprite = load_path_sprite(instance_id);
     // Don't apply content mask because it was already accounted for when rasterizing the path.
     let device_position = to_device_position(unit_vertex, sprite.bounds);
     // For screen-space intermediate texture, convert screen position to texture coordinates
@@ -1157,7 +1179,6 @@ struct Underline {
     thickness: f32,
     wavy: u32,
 }
-@group(1) @binding(0) var<storage, read> b_underlines: array<Underline>;
 
 struct UnderlineVarying {
     @builtin(position) position: vec4<f32>,
@@ -1170,7 +1191,7 @@ struct UnderlineVarying {
 @vertex
 fn vs_underline(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) instance_id: u32) -> UnderlineVarying {
     let unit_vertex = vec2<f32>(f32(vertex_id & 1u), 0.5 * f32(vertex_id & 2u));
-    let underline = b_underlines[instance_id];
+    let underline = load_underline(instance_id);
 
     var out = UnderlineVarying();
     out.position = to_device_position(unit_vertex, underline.bounds);
@@ -1190,7 +1211,7 @@ fn fs_underline(input: UnderlineVarying) -> @location(0) vec4<f32> {
         return vec4<f32>(0.0);
     }
 
-    let underline = b_underlines[input.underline_id];
+    let underline = load_underline(input.underline_id);
     if ((underline.wavy & 0xFFu) == 0u)
     {
         return blend_color(input.color, input.color.a);
@@ -1223,7 +1244,6 @@ struct MonochromeSprite {
     tile: AtlasTile,
     transformation: TransformationMatrix,
 }
-@group(1) @binding(0) var<storage, read> b_mono_sprites: array<MonochromeSprite>;
 
 struct MonoSpriteVarying {
     @builtin(position) position: vec4<f32>,
@@ -1235,7 +1255,7 @@ struct MonoSpriteVarying {
 @vertex
 fn vs_mono_sprite(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) instance_id: u32) -> MonoSpriteVarying {
     let unit_vertex = vec2<f32>(f32(vertex_id & 1u), 0.5 * f32(vertex_id & 2u));
-    let sprite = b_mono_sprites[instance_id];
+    let sprite = load_mono_sprite(instance_id);
 
     var out = MonoSpriteVarying();
     out.position = to_device_position_transformed(unit_vertex, sprite.bounds, sprite.transformation);
@@ -1271,7 +1291,6 @@ struct PolychromeSprite {
     corner_radii: Corners,
     tile: AtlasTile,
 }
-@group(1) @binding(0) var<storage, read> b_poly_sprites: array<PolychromeSprite>;
 
 struct PolySpriteVarying {
     @builtin(position) position: vec4<f32>,
@@ -1283,7 +1302,7 @@ struct PolySpriteVarying {
 @vertex
 fn vs_poly_sprite(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) instance_id: u32) -> PolySpriteVarying {
     let unit_vertex = vec2<f32>(f32(vertex_id & 1u), 0.5 * f32(vertex_id & 2u));
-    let sprite = b_poly_sprites[instance_id];
+    let sprite = load_poly_sprite(instance_id);
 
     var out = PolySpriteVarying();
     out.position = to_device_position(unit_vertex, sprite.bounds);
@@ -1301,7 +1320,7 @@ fn fs_poly_sprite(input: PolySpriteVarying) -> @location(0) vec4<f32> {
         return vec4<f32>(0.0);
     }
 
-    let sprite = b_poly_sprites[input.sprite_id];
+    let sprite = load_poly_sprite(input.sprite_id);
     let distance = quad_sdf(input.position.xy, sprite.bounds, sprite.corner_radii);
 
     var color = sample;
@@ -1317,6 +1336,9 @@ fn fs_poly_sprite(input: PolySpriteVarying) -> @location(0) vec4<f32> {
 struct SurfaceParams {
     bounds: Bounds,
     content_mask: Bounds,
+    opacity: f32,
+    rotation: u32,
+    sample_size: vec2<f32>,
 }
 
 @group(1) @binding(0) var<uniform> surface_locals: SurfaceParams;
@@ -1336,6 +1358,9 @@ fn vs_surface(@builtin(vertex_index) vertex_id: u32) -> SurfaceVarying {
     var out = SurfaceVarying();
     out.position = to_device_position(unit_vertex, surface_locals.bounds);
     out.texture_position = unit_vertex;
+    if (surface_locals.rotation == 90u) { out.texture_position = vec2<f32>(unit_vertex.y, 1.0 - unit_vertex.x); }
+    else if (surface_locals.rotation == 180u) { out.texture_position = 1.0 - unit_vertex; }
+    else if (surface_locals.rotation == 270u) { out.texture_position = vec2<f32>(1.0 - unit_vertex.y, unit_vertex.x); }
     out.clip_distances = distance_from_clip_rect(unit_vertex, surface_locals.bounds, surface_locals.content_mask);
     return out;
 }
@@ -1346,7 +1371,15 @@ fn fs_surface(input: SurfaceVarying) -> @location(0) vec4<f32> {
         return vec4<f32>(0.0);
     }
 
-    return textureSampleLevel(t_surface, s_surface, input.texture_position, 0.0);
+    var grid = surface_locals.sample_size;
+    if (surface_locals.rotation == 90u || surface_locals.rotation == 270u) { grid = grid.yx; }
+    let position = input.texture_position * grid - 0.5;
+    let base = (floor(position) + 0.5) / grid;
+    let step = 1.0 / grid;
+    let weight = fract(position);
+    let top = mix(textureSampleLevel(t_surface, s_surface, base, 0.0), textureSampleLevel(t_surface, s_surface, base + vec2<f32>(step.x, 0.0), 0.0), weight.x);
+    let bottom = mix(textureSampleLevel(t_surface, s_surface, base + vec2<f32>(0.0, step.y), 0.0), textureSampleLevel(t_surface, s_surface, base + step, 0.0), weight.x);
+    return blend_color(mix(top, bottom, weight.y), surface_locals.opacity);
 }
 
 // --- blur --- //
@@ -1458,7 +1491,8 @@ fn fs_blur_composite(input: BlurVarying) -> @location(0) vec4<f32> {
     // downsample wrote (anchored at the origin, independent of viewport parity). `2*floor(W/2)` is
     // the source span the half-res texture covers; dividing by it maps screen pixel p to half-res
     // texel p/2 at every window size, so the composite stays put rather than wobbling on resize.
-    let blur_span = 2.0 * floor(globals.viewport_size * 0.5);
+    // Clip-only groups retain full resolution; blurred groups use the fixed 2:1 grid.
+    let blur_span = select(globals.viewport_size, 2.0 * floor(globals.viewport_size * 0.5), blur_locals.downsample > 0.5);
     let uv = input.position.xy / blur_span;
     let blurred = textureSampleLevel(t_blur, s_blur, uv, 0.0);
 

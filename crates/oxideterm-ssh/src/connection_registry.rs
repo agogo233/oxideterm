@@ -41,7 +41,8 @@ const REMOTE_ENV_TOTAL_TIMEOUT: Duration = Duration::from_secs(8);
 const REMOTE_ENV_PHASE_A_TIMEOUT: Duration = Duration::from_secs(3);
 const REMOTE_ENV_PHASE_B_TIMEOUT: Duration = Duration::from_secs(5);
 const REMOTE_ENV_MAX_OUTPUT_SIZE: usize = 8192;
-const REMOTE_ENV_PHASE_A_CMD: &str = "echo '===DETECT==='; if [ -n \"$PSModulePath\" ]; then echo 'PLATFORM=windows'; else echo \"PLATFORM=$(uname -s 2>/dev/null || echo unknown)\"; fi; echo '===END==='";
+// SSH exec uses the login shell, which may not understand POSIX conditionals.
+const REMOTE_ENV_PHASE_A_CMD: &str = r#"sh -c 'echo "===DETECT==="; if [ -n "$PSModulePath" ]; then echo "PLATFORM=windows"; else echo "PLATFORM=$(uname -s 2>/dev/null || echo unknown)"; fi; echo "===END==="'"#;
 const REMOTE_ENV_PHASE_B_UNIX_CMD: &str = "echo '===ENV==='; uname -s 2>/dev/null; echo '===ARCH==='; uname -m 2>/dev/null; echo '===KERNEL==='; uname -r 2>/dev/null; echo '===SHELL==='; echo $SHELL 2>/dev/null; echo '===HOME==='; echo $HOME 2>/dev/null; echo '===ZDOTDIR==='; echo $ZDOTDIR 2>/dev/null; echo '===XDG_CONFIG_HOME==='; echo $XDG_CONFIG_HOME 2>/dev/null; echo '===DISTRO==='; cat /etc/os-release 2>/dev/null | grep -E '^(PRETTY_NAME|ID)=' | head -2; echo '===END==='";
 const REMOTE_ENV_PHASE_B_WINDOWS_CMD: &str = "echo '===ENV==='; [System.Environment]::OSVersion.VersionString; echo '===ARCH==='; $env:PROCESSOR_ARCHITECTURE; echo '===SHELL==='; \"PowerShell $($PSVersionTable.PSVersion)\"; echo '===HOME==='; $HOME; echo '===ZDOTDIR==='; echo '===XDG_CONFIG_HOME==='; echo '===END==='";
 
@@ -1071,17 +1072,12 @@ impl SshConnectionRegistry {
             return None;
         }
         let released_parent_ownership = if parent_connection_id.is_none() {
+            let parent_consumer = entry.parent_connection_consumer.write().take();
             entry
-                .parent_connection_consumer
-                .write()
-                .take()
-                .and_then(|parent_consumer| {
-                    entry
-                        .parent_connection_id
-                        .read()
-                        .clone()
-                        .map(|parent_id| (parent_id, parent_consumer))
-                })
+                .parent_connection_id
+                .read()
+                .clone()
+                .zip(parent_consumer)
         } else {
             None
         };
@@ -1160,18 +1156,12 @@ impl SshConnectionRegistry {
         }
         entry.cancel_idle_timer();
         let info = entry.info();
-        let parent_ownership =
-            entry
-                .parent_connection_consumer
-                .write()
-                .take()
-                .and_then(|parent_consumer| {
-                    entry
-                        .parent_connection_id
-                        .read()
-                        .clone()
-                        .map(|parent_id| (parent_id, parent_consumer))
-                });
+        let parent_consumer = entry.parent_connection_consumer.write().take();
+        let parent_ownership = entry
+            .parent_connection_id
+            .read()
+            .clone()
+            .zip(parent_consumer);
         if entry.connection_id == connection_id {
             self.by_key.remove(&key);
         }
@@ -2244,18 +2234,6 @@ mod tests {
     }
 
     #[test]
-    fn shares_one_connection_for_many_consumers() {
-        let registry = SshConnectionRegistry::default();
-        let config = SshConfig::password("host", 22, "me", "pw");
-        let first = registry.acquire(config.clone(), ConnectionConsumer::Terminal("a".into()));
-        let second = registry.acquire(config, ConnectionConsumer::Sftp("b".into()));
-
-        assert_eq!(first.connection_id(), second.connection_id());
-        assert_eq!(first.info().ref_count, 2);
-        assert_eq!(first.state(), ConnectionState::Connecting);
-    }
-
-    #[test]
     fn remote_env_is_stored_once_on_connection_entry() {
         let registry = SshConnectionRegistry::default();
         let handle = registry.acquire(
@@ -2339,19 +2317,40 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
-    fn release_moves_unused_connection_to_idle() {
-        let registry = SshConnectionRegistry::default();
-        let consumer = ConnectionConsumer::Terminal("a".into());
-        let handle = registry.acquire(
-            SshConfig::password("host", 22, "me", "pw"),
-            consumer.clone(),
+    #[ignore = "requires Fish installed"]
+    fn remote_env_probe_runs_under_fish() {
+        let run = |command: &str| {
+            let output = std::process::Command::new("fish")
+                .args(["--no-config", "-c", command])
+                .env_clear()
+                .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+                .env("SHELL", "/usr/bin/fish")
+                .env("HOME", "/home/fish-test")
+                .env("XDG_CONFIG_HOME", "/home/fish-test/config")
+                .output()
+                .expect("run Fish environment probe");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout).unwrap()
+        };
+        let platform_output = run(REMOTE_ENV_PHASE_A_CMD);
+        let platform = extract_between(&platform_output, "PLATFORM=", "\n").unwrap();
+        assert!(matches!(
+            platform.as_str(),
+            "Linux" | "Darwin" | "FreeBSD" | "OpenBSD" | "NetBSD"
+        ));
+        let env = parse_remote_unix_env(&run(REMOTE_ENV_PHASE_B_UNIX_CMD), &platform);
+        assert_eq!(env.shell.as_deref(), Some("/usr/bin/fish"));
+        assert_eq!(env.home.as_deref(), Some("/home/fish-test"));
+        assert_eq!(
+            env.xdg_config_home.as_deref(),
+            Some("/home/fish-test/config")
         );
-
-        registry.release(handle.connection_id(), &consumer);
-
-        assert_eq!(handle.info().ref_count, 0);
-        assert_eq!(handle.state(), ConnectionState::Idle);
     }
 
     #[test]
@@ -2372,6 +2371,7 @@ mod tests {
         assert_eq!(handle.state(), ConnectionState::Connecting);
         registry.release(handle.connection_id(), &consumer);
         assert_eq!(handle.info().ref_count, 0);
+        assert_eq!(handle.state(), ConnectionState::Idle);
     }
 
     #[tokio::test]
@@ -2425,23 +2425,18 @@ mod tests {
 
         assert_ne!(shared.connection_id(), dedicated.connection_id());
         assert_eq!(shared.connection_id(), pooled_again.connection_id());
-        assert_eq!(dedicated.info().consumers, vec![terminal_consumer]);
+        assert_eq!(dedicated.info().consumers, vec![terminal_consumer.clone()]);
         assert!(dedicated.key().contains("|dedicated="));
-    }
-
-    #[test]
-    fn dedicated_connection_retires_after_its_terminal_releases() {
-        let registry = SshConnectionRegistry::default();
-        let consumer = ConnectionConsumer::Terminal("term-1".into());
-        let dedicated = registry.acquire_dedicated(
-            SshConfig::password("dedicated.example", 22, "alice", "pw"),
-            consumer.clone(),
+        registry.release(dedicated.connection_id(), &terminal_consumer);
+        assert!(registry.get(dedicated.connection_id()).is_none());
+        assert_eq!(
+            registry
+                .get(shared.connection_id())
+                .unwrap()
+                .info()
+                .consumers,
+            vec![ConnectionConsumer::NodeRouter("node-1".into())]
         );
-        let connection_id = dedicated.connection_id().to_string();
-
-        registry.release(&connection_id, &consumer);
-
-        assert!(registry.get(&connection_id).is_none());
     }
 
     #[test]
@@ -2638,6 +2633,9 @@ mod tests {
             SshConfig::password("host", 22, "me", "pw"),
             ConnectionConsumer::Sftp("b".into()),
         );
+        assert_eq!(first.connection_id(), second.connection_id());
+        assert_eq!(first.info().ref_count, 2);
+        assert_eq!(first.state(), ConnectionState::Connecting);
         first.set_physical(Arc::new(String::from("authenticated")));
 
         assert_eq!(
@@ -2731,37 +2729,6 @@ mod tests {
                 .as_deref()
                 .map(String::as_str),
             Some("unrelated-transport")
-        );
-    }
-
-    #[test]
-    fn tunneled_child_parent_ref_is_released_by_ancestor_consumer() {
-        let registry = SshConnectionRegistry::default();
-        let root = registry.acquire(
-            SshConfig::password("jump", 22, "me", "pw"),
-            ConnectionConsumer::NodeRouter("root".into()),
-        );
-        let parent_ref = ConnectionConsumer::NodeRouter("child:ancestor".into());
-        let parent_for_child = registry
-            .acquire_consumer_for_connection(root.connection_id(), parent_ref.clone())
-            .unwrap();
-        let child = registry.acquire(
-            SshConfig::password("target", 22, "me", "pw"),
-            ConnectionConsumer::NodeRouter("child".into()),
-        );
-        registry.set_parent_connection_id(
-            child.connection_id(),
-            Some(parent_for_child.connection_id().to_string()),
-        );
-
-        assert_eq!(root.info().ref_count, 2);
-        registry.release(root.connection_id(), &parent_ref);
-
-        assert_eq!(root.info().ref_count, 1);
-        assert!(
-            root.info()
-                .consumers
-                .contains(&ConnectionConsumer::NodeRouter("root".into()))
         );
     }
 

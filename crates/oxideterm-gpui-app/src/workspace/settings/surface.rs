@@ -98,7 +98,7 @@ impl WorkspaceApp {
         cx: &mut Context<Self>,
     ) {
         let close_active_settings_tab = self
-            .active_tab(cx)
+            .active_content_tab(cx)
             .is_some_and(|tab| tab.kind == TabKind::Settings);
         self.active_surface = ActiveSurface::Terminal;
         self.terminal_trigger_settings_pane = None;
@@ -108,12 +108,16 @@ impl WorkspaceApp {
         self.close_settings_select();
         self.settings_workspace.update(cx, |settings, cx| {
             settings.close_navigation_editor(cx);
+            settings.totp_draft = None;
+            settings.totp_error = None;
             settings.close_settings_search(true, cx);
         });
         self.focused_settings_input = None;
         self.settings_slider_drag = None;
         if close_active_settings_tab {
-            self.close_active_tab(window, cx);
+            if let Some(tab_id) = self.active_content_tab_id(cx) {
+                self.close_tab_by_id(tab_id, window, cx);
+            }
             return;
         }
         self.focus_active_pane(window, cx);
@@ -251,13 +255,6 @@ impl WorkspaceApp {
                 let settings = self.settings_store.settings();
                 self.ai_disabled_settings_card(
                     self.ai_provider_settings_section(&provider_views, cx),
-                    settings.ai.enabled,
-                )
-            }
-            (AiSettingsPage::Agents, 0) => {
-                let settings = self.settings_store.settings();
-                self.ai_disabled_settings_card(
-                    self.ai_acp_agents_section(settings, cx),
                     settings.ai.enabled,
                 )
             }
@@ -479,9 +476,47 @@ impl WorkspaceApp {
                 settings.sftp.speed_limit_enabled.hash(&mut hasher);
             }
             SettingsTab::Appearance => {
-                // App icon selection only changes paint state. Keeping it out
-                // of the height signature prevents scroll anchoring from
-                // jumping when the icon picker updates its selected badge.
+                let section = index.saturating_sub(SETTINGS_SECTION_HEADER_ITEM_COUNT);
+                if matches!(section, 0 | 3) {
+                    settings
+                        .appearance
+                        .follow_system_appearance
+                        .hash(&mut hasher);
+                    let dark = self.appearance_edit_scheme().unwrap_or(self.system_dark);
+                    let style = settings.resolved_background(dark);
+                    (style.enabled && style.day_cycle).hash(&mut hasher);
+                    if style.day_cycle {
+                        (style.image.is_some() || style.effect.is_some()).hash(&mut hasher);
+                        (self.settings_workspace.read(cx).theme_preview_page as u8)
+                            .hash(&mut hasher);
+                        style.enabled_tabs.hash(&mut hasher);
+                        (style.scope == BackgroundScope::Window).hash(&mut hasher);
+                    }
+                }
+                if section == 0 {
+                    let dark = self.appearance_edit_scheme().unwrap_or(self.system_dark);
+                    for target in [ThemeTarget::Application, ThemeTarget::Terminal] {
+                        is_custom_theme_id(target.resolved_id(settings, dark)).hash(&mut hasher);
+                    }
+                } else if section == 3 {
+                    // Source and effect capabilities add rows; paint-only adjustments keep scroll anchoring stable.
+                    let style = settings.resolved_background(
+                        self.appearance_edit_scheme().unwrap_or(self.system_dark),
+                    );
+                    style.image.is_some().hash(&mut hasher);
+                    style.parallax.hash(&mut hasher);
+                    style.camera.is_some().hash(&mut hasher);
+                    style
+                        .effect
+                        .as_ref()
+                        .map(|effect| (effect.kind as u8, effect.has_motion()))
+                        .hash(&mut hasher);
+                    (style.scope == BackgroundScope::Content).hash(&mut hasher);
+                    self.settings_workspace
+                        .read(cx)
+                        .background_media_has_animation(style.image.as_deref())
+                        .hash(&mut hasher);
+                }
             }
             SettingsTab::Network => {
                 self.settings_workspace
@@ -544,6 +579,25 @@ impl WorkspaceApp {
                 }
             }
             SettingsTab::Privilege => {
+                self.connection_store
+                    .list_privilege_credentials(SSH_COMMON_PRIVILEGE_SCOPE_ID)
+                    .map(|credentials| credentials.len())
+                    .unwrap_or(0)
+                    .hash(&mut hasher);
+                self.connection_store
+                    .totp_credentials()
+                    .len()
+                    .hash(&mut hasher);
+                self.settings_workspace
+                    .read(cx)
+                    .totp_draft
+                    .is_some()
+                    .hash(&mut hasher);
+                self.settings_workspace
+                    .read(cx)
+                    .totp_error
+                    .is_some()
+                    .hash(&mut hasher);
                 self.connection_store.connections().len().hash(&mut hasher);
                 self.connection_store
                     .connections()
@@ -583,9 +637,6 @@ impl WorkspaceApp {
                         self.ai_entity
                             .read(cx)
                             .hash_settings_provider_layout(&mut hasher);
-                    }
-                    (AiSettingsPage::Agents, 2) => {
-                        settings.ai.acp_agents.len().hash(&mut hasher);
                     }
                     (AiSettingsPage::Context, 5) => {
                         settings.ai.providers.len().hash(&mut hasher);
@@ -1235,13 +1286,32 @@ impl WorkspaceApp {
         }
         self.i18n
             .set_locale(locale_from_settings(settings.general.language));
+        if previous_settings.terminal.autosuggest != settings.terminal.autosuggest {
+            self.terminal_history_store.configure(
+                settings.terminal.autosuggest.save_history,
+                settings.terminal.autosuggest.history_retention_days,
+            );
+        }
         if previous_settings.general.language != settings.general.language {
+            self.refresh_native_plugin_terminal_hooks(cx);
             cx.set_menus(crate::platform::app_menus(settings));
+            oxideterm_gpui_editor::EditorLanguagePlugins::set_labels(
+                self.i18n.t("plugin.language_missing"),
+                self.i18n.t("plugin.load_failed_default"),
+                self.i18n.t("plugin.language_manage"),
+                self.i18n.t("plugin.language_dismiss"),
+                cx,
+            );
         }
         oxideterm_desktop_presence::set_keep_running_on_close(
             settings.general.minimize_to_tray_on_close,
         );
-        self.tokens = tokens_from_settings(&settings);
+        self.appearance_edit_dark = settings
+            .appearance
+            .follow_system_appearance
+            .then(|| self.appearance_edit_dark.unwrap_or(self.system_dark));
+        self.tokens = tokens_from_settings(&settings, self.system_dark);
+        self.active_background = settings.resolved_background(self.system_dark);
         self.render_policy = compute_render_policy(
             self.render_profile_override
                 .unwrap_or(settings.appearance.render_profile),
@@ -1453,12 +1523,15 @@ impl WorkspaceApp {
         settings: &PersistedSettings,
         cx: &mut Context<Self>,
     ) {
-        if previous_settings.terminal.theme != settings.terminal.theme {
+        let previous_theme =
+            ThemeTarget::Application.resolved_id(previous_settings, self.system_dark);
+        let theme = ThemeTarget::Application.resolved_id(settings, self.system_dark);
+        if previous_theme != theme {
             self.emit_native_plugin_event_to_subscribers(
                 plugin_host::NATIVE_PLUGIN_APP_THEME_CHANGED_EVENT,
                 serde_json::json!({
                     "theme": crate::workspace::plugin_lifecycle::native_plugin_theme_snapshot(
-                        &settings.terminal.theme
+                        theme
                     ),
                 }),
                 cx,

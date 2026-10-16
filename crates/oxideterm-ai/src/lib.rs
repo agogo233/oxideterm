@@ -1,4 +1,5 @@
 mod acp;
+pub use acp::{CursorAskQuestion, CursorCreatePlan, CursorRequest, CursorResponseSender};
 pub mod agent;
 mod application_tools;
 mod chat;
@@ -48,12 +49,12 @@ pub use acp::{
     acp_terminal_create_spec, acp_terminal_created_response, acp_terminal_not_found_error,
     acp_terminal_output_request_id, acp_terminal_output_response, acp_wait_terminal_request_id,
     acp_wait_terminal_response, ai_message_backend_provenance, build_acp_conversation_handoff,
-    build_acp_initialize_request, build_acp_stdio_launcher, build_sdk_acp_agent,
-    discover_acp_session_config_options, initialize_acp_agent, next_acp_file_review_id,
-    next_acp_terminal_id, resolve_acp_read_text_file_request,
-    resolve_acp_terminal_working_directory, resolve_acp_write_text_file_request,
-    resolve_acp_write_text_file_target, store_ai_message_backend_provenance,
-    with_acp_agent_runtime, with_acp_agent_runtime_events, write_acp_validated_text_file,
+    build_acp_initialize_request, build_acp_stdio_launcher, discover_acp_session_config_options,
+    initialize_acp_agent, next_acp_file_review_id, next_acp_terminal_id,
+    resolve_acp_read_text_file_request, resolve_acp_terminal_working_directory,
+    resolve_acp_write_text_file_request, resolve_acp_write_text_file_target,
+    store_ai_message_backend_provenance, with_acp_agent_runtime, with_acp_agent_runtime_events,
+    write_acp_validated_text_file,
 };
 pub use chat::{ai_conversation_turn_count, apply_chat_request_overrides, generate_chat_title};
 pub use context_sanitizer::{
@@ -137,11 +138,11 @@ pub use responses_state::{
     append_responses_round, has_responses_history, responses_round_state, scope_responses_history,
 };
 pub use runtime_context::{
-    RuntimeCapability, RuntimeCapabilityRegistry, RuntimeContextError, RuntimeContextSnapshot,
-    RuntimeHandleId, RuntimeHandleProjection, RuntimeOwnerGeneration, RuntimeOwnerKey,
-    RuntimeOwnerKind, RuntimeOwnerRegistration, RuntimeRegistryEpoch, RuntimeRevocationReason,
-    RuntimeValidationError, RuntimeValidationFailure, StableResourceKind, StableResourceRef,
-    ToolSessionId, ValidatedRuntimeHandle,
+    RUNTIME_CONTEXT_MESSAGE_ID, RuntimeCapability, RuntimeCapabilityRegistry, RuntimeContextError,
+    RuntimeContextSnapshot, RuntimeHandleId, RuntimeHandleProjection, RuntimeOwnerGeneration,
+    RuntimeOwnerKey, RuntimeOwnerKind, RuntimeOwnerRegistration, RuntimeRegistryEpoch,
+    RuntimeRevocationReason, RuntimeValidationError, RuntimeValidationFailure, StableResourceKind,
+    StableResourceRef, ToolSessionId, ValidatedRuntimeHandle,
 };
 pub use settings::{
     AiProviderKeyDisplayState, AiProviderRefreshKeyPolicy, add_provider_from_template,

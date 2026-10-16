@@ -5,7 +5,7 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
 };
 
-use gpui::{Hsla, IntoColor, rgba};
+use gpui::{Hsla, rgba};
 use regex::RegexBuilder;
 
 use crate::command_facts::TransientCommandHighlight;
@@ -260,7 +260,7 @@ fn build_runtime_rules(rules: &[TerminalHighlightRule]) -> Vec<RuntimeHighlightR
             })
         })
         .collect::<Vec<_>>();
-    rules.sort_by(|left, right| right.source.priority.cmp(&left.source.priority));
+    rules.sort_by_key(|rule| std::cmp::Reverse(rule.source.priority));
     rules
 }
 
@@ -473,7 +473,7 @@ fn apply_matches(
             .as_deref()
             .and_then(parse_hex_color)
             .or(foreground)
-            .unwrap_or_else(|| rgba(0xf59e0bff).into_color());
+            .unwrap_or_else(|| rgba(0xf59e0bff).into());
         let paint_cells = &line.map[matched.start..end];
         for cell in paint_cells {
             if let Some(foreground) = foreground {

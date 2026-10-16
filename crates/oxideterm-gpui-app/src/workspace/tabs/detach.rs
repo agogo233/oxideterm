@@ -1562,7 +1562,7 @@ impl WorkspaceApp {
         window.set_window_title(&SharedString::from(title.clone()));
 
         let content =
-            self.render_detached_tab_content(tab_id, &tab_kind, root_pane.as_ref(), window, cx);
+            self.render_tab_content_for_id(tab_id, &tab_kind, root_pane.as_ref(), window, cx);
         let content = self.wrap_content_background(
             window_background,
             content,
@@ -1649,6 +1649,10 @@ impl WorkspaceApp {
             root.child(self.render_mermaid_zoom_modal(window, cx))
         })
         .when_some(settings_select_overlay, |root, overlay| root.child(overlay))
+        .when_some(
+            self.render_native_plugin_select_overlay(window, cx),
+            |root, overlay| root.child(overlay),
+        )
         .child(WorkspaceImeElement::new(
             cx.entity(),
             self.focus_handle.clone(),
@@ -1657,7 +1661,7 @@ impl WorkspaceApp {
         .into_any_element()
     }
 
-    fn render_detached_tab_content(
+    pub(in crate::workspace) fn render_tab_content_for_id(
         &mut self,
         tab_id: TabId,
         kind: &TabKind,
@@ -1677,11 +1681,16 @@ impl WorkspaceApp {
                 return self.render_forwards_surface_for_tab(tab_id, window, cx);
             }
             DetachedTabSurfaceRoute::Knowledge(_tab_id) => {
-                return self.render_knowledge_workspace_surface(
-                    KnowledgeWorkspaceLayout::DetachedWindow,
-                    window,
-                    cx,
-                );
+                let layout = if self
+                    .window_registry
+                    .handle_for_role(window_registry::WindowRole::Main)
+                    .is_some_and(|handle| handle.window_id() == window.window_handle().window_id())
+                {
+                    KnowledgeWorkspaceLayout::MainWindow
+                } else {
+                    KnowledgeWorkspaceLayout::DetachedWindow
+                };
+                return self.render_knowledge_workspace_surface(layout, window, cx);
             }
             DetachedTabSurfaceRoute::Other => {}
         }

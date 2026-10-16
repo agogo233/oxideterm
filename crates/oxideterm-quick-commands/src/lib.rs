@@ -15,8 +15,8 @@ mod template;
 mod v1;
 
 pub use editing::{
-    QuickCommandCategoryDraft, QuickCommandDraft, delete_quick_command,
-    delete_quick_command_category, ensure_active_quick_command_category,
+    FALLBACK_QUICK_COMMAND_CATEGORY_ID, QuickCommandCategoryDraft, QuickCommandDraft,
+    delete_quick_command, delete_quick_command_category, ensure_active_quick_command_category,
     match_quick_command_host_pattern, match_quick_command_host_patterns,
     quick_command_available_for_target, quick_command_category_draft_can_save,
     quick_command_draft_can_save, upsert_quick_command, upsert_quick_command_category,
@@ -25,8 +25,8 @@ pub use editing::{
 pub use model::{
     QUICK_COMMANDS_SCHEMA_VERSION, QuickCommand, QuickCommandAvailability, QuickCommandCategory,
     QuickCommandConfirmationPolicy, QuickCommandIcon, QuickCommandImportResult,
-    QuickCommandImportStrategy, QuickCommandParameter, QuickCommandParameterKind,
-    QuickCommandTargetProtocol, QuickCommandsSnapshot,
+    QuickCommandImportStrategy, QuickCommandMatchField, QuickCommandParameter,
+    QuickCommandParameterKind, QuickCommandTargetProtocol, QuickCommandsSnapshot,
 };
 pub use risk::{QuickCommandRisk, classify_command_risk};
 pub use snapshot::{decode_snapshot_json, encode_snapshot_json};

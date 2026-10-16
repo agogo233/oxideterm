@@ -1,5 +1,23 @@
 {
   "terminal": {
+    "history": {
+      "save": "이 기기에 명령 기록 저장",
+      "save_hint": "저장된 SSH, Telnet, Mosh 및 직렬 연결의 전체 명령을 암호화되지 않은 로컬 파일에 저장합니다. 인수에 포함된 암호나 토큰도 저장됩니다. 활성화한 시점부터 저장합니다.",
+      "retention": "보관 기간(일)",
+      "retention_hint": "0은 무기한 보관입니다. 저장된 연결 전체에서 최대 10,000개를 보관합니다.",
+      "current": "현재 연결",
+      "all": "모든 연결",
+      "pause": "현재 연결의 기록 일시 중지",
+      "resume": "현재 연결의 기록 재개",
+      "clear_current": "현재 연결 기록 지우기",
+      "clear_all": "저장된 모든 연결의 기록 지우기",
+      "clear_confirm": "저장된 모든 연결의 파일 및 메모리 내 명령 기록을 삭제할까요? 셸 기록 파일은 변경되지 않습니다.",
+      "clear_confirm_current": "현재 연결의 저장된 명령 기록과 메모리 기록을 삭제할까요? 셸 기록 파일은 변경되지 않습니다.",
+      "delete": "기록에서 삭제",
+      "empty": "일치하는 명령 없음",
+      "error": "명령 기록을 읽거나 저장하지 못했습니다. 최근 명령은 메모리에서 계속 사용할 수 있습니다."
+    },
+    "reconnect_hint": "세션 연결이 끊어졌습니다 · Enter 키로 다시 연결",
     "control_bar": {
       "show_controls": "조작 메뉴 펼치기",
       "hide_controls": "조작 메뉴 접기"
@@ -51,6 +69,11 @@
       "risk_configured": "구성됨"
     },
     "paste": {
+      "edit": "편집",
+      "edit_title": "붙여넣기 전에 편집",
+      "strip_fence": "코드 블록 구분자 제거",
+      "undo": "실행 취소",
+      "redo": "다시 실행",
       "title": "여러 줄 감지됨 ({{count}}줄)",
       "more_lines": "... {{count}}줄 더",
       "confirm": "확인",
@@ -84,6 +107,12 @@
       "clear_screen": "화면 지우기"
     },
     "modem": {
+      "timeout": "상대 측의 응답 시간이 초과되었습니다. 상대 측 전송 프로그램을 실행한 뒤 다시 시도하세요.",
+      "protocol_error": "상대 측에서 잘못되었거나 예상치 못한 전송 데이터를 보냈습니다.",
+      "file_error": "전송 파일을 읽거나 쓸 수 없습니다. 접근 권한과 여유 공간을 확인하세요.",
+      "file_too_large": "파일이 이 프로토콜의 크기 제한을 초과합니다.",
+      "buffer_overflow": "상대 측에서 전송 버퍼 용량을 초과하는 데이터를 보냈습니다.",
+      "worker_stopped": "전송 작업이 예기치 않게 중지되었습니다. 다시 시도하세요.",
       "binary_transfer": "바이너리 전송",
       "xmodem_upload": "XMODEM 업로드",
       "xmodem_receive": "XMODEM 수신",
@@ -258,7 +287,12 @@
       "command_placeholder": "Command",
       "template_hint": "Use {{param.name}} or {{ctx.host}}; add |sh for POSIX shell quoting.",
       "description_placeholder": "Description",
-      "host_pattern_placeholder": "Host pattern, e.g. *.prod",
+      "match_field": "일치 기준",
+      "match_host": "호스트 주소",
+      "match_connection": "연결 이름",
+      "match_all": "모든 필드",
+      "match_hint": "비워 두면 대상을 제한하지 않습니다. *를 사용할 수 있으며 여러 규칙은 쉼표로 구분합니다. 모든 필드에는 주소, 사용자 이름, 연결 이름 및 터미널 제목이 포함됩니다.",
+      "host_pattern_placeholder": "일치 규칙, 예: prod-*",
       "confirm_title": "Run quick command?",
       "confirm_description": "Run: {{command}}",
       "confirm_risky_description": "This command may be destructive or sensitive. Run: {{command}}",
@@ -266,7 +300,8 @@
       "add_group": "Add group",
       "edit_group": "Edit group",
       "delete_group": "Delete group",
-      "delete_group_description": "\"{{name}}\"의 명령은 그룹을 삭제하기 전에 기본 그룹으로 이동됩니다.",
+      "delete_group_description": "이 그룹을 삭제하기 전에 \"{{name}}\"의 명령을 \"{{destination}}\"(으)로 이동합니다.",
+      "reorder_groups": "핸들을 드래그하여 그룹 순서 변경",
       "save_group": "Save group",
       "group_name_placeholder": "Group name",
       "icon_terminal": "Terminal",
@@ -538,6 +573,8 @@
     "typeLocal": "로컬",
     "typeSsh": "SSH",
     "privilege_helper": {
+      "choose_hint": "Enter를 눌러 권한 상승 자격 증명 선택",
+      "choose_title": "권한 상승 자격 증명 선택",
       "fill": "비밀번호 입력",
       "filling": "입력 중...",
       "fill_title": "{{label}} 입력",

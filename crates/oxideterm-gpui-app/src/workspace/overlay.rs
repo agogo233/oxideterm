@@ -2,9 +2,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use super::*;
-use gpui::Task;
+use gpui::{Task, WeakEntity};
 
 const WORKSPACE_NOTICE_TTL: Duration = Duration::from_secs(4);
+const PLUGIN_REQUIRED_NOTICE_TTL: Duration = Duration::from_secs(12);
 const TOOLTIP_DELAY: Duration = Duration::from_millis(300);
 const TOOLTIP_EXIT_DURATION: Duration = Duration::from_millis(90);
 const CONNECTION_TRACE_UPDATE_COALESCE: Duration = Duration::from_millis(300);
@@ -24,6 +25,12 @@ pub(in crate::workspace) enum WorkspaceOverlayIntent {
     Notice {
         notice: TerminalNotice,
         ttl: Duration,
+    },
+    PluginRequired {
+        notice: TerminalNotice,
+        plugin_id: String,
+        label: String,
+        workspace: WeakEntity<WorkspaceApp>,
     },
     PluginProgress {
         key: String,
@@ -57,6 +64,9 @@ pub(in crate::workspace) enum WorkspaceOverlayIntent {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(in crate::workspace) enum WorkspaceOverlayConfirmKind {
     SettingsReset,
+    CommandHistoryClear {
+        all: bool,
+    },
     LegalNotice,
     ThirdPartyNotices,
     NodeDisconnect {
@@ -75,6 +85,7 @@ pub(in crate::workspace) struct WorkspaceOverlayConfirmSnapshot {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(in crate::workspace) enum WorkspaceOverlayConfirmEffect {
     ResetSettings,
+    ClearCommandHistory { all: bool },
     DisconnectNode { node_id: NodeId },
 }
 
@@ -88,6 +99,7 @@ pub(in crate::workspace) enum WorkspaceOverlayConfirmKeyAction {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::workspace) enum WorkspaceOverlayConfirmOwnerKind {
     SettingsReset,
+    CommandHistoryClear,
     LegalNotice,
     NodeDisconnect,
 }
@@ -102,9 +114,17 @@ pub(in crate::workspace) struct WorkspaceOverlayConfirmOwnerSnapshot {
 struct OverlayToast {
     id: u64,
     notice: TerminalNotice,
+    plugin_action: Option<PluginNoticeAction>,
     expires_at: Instant,
     remove_at: Option<Instant>,
     presence: oxideterm_gpui_ui::motion::ExitPresence,
+}
+
+#[derive(Clone, Debug)]
+struct PluginNoticeAction {
+    plugin_id: String,
+    label: String,
+    workspace: WeakEntity<WorkspaceApp>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -248,26 +268,46 @@ impl WorkspaceOverlayEntity {
     ) -> bool {
         let changed = match intent {
             WorkspaceOverlayIntent::Notice { notice, ttl } => {
-                self.push_notice(notice, ttl);
+                self.push_notice(notice, ttl, None, cx.background_executor().now());
+                true
+            }
+            WorkspaceOverlayIntent::PluginRequired {
+                notice,
+                plugin_id,
+                label,
+                workspace,
+            } => {
+                self.push_notice(
+                    notice,
+                    PLUGIN_REQUIRED_NOTICE_TTL,
+                    Some(PluginNoticeAction {
+                        plugin_id,
+                        label,
+                        workspace,
+                    }),
+                    cx.background_executor().now(),
+                );
                 true
             }
             WorkspaceOverlayIntent::PluginProgress { key, notice, ttl } => {
-                self.upsert_plugin_progress(key, notice, ttl);
+                self.upsert_plugin_progress(key, notice, ttl, cx.background_executor().now());
                 true
             }
             WorkspaceOverlayIntent::DismissPluginProgress { key } => {
-                self.dismiss_plugin_progress(&key, Instant::now())
+                self.dismiss_plugin_progress(&key, cx.background_executor().now())
             }
             WorkspaceOverlayIntent::ConnectionTraceEvents(events) => {
-                self.apply_connection_trace_events(events, Instant::now())
+                self.apply_connection_trace_events(events, cx.background_executor().now())
             }
             WorkspaceOverlayIntent::QueueTooltip { id, label, x, y } => {
-                self.queue_tooltip(id, label, x, y, Instant::now())
+                self.queue_tooltip(id, label, x, y, cx.background_executor().now())
             }
-            WorkspaceOverlayIntent::ClearTooltip { id } => self.clear_tooltip(&id, Instant::now()),
+            WorkspaceOverlayIntent::ClearTooltip { id } => {
+                self.clear_tooltip(&id, cx.background_executor().now())
+            }
             WorkspaceOverlayIntent::ClearAllTooltips => self.clear_all_tooltips(),
             WorkspaceOverlayIntent::ShowZenHint { ttl } => {
-                self.zen_hint_expires_at = Some(Instant::now() + ttl);
+                self.zen_hint_expires_at = Some(cx.background_executor().now() + ttl);
                 true
             }
             WorkspaceOverlayIntent::ClearZenHint => self.zen_hint_expires_at.take().is_some(),
@@ -277,7 +317,7 @@ impl WorkspaceOverlayEntity {
                 self.terminal_font_size_hud = Some(TerminalFontSizeHud {
                     font_size,
                     generation: self.terminal_font_size_hud_generation,
-                    expires_at: Instant::now() + ttl,
+                    expires_at: cx.background_executor().now() + ttl,
                 });
                 true
             }
@@ -341,6 +381,9 @@ impl WorkspaceOverlayEntity {
             .as_ref()
             .map(|confirm| WorkspaceOverlayConfirmOwnerSnapshot {
                 kind: match confirm {
+                    WorkspaceOverlayConfirmKind::CommandHistoryClear { .. } => {
+                        WorkspaceOverlayConfirmOwnerKind::CommandHistoryClear
+                    }
                     WorkspaceOverlayConfirmKind::SettingsReset => {
                         WorkspaceOverlayConfirmOwnerKind::SettingsReset
                     }
@@ -375,6 +418,7 @@ impl WorkspaceOverlayEntity {
         let actions = if matches!(
             confirm,
             WorkspaceOverlayConfirmKind::SettingsReset
+                | WorkspaceOverlayConfirmKind::CommandHistoryClear { .. }
                 | WorkspaceOverlayConfirmKind::NodeDisconnect { .. }
         ) {
             &FULL_ACTIONS[..]
@@ -423,6 +467,9 @@ impl WorkspaceOverlayEntity {
         self.confirm_focused_action = None;
         let effect = if confirmed {
             match confirm {
+                WorkspaceOverlayConfirmKind::CommandHistoryClear { all } => {
+                    Some(WorkspaceOverlayConfirmEffect::ClearCommandHistory { all: *all })
+                }
                 WorkspaceOverlayConfirmKind::SettingsReset => {
                     Some(WorkspaceOverlayConfirmEffect::ResetSettings)
                 }
@@ -442,8 +489,9 @@ impl WorkspaceOverlayEntity {
             self.finish_confirm_exit(generation, cx);
             return (true, effect);
         }
+        let timer = cx.background_executor().timer(delay);
         self.confirm_exit_task = Some(cx.spawn(async move |overlay, cx| {
-            Timer::after(delay).await;
+            timer.await;
             let _ = overlay.update(cx, |overlay, cx| {
                 overlay.finish_confirm_exit(generation, cx);
             });
@@ -467,7 +515,12 @@ impl WorkspaceOverlayEntity {
             delivery::drain_channel(&self.notice_rx, delivery::NOTIFICATION_DELIVERY_BUDGET);
         if !batch.items.is_empty() {
             for notice in batch.items {
-                self.push_notice(notice, WORKSPACE_NOTICE_TTL);
+                self.push_notice(
+                    notice,
+                    WORKSPACE_NOTICE_TTL,
+                    None,
+                    cx.background_executor().now(),
+                );
             }
             self.schedule_next_deadline(cx);
             cx.notify();
@@ -475,20 +528,33 @@ impl WorkspaceOverlayEntity {
         batch.outcome.backlog_remaining
     }
 
-    fn push_notice(&mut self, notice: TerminalNotice, ttl: Duration) {
+    fn push_notice(
+        &mut self,
+        notice: TerminalNotice,
+        ttl: Duration,
+        plugin_action: Option<PluginNoticeAction>,
+        now: Instant,
+    ) {
         let id = self.next_toast_id;
         self.next_toast_id = self.next_toast_id.wrapping_add(1).max(1);
         self.standard_toasts.push(OverlayToast {
             id,
             notice,
-            expires_at: Instant::now() + ttl,
+            plugin_action,
+            expires_at: now + ttl,
             remove_at: None,
             presence: oxideterm_gpui_ui::motion::ExitPresence::visible(),
         });
     }
 
-    fn upsert_plugin_progress(&mut self, key: String, notice: TerminalNotice, ttl: Duration) {
-        let expires_at = Instant::now() + ttl;
+    fn upsert_plugin_progress(
+        &mut self,
+        key: String,
+        notice: TerminalNotice,
+        ttl: Duration,
+        now: Instant,
+    ) {
+        let expires_at = now + ttl;
         if let Some(toast) = self.plugin_progress_toasts.get_mut(&key) {
             toast.notice = notice;
             toast.expires_at = expires_at;
@@ -505,6 +571,7 @@ impl WorkspaceOverlayEntity {
             OverlayToast {
                 id,
                 notice,
+                plugin_action: None,
                 expires_at,
                 remove_at: None,
                 presence: oxideterm_gpui_ui::motion::ExitPresence::visible(),
@@ -797,11 +864,12 @@ impl WorkspaceOverlayEntity {
             return;
         };
         let generation = self.deadline_generation;
-        let delay = deadline.saturating_duration_since(Instant::now());
+        let delay = deadline.saturating_duration_since(cx.background_executor().now());
+        let timer = cx.background_executor().timer(delay);
         self.deadline_task = Some(cx.spawn(async move |overlay, cx| {
-            Timer::after(delay).await;
+            timer.await;
             let _ = overlay.update(cx, |overlay, cx| {
-                overlay.handle_deadline_generation(generation, Instant::now(), cx);
+                overlay.handle_deadline_generation(generation, cx.background_executor().now(), cx);
             });
         }));
     }
@@ -999,7 +1067,7 @@ impl WorkspaceOverlayEntity {
         }
         if self
             .zen_hint_expires_at
-            .is_some_and(|expires_at| expires_at > Instant::now())
+            .is_some_and(|expires_at| expires_at > cx.background_executor().now())
         {
             layers.push(render_zen_hint(tokens, i18n));
         }
@@ -1042,12 +1110,40 @@ impl WorkspaceOverlayEntity {
                 status_text: toast.notice.status_text.clone(),
                 progress: toast.notice.progress,
                 variant: toast_variant_from_terminal(toast.notice.variant),
-                actions: None,
+                actions: toast.plugin_action.as_ref().map(|action| {
+                    let action = action.clone();
+                    let overlay = overlay.clone();
+                    oxideterm_gpui_ui::button::button_with(
+                        tokens,
+                        action.label.clone(),
+                        oxideterm_gpui_ui::button::ButtonOptions {
+                            variant: oxideterm_gpui_ui::button::ButtonVariant::Outline,
+                            size: oxideterm_gpui_ui::button::ButtonSize::Sm,
+                            ..Default::default()
+                        },
+                    )
+                    .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+                        let _ = action.workspace.update(cx, |workspace, cx| {
+                            workspace.open_required_plugin(&action.plugin_id, window, cx);
+                        });
+                        let _ = overlay.update(cx, |overlay, cx| {
+                            if overlay.begin_standard_exit(toast_id, cx.background_executor().now())
+                            {
+                                overlay.schedule_next_deadline(cx);
+                                cx.notify();
+                            }
+                        });
+                        cx.stop_propagation();
+                    })
+                    .into_any_element()
+                }),
                 close: Some(
                     toast_close(tokens)
                         .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                             let _ = overlay.update(cx, |overlay, cx| {
-                                if overlay.begin_standard_exit(toast_id, Instant::now()) {
+                                if overlay
+                                    .begin_standard_exit(toast_id, cx.background_executor().now())
+                                {
                                     overlay.schedule_next_deadline(cx);
                                     cx.notify();
                                 }
@@ -1074,7 +1170,9 @@ impl WorkspaceOverlayEntity {
                     toast_close(tokens)
                         .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                             let _ = overlay.update(cx, |overlay, cx| {
-                                if overlay.dismiss_plugin_progress(&key, Instant::now()) {
+                                if overlay
+                                    .dismiss_plugin_progress(&key, cx.background_executor().now())
+                                {
                                     overlay.schedule_next_deadline(cx);
                                     cx.notify();
                                 }
@@ -1180,7 +1278,9 @@ fn render_connection_card(
     .debug_selector(|| "connection-card-close".to_string())
     .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
         let _ = overlay.update(cx, |overlay, cx| {
-            if overlay.dismiss_connection_trace(&attempt_id_for_close, Instant::now()) {
+            if overlay
+                .dismiss_connection_trace(&attempt_id_for_close, cx.background_executor().now())
+            {
                 overlay.schedule_next_deadline(cx);
                 cx.notify();
             }
@@ -1782,6 +1882,248 @@ mod tests {
     use super::*;
 
     #[gpui::test]
+    fn plugin_requirement_notices_route_install_and_enable_actions(cx: &mut TestAppContext) {
+        let executable = std::env::current_exe().unwrap();
+        let fixture_key = "OXIDETERM_CONNECTION_PLUGIN_NOTICE_TEST_DIR";
+        let Some(fixture_dir) = std::env::var_os(fixture_key) else {
+            // Portable storage keeps this real-workspace regression away from user plugins.
+            let directory = tempfile::tempdir_in(executable.parent().unwrap()).unwrap();
+            let child = directory.path().join(executable.file_name().unwrap());
+            fs::hard_link(&executable, &child).unwrap();
+            fs::write(directory.path().join("portable"), []).unwrap();
+            let output = std::process::Command::new(child)
+                .arg(cx.test_function_name().unwrap())
+                .arg("--nocapture")
+                .env(fixture_key, directory.path())
+                .env_remove("APPIMAGE")
+                .current_dir(directory.path())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        };
+        let settings_path = default_settings_path();
+        assert!(settings_path.starts_with(PathBuf::from(fixture_dir)));
+        let mut settings = SettingsStore::load_from_path(settings_path).unwrap();
+        settings.settings_mut().general.language = oxideterm_settings::Language::En;
+        settings.settings_mut().ssh_config.auto_load_hosts = false;
+        settings.settings_mut().onboarding_completed = true;
+        settings.save().unwrap();
+        // The full workspace owns real background workers and filesystem watches.
+        cx.executor().allow_parking();
+        let (shell, cx) = cx.add_window_view(|window, cx| {
+            let workspace = cx.new(|cx| WorkspaceApp::new(window, cx, None, None).unwrap());
+            WorkspaceWindowShell::new(workspace, window, cx)
+        });
+        let workspace = shell.read_with(cx, |shell, _| shell.session_entity());
+        for (protocol, name, id) in [
+            (
+                Some(oxideterm_remote_desktop::RemoteDesktopProtocol::Rdp),
+                "RDP",
+                "com.oxideterm.remote-desktop.rdp",
+            ),
+            (
+                Some(oxideterm_remote_desktop::RemoteDesktopProtocol::Vnc),
+                "VNC",
+                "com.oxideterm.remote-desktop.vnc",
+            ),
+            (None, "Mosh", "com.oxideterm.terminal.mosh"),
+            (None, "Codex", "com.oxideterm.acp.codex"),
+        ] {
+            cx.update(|window, cx| workspace.update(cx, |workspace, cx| {
+                let acp_agent_id = if id == "com.oxideterm.acp.codex" {
+                    workspace.edit_settings(|settings| oxideterm_settings_model::ai_add_acp_plugin_agent(settings, id, name), cx);
+                    Some(workspace.settings_store.settings().ai.acp_agents.iter()
+                        .find(|agent| agent.plugin_id.as_deref() == Some(id)).unwrap().id.clone())
+                } else { None };
+                if let Some(protocol) = protocol {
+                    workspace.open_remote_desktop_connection_for_connection(
+                        oxideterm_remote_desktop::RemoteDesktopConnectionProfile {
+                            id: "restored-profile".into(),
+                            label: "Restored profile".into(),
+                            protocol,
+                            endpoint: oxideterm_remote_desktop::RemoteDesktopEndpoint::for_protocol("fixture.invalid", protocol),
+                            transport_endpoint: None,
+                            socks_proxy: None,
+                            username: None,
+                            domain: None,
+                            credential_ref: None,
+                            read_only: false,
+                            session_options: Default::default(),
+                        }, None, None, None, window, cx,
+                    );
+                } else if let Some(agent_id) = &acp_agent_id {
+                    workspace.test_ai_acp_agent(agent_id.clone(), cx);
+                } else {
+                    workspace.show_required_plugin_notice(id, name, cx);
+                }
+                let overlay = workspace.overlay.read(cx);
+                let toast = overlay.standard_toasts.last().unwrap();
+                assert_eq!(toast.notice.title, format!("The {name} plugin is not installed. Install it from the plugin marketplace, then retry."));
+                let action = toast.plugin_action.as_ref().unwrap();
+                assert_eq!(action.plugin_id, id);
+                assert_eq!(action.label, "Plugin Marketplace");
+                assert_eq!(action.workspace.upgrade().unwrap().entity_id(), cx.entity().entity_id());
+                workspace.open_required_plugin(id, window, cx);
+                assert_eq!(workspace.plugin_manager_state(cx).active_tab, plugin_manager::NativePluginManagerTab::Marketplace);
+                assert_eq!(workspace.plugin_manager_state(cx).marketplace_search_draft, id);
+                let directory = plugin_host::native_plugins_dir(workspace.settings_store.path()).join(id);
+                fs::create_dir_all(directory.join("bin")).unwrap();
+                fs::write(directory.join("bin/helper"), b"disabled provider fixture").unwrap();
+                let (kind, contributes) = match protocol {
+                    Some(protocol) => ("remote-desktop", serde_json::json!({
+                        "remoteDesktop": {"protocol": protocol.provider_id(), "protocolVersion": 1}
+                    })),
+                    None if id == "com.oxideterm.terminal.mosh" => ("terminal-transport", serde_json::json!({
+                        "terminalTransport": {"protocol": "mosh", "protocolVersion": 1}
+                    })),
+                    None => ("acp", serde_json::Value::Null),
+                };
+                fs::write(directory.join("plugin.json"), serde_json::to_vec(&serde_json::json!({
+                    "id": id, "name": name, "version": "0.1.0",
+                    "runtime": {"kind": kind, "entry": "bin/helper"},
+                    "contributes": contributes,
+                    "engines": {"oxideterm": ">=2.2.2"}
+                })).unwrap()).unwrap();
+                let registry = plugin_host::NativePluginRegistry::discover(workspace.settings_store.path());
+                workspace.plugin_entity.update(cx, |plugins, cx| plugins.replace_registry(registry, cx));
+                if let Some(agent_id) = &acp_agent_id {
+                    workspace.test_ai_acp_agent(agent_id.clone(), cx);
+                } else {
+                    workspace.show_required_plugin_notice(id, name, cx);
+                }
+                let toast = workspace.overlay.read(cx).standard_toasts.last().unwrap();
+                assert_eq!(toast.notice.title, format!("The installed {name} plugin is unavailable. Enable or update it in Plugin Manager, then retry."));
+                assert_eq!(toast.plugin_action.as_ref().unwrap().label, "Manage plugin");
+                assert_eq!(toast.plugin_action.as_ref().unwrap().plugin_id, id);
+                workspace.open_required_plugin(id, window, cx);
+                assert_eq!(workspace.plugin_manager_state(cx).active_tab, plugin_manager::NativePluginManagerTab::Installed);
+            }));
+        }
+    }
+
+    #[gpui::test]
+    fn saved_local_profile_palette_failure_is_visible_without_session_manager(
+        cx: &mut TestAppContext,
+    ) {
+        let executable = std::env::current_exe().unwrap();
+        let fixture_key = "OXIDETERM_PALETTE_FAILURE_TEST_DIR";
+        let Some(fixture_dir) = std::env::var_os(fixture_key) else {
+            // The real workspace uses process-wide storage discovery. A separate
+            // portable process isolates it without changing the user's home or stores.
+            let directory = tempfile::tempdir_in(executable.parent().unwrap()).unwrap();
+            let child = directory.path().join(executable.file_name().unwrap());
+            fs::hard_link(&executable, &child).unwrap();
+            fs::write(directory.path().join("portable"), []).unwrap();
+            let output = std::process::Command::new(child)
+                .arg(cx.test_function_name().unwrap())
+                .arg("--nocapture")
+                .env(fixture_key, directory.path())
+                .env_remove("APPIMAGE")
+                .current_dir(directory.path())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "portable palette regression failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        };
+        let fixture_dir = PathBuf::from(fixture_dir);
+        let settings_path = default_settings_path();
+        assert!(settings_path.starts_with(&fixture_dir));
+        let mut settings = SettingsStore::load_from_path(settings_path).unwrap();
+        settings.settings_mut().general.language = oxideterm_settings::Language::En;
+        settings.settings_mut().ssh_config.auto_load_hosts = false;
+        settings.save().unwrap();
+
+        let (shell, cx) = cx.add_window_view(|window, cx| {
+            let workspace = cx.new(|cx| WorkspaceApp::new(window, cx, None, None).unwrap());
+            WorkspaceWindowShell::new(workspace, window, cx)
+        });
+        let workspace = shell.read_with(cx, |shell, _| shell.session_entity());
+        let directory = fixture_dir.join("saved-working-directory");
+        fs::create_dir(&directory).unwrap();
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace
+                    .tokens
+                    .apply_motion(oxideterm_theme::UiMotionProfile::Off);
+                assert!(
+                    workspace
+                        .tabs(cx)
+                        .iter()
+                        .all(|tab| tab.kind != TabKind::SessionManager)
+                );
+                workspace
+                    .connection_store
+                    .upsert_local_terminal_profile(
+                        oxideterm_connections::SaveLocalTerminalProfileRequest {
+                            name: "Unavailable palette profile".into(),
+                            cwd: Some(directory.to_string_lossy().into_owned()),
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                fs::remove_dir(&directory).unwrap();
+                workspace.open_command_palette(window, cx);
+                workspace.command_palette.update(cx, |palette, cx| {
+                    palette.push_query_text("Unavailable palette profile", cx);
+                });
+                workspace.handle_command_palette_key(
+                    &KeyDownEvent {
+                        keystroke: gpui::Keystroke::parse("enter").unwrap(),
+                        is_held: false,
+                        prefer_character_input: false,
+                    },
+                    window,
+                    cx,
+                );
+                assert!(!workspace.command_palette.read(cx).is_open());
+                assert!(
+                    workspace
+                        .tabs(cx)
+                        .iter()
+                        .all(|tab| tab.kind != TabKind::SessionManager)
+                );
+            });
+        });
+        cx.run_until_parked();
+        let overlay = workspace.read_with(cx, |workspace, _| workspace.overlay.clone());
+        overlay.read_with(cx, |overlay, _| {
+            assert_eq!(
+                overlay.standard_toasts.iter().map(|toast| (
+                    toast.notice.title.as_str(), toast.notice.variant
+                )).collect::<Vec<_>>(),
+                vec![(
+                    "The startup directory is unavailable. Edit the session to choose an existing directory.",
+                    TerminalNoticeVariant::Error,
+                )]
+            );
+        });
+        let error_background: gpui::Hsla = workspace.read_with(cx, |workspace, _| {
+            rgba((workspace.tokens.ui.error << 8) | 0x1a).into()
+        });
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            assert!(
+                window
+                    .painted_quads()
+                    .iter()
+                    .any(|quad| { quad.background.as_solid() == Some(error_background) }),
+                "the error toast must be painted in the current window"
+            );
+        });
+    }
+
+    #[gpui::test]
     fn tooltip_delay_exit_reentry_and_replacement_cancel_stale_deadlines(cx: &mut TestAppContext) {
         let overlay = cx.new(|cx| WorkspaceOverlayEntity::new(Duration::from_millis(300), cx));
         overlay.update(cx, |overlay, _| {
@@ -2157,7 +2499,9 @@ mod tests {
     }
 
     #[gpui::test]
-    fn hidden_notice_delivery_continues_across_budgets(cx: &mut TestAppContext) {
+    fn hidden_notice_delivery_continues_across_budgets_and_expires_on_deadline(
+        cx: &mut TestAppContext,
+    ) {
         let overlay = cx.new(|cx| WorkspaceOverlayEntity::new(Duration::ZERO, cx));
         let sender = cx.read(|cx| overlay.read(cx).notice_sender());
         for index in 0..130 {
@@ -2172,6 +2516,9 @@ mod tests {
             assert_eq!(overlay.standard_toasts[0].notice.title, "notice-0");
             assert_eq!(overlay.standard_toasts[129].notice.title, "notice-129");
         });
+        cx.executor().advance_clock(WORKSPACE_NOTICE_TTL);
+        cx.run_until_parked();
+        cx.read(|cx| assert!(overlay.read(cx).standard_toasts.is_empty()));
     }
 
     #[gpui::test]
@@ -2280,25 +2627,5 @@ mod tests {
                 (false, None)
             );
         });
-    }
-
-    #[gpui::test]
-    fn entity_release_cancels_retained_confirm_exit(cx: &mut TestAppContext) {
-        let overlay = cx.new(|cx| WorkspaceOverlayEntity::new(Duration::ZERO, cx));
-        let (release_sender, release_receiver) = tokio::sync::oneshot::channel();
-        overlay.update(cx, |overlay, cx| {
-            // The task is retained by the confirmation owner, so releasing the
-            // Entity must drop the pending receiver.
-            overlay.confirm_exit_task = Some(cx.spawn(async move |_, _| {
-                let _ = release_receiver.await;
-            }));
-        });
-        cx.run_until_parked();
-
-        drop(overlay);
-        cx.update(|_| {});
-        cx.run_until_parked();
-
-        assert!(release_sender.send(()).is_err());
     }
 }

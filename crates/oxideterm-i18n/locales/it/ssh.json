@@ -1,5 +1,36 @@
 {
   "ssh": {
+    "x11": {
+      "accepted": "Inoltro X11 accettato",
+      "accepted_description": "Il server SSH ha accettato l’inoltro X11 per questo terminale. Il server assegna il DISPLAY remoto.",
+      "unavailable": "Inoltro X11 non disponibile",
+      "local_display_unavailable": "Nessun indirizzo di visualizzazione locale valido trovato. Avvia un server X locale e configura DISPLAY prima di avviare OxideTerm.",
+      "local_authorization_unavailable": "Impossibile preparare l’autorizzazione X11 locale. Controlla XAUTHORITY, il file di autorizzazione e la disponibilità di xauth.",
+      "server_rejected": "Il server SSH ha rifiutato l’inoltro X11. Controlla i criteri di inoltro e l’installazione di xauth sul server.",
+      "request_timed_out": "Il server SSH non ha risposto in tempo alla richiesta di inoltro X11.",
+      "channel_unavailable": "Il canale SSH non ha completato la negoziazione dell’inoltro X11.",
+      "windows_requirement": "Windows richiede un server X locale in esecuzione. Imposta DISPLAY sul suo indirizzo prima di avviare OxideTerm. Il server SSH assegna separatamente il DISPLAY remoto."
+    },
+    "fido": {
+      "touch_title": "Chiave di sicurezza",
+      "touch_instructions": "Tocca la chiave di sicurezza o completa la verifica sul dispositivo.",
+      "pin_title": "PIN della chiave di sicurezza",
+      "pin_instructions": "Inserisci il PIN della chiave di sicurezza. Non verrà salvato.",
+      "pin_retry": "PIN errato. Controllalo prima di riprovare.",
+      "pin_label": "PIN",
+      "errors": {
+        "unavailable": "Installa e attiva il plugin FIDO Security Key per utilizzare questa chiave SSH.",
+        "cancelled": "Autenticazione con chiave di sicurezza annullata.",
+        "timeout": "Tempo scaduto per l’autenticazione con chiave di sicurezza.",
+        "invalid_request": "Richiesta di firma con chiave di sicurezza non valida.",
+        "incompatible": "Il protocollo del plugin della chiave di sicurezza è incompatibile.",
+        "no_device": "Nessuna chiave FIDO trovata. Collega il dispositivo e riprova.",
+        "credential_not_found": "Questa credenziale SSH non è stata trovata sulla chiave di sicurezza collegata.",
+        "pin_blocked": "Il PIN è bloccato. Segui le istruzioni di ripristino del produttore.",
+        "device_failure": "L’operazione della chiave di sicurezza non è riuscita.",
+        "invalid_signature": "Impossibile verificare la firma della chiave di sicurezza."
+      }
+    },
     "form": {
       "title": "Nuova connessione",
       "subtitle": "Configura un host SSH per terminali, SFTP, inoltro porte e modifica di file remoti.",
@@ -20,6 +51,9 @@
       "password": "Password",
       "use_empty_password": "Usa una password vuota",
       "save_password": "Salva password nel portachiavi",
+      "save_credentials_after_login": "Salva le informazioni di autenticazione dopo l’accesso riuscito",
+      "credentials_saved": "Informazioni di autenticazione salvate",
+      "save_credentials_failed": "Impossibile salvare le informazioni di autenticazione",
       "group": "Gruppo",
       "notes": "Note",
       "notes_placeholder": "Aggiungi informazioni facoltative su questa connessione",
@@ -207,6 +241,9 @@
       }
     },
     "kbi": {
+      "save_password_after_login": "Salva la password dopo un accesso riuscito",
+      "password_saved": "Password SSH salvata",
+      "save_password_failed": "Impossibile salvare la password SSH. La connessione rimane aperta.",
       "title": "Autenticazione interattiva da tastiera",
       "continue": "Continua",
       "cancelled": "L'autenticazione interattiva da tastiera è stata annullata."

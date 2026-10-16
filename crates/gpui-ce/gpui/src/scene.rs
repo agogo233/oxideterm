@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::window::PreparedGlyphBatch;
 use crate::{
-    AtlasTextureId, AtlasTile, Background, Bounds, ColorExt, ContentMask, Corners, Edges, Pixels,
-    Point, Radians, ScaledFilter, ScaledPixels, Size, bounds_tree::BoundsTree, point,
+    AtlasTextureId, AtlasTile, Background, Bounds, ContentMask, Corners, Edges, Pixels, Point,
+    Radians, ScaledFilter, ScaledPixels, Size, bounds_tree::BoundsTree, point,
 };
 use smallvec::SmallVec;
 use std::{
@@ -344,7 +344,7 @@ impl Scene {
     }
 }
 
-/// Internal representation of [`palette::Hsla`] which is layout sensitive, as its provided to the renderer.
+/// Packed HSLA transfer representation consumed by renderer uploads.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[repr(C)]
 pub struct SceneHsla {
@@ -357,18 +357,23 @@ pub struct SceneHsla {
     /// Alpha, in a range from 0 to 1
     pub(crate) a: f32,
 }
-impl Into<palette::Hsla> for SceneHsla {
-    fn into(self) -> palette::Hsla {
-        palette::Hsla::new(self.h * 360.0, self.s, self.l, self.a)
+impl From<SceneHsla> for crate::Hsla {
+    fn from(color: SceneHsla) -> Self {
+        Self {
+            h: color.h,
+            s: color.s,
+            l: color.l,
+            a: color.a,
+        }
     }
 }
-impl From<palette::Hsla> for SceneHsla {
-    fn from(hsla: palette::Hsla) -> Self {
+impl From<crate::Hsla> for SceneHsla {
+    fn from(hsla: crate::Hsla) -> Self {
         Self {
-            h: hsla.hue.into_positive_degrees() / 360.0,
-            s: hsla.saturation,
-            l: hsla.lightness,
-            a: hsla.alpha,
+            h: hsla.h.rem_euclid(1.0),
+            s: hsla.s,
+            l: hsla.l,
+            a: hsla.a,
         }
     }
 }
@@ -880,10 +885,12 @@ pub struct FilterBoundary {
     pub content_mask: ContentMask<ScaledPixels>,
     pub corner_radii: Corners<ScaledPixels>,
     /// The filter chain applied to the isolated group, in scene (device-pixel) space. Identity
-    /// filters are dropped at paint time, so a `FilterBoundary` is only emitted when non-empty.
+    /// filters are dropped at paint time; rounded clipping may still require isolation.
     /// Inline capacity 4 (same struct size as 1 here — see [`BackdropFilter::filters`]).
     pub filters: SmallVec<[ScaledFilter; 4]>,
     pub opacity: f32,
+    /// Clip the isolated group to its rounded bounds when compositing.
+    pub clip_rounded: bool,
     /// `true` for the start marker (opens the group), `false` for the end marker (closes it).
     pub is_start: bool,
 }
@@ -1074,9 +1081,12 @@ pub struct PaintSurface {
     pub content_mask: ContentMask<ScaledPixels>,
     #[cfg(target_os = "macos")]
     pub image_buffer: core_video::pixel_buffer::CVPixelBuffer,
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    pub opacity: f32,
+    pub rotation: u32,
+    pub sample_size: Size<crate::DevicePixels>,
+    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "windows"))]
     pub texture: std::sync::Arc<dyn std::any::Any + Send + Sync>,
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "windows"))]
     pub texture_size: Size<crate::DevicePixels>,
 }
 
@@ -1322,6 +1332,7 @@ mod tests {
             corner_radii: Corners::default(),
             filters: smallvec::smallvec![ScaledFilter::Blur(sp(8.0))],
             opacity: 1.0,
+            clip_rounded: false,
             is_start,
         }
     }
@@ -1340,7 +1351,7 @@ mod tests {
     fn prepared_monochrome_glyph(bounds: Bounds<ScaledPixels>) -> PreparedMonochromeGlyph {
         PreparedMonochromeGlyph {
             bounds,
-            color: palette::Hsla::default(),
+            color: crate::Hsla::default(),
             tile: AtlasTile {
                 texture_id: AtlasTextureId {
                     index: 0,

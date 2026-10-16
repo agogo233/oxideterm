@@ -5,8 +5,8 @@ use crate::{
     PointRefinement, ScaledPixels, SharedString, Size, SizeRefinement, Styled, TextRun, Window,
     black, phi, point, px, quad, rems, size,
 };
+use crate::{Hsla, Rgba};
 use collections::HashSet;
-use palette::{Hsla, IntoColor, rgb::Rgba};
 use refineable::Refineable;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -36,6 +36,21 @@ pub enum ObjectFit {
 }
 
 impl ObjectFit {
+    /// Position the fitted image using fractions of the remaining space.
+    pub fn get_aligned_bounds(
+        &self,
+        bounds: Bounds<Pixels>,
+        image_size: Size<DevicePixels>,
+        position: (f32, f32),
+    ) -> Bounds<Pixels> {
+        let mut image = self.get_bounds(bounds, image_size);
+        image.origin.x =
+            bounds.origin.x + (bounds.size.width - image.size.width) * position.0.clamp(0.0, 1.0);
+        image.origin.y =
+            bounds.origin.y + (bounds.size.height - image.size.height) * position.1.clamp(0.0, 1.0);
+        image
+    }
+
     /// Get the bounds of the image within the given bounds.
     pub fn get_bounds(
         &self,
@@ -289,6 +304,9 @@ pub struct Style {
 
     /// Filters applied to this element's own content and children (CSS `filter`).
     pub filter: Vec<Filter>,
+
+    /// Clip this element's painted subtree to its rounded border box.
+    pub clip_rounded: bool,
 
     /// Filters applied to the content rendered behind this element (CSS `backdrop-filter`).
     pub backdrop_filter: Vec<Filter>,
@@ -600,7 +618,7 @@ impl TextStyle {
         }
 
         if let Some(color) = style.color {
-            self.color = self.color.blend(&color);
+            self.color = ColorExt::blend(&self.color, &color);
         }
 
         if let Some(factor) = style.fade_out {
@@ -722,7 +740,7 @@ impl Style {
                 let mut min = bounds.origin;
                 let mut max = bounds.bottom_right();
 
-                if self.border_color.is_some_and(|color| color.alpha > 0.) {
+                if self.border_color.is_some_and(|color| color.a > 0.) {
                     min.x += self.border_widths.left.to_pixels(rem_size);
                     max.x -= self.border_widths.right.to_pixels(rem_size);
                     min.y += self.border_widths.top.to_pixels(rem_size);
@@ -798,7 +816,7 @@ impl Style {
                         | BackgroundTag::PatternSlash
                         | BackgroundTag::Checkerboard => color.solid.into(),
 
-                        BackgroundTag::LinearGradient => color
+                        BackgroundTag::LinearGradient | BackgroundTag::ProceduralNoise => color
                             .colors
                             .first()
                             .map(|stop| stop.color.into())
@@ -806,7 +824,7 @@ impl Style {
                     },
                     None => Hsla::default(),
                 };
-                border_color.alpha = 0.;
+                border_color.a = 0.;
                 window.paint_quad(quad(
                     bounds,
                     corner_radii,
@@ -824,7 +842,7 @@ impl Style {
             if self.is_border_visible() {
                 let border_widths = self.border_widths.to_pixels(rem_size);
                 let mut background = self.border_color.unwrap_or_default();
-                background.alpha = 0.;
+                background.a = 0.;
                 window.paint_quad(quad(
                     bounds,
                     corner_radii,
@@ -836,12 +854,18 @@ impl Style {
             }
         };
 
-        if self.filter.is_empty() {
+        if self.filter.is_empty() && !self.clip_rounded {
             paint_box(window, cx);
         } else {
-            window.with_filter_layer(bounds, corner_radii, &self.filter, |window| {
-                paint_box(window, cx);
-            });
+            window.with_filtered_clip_layer(
+                bounds,
+                corner_radii,
+                &self.filter,
+                self.clip_rounded,
+                |window| {
+                    paint_box(window, cx);
+                },
+            );
         }
 
         #[cfg(debug_assertions)]
@@ -851,7 +875,7 @@ impl Style {
     }
 
     fn is_border_visible(&self) -> bool {
-        self.border_color.is_some_and(|color| color.alpha > 0.)
+        self.border_color.is_some_and(|color| color.a > 0.)
             && self.border_widths.any(|length| !length.is_zero())
     }
 }
@@ -895,6 +919,7 @@ impl Default for Style {
             corner_radii: Corners::default(),
             box_shadow: Default::default(),
             filter: Default::default(),
+            clip_rounded: false,
             backdrop_filter: Default::default(),
             text: TextStyleRefinement::default(),
             mouse_cursor: None,
@@ -1001,7 +1026,7 @@ impl HighlightStyle {
                 .color
                 .map(|other_color| {
                     if let Some(color) = self.color {
-                        color.blend(&other_color)
+                        ColorExt::blend(&color, &other_color)
                     } else {
                         other_color
                     }
@@ -1054,7 +1079,7 @@ impl From<FontStyle> for HighlightStyle {
 impl From<Rgba> for HighlightStyle {
     fn from(color: Rgba) -> Self {
         Self {
-            color: Some(color.into_color()),
+            color: Some(color.into()),
             ..Default::default()
         }
     }
@@ -1405,7 +1430,6 @@ impl From<Position> for taffy::style::Position {
 #[cfg(test)]
 mod tests {
     use crate::{blue, green, px, red, yellow};
-    use palette::WithAlpha;
 
     use super::*;
 
@@ -1453,7 +1477,7 @@ mod tests {
         let mut style_c = expected_style;
 
         let style_d = HighlightStyle {
-            color: Some(blue().with_alpha(0.7)),
+            color: Some(blue().alpha(0.7)),
             strikethrough: Some(StrikethroughStyle {
                 thickness: px(4.),
                 color: Some(crate::red()),
@@ -1470,7 +1494,7 @@ mod tests {
         };
 
         let expected_style = HighlightStyle {
-            color: Some(red().blend(&blue().with_alpha(0.7))),
+            color: Some(ColorExt::blend(&red(), &blue().alpha(0.7))),
             strikethrough: Some(StrikethroughStyle {
                 thickness: px(4.),
                 color: Some(red()),

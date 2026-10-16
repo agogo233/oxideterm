@@ -20,8 +20,8 @@ use zeroize::Zeroizing;
 use super::{
     FreeTypeDragAction, FreeTypeDragState, HorizontalScrollbarDrag, HorizontalScrollbarGeometry,
     PendingTerminalEditorClipboard, ScrollbarDrag, ScrollbarGeometry, SelectionHighlightCache,
-    SmoothScrollAnimation, TerminalContextMenu, TerminalKeybindings, TerminalPane,
-    TerminalPaneEvent, TerminalShortcut, TmuxSeparatorDirection, TmuxSeparatorDrag,
+    SmoothScrollAnimation, TerminalContextAction, TerminalContextMenu, TerminalKeybindings,
+    TerminalPane, TerminalPaneEvent, TerminalShortcut, TmuxSeparatorDirection, TmuxSeparatorDrag,
     command_mark_ui_available,
 };
 use crate::command_facts::TerminalAutosuggestInputState;
@@ -118,6 +118,19 @@ impl TerminalPane {
             }
         }
 
+        if self.paste_editor.is_some() {
+            return false;
+        }
+        if key == "enter"
+            && !modifiers.platform
+            && !modifiers.control
+            && !modifiers.alt
+            && !modifiers.shift
+            && self.can_reconnect_ssh()
+        {
+            self.request_context_action(TerminalContextAction::Reconnect, false, cx);
+            return true;
+        }
         if self.pending_paste.is_some() && !modifiers.platform && !modifiers.control {
             match key {
                 "enter" => {
@@ -225,6 +238,9 @@ impl TerminalPane {
         }
 
         let mode = self.terminal.lock().mode();
+        if !mode.contains(TermMode::WIN32_INPUT) {
+            self.win32_pressed_keys.clear();
+        }
         if self.handle_editor_free_type_clipboard_shortcut(event, mode, cx) {
             return true;
         }
@@ -310,7 +326,44 @@ impl TerminalPane {
             self.settings.delete_sequence,
             key_event_type,
         ) {
-            self.send_user_protocol_bytes(sequence.as_bytes(), cx);
+            if mode.contains(TermMode::WIN32_INPUT)
+                && sequence.starts_with("\x1b[")
+                && sequence.ends_with('_')
+            {
+                let legacy_mode = mode & !TermMode::WIN32_INPUT;
+                let semantic_sequence = configurable_key_escape_sequence(
+                    &event.keystroke,
+                    &legacy_mode,
+                    false,
+                    self.settings.backspace_sequence,
+                    self.settings.delete_sequence,
+                    key_event_type,
+                );
+                let semantic_bytes = semantic_sequence
+                    .as_deref()
+                    .unwrap_or(if event.keystroke.key == "enter" {
+                        "\n"
+                    } else {
+                        ""
+                    })
+                    .as_bytes();
+                let secret_entry = self.input_answers_privilege_prompt(semantic_bytes);
+                if self.send_user_encoded_key_without_broadcast(
+                    semantic_bytes,
+                    Some((&event.keystroke.key, sequence.as_bytes())),
+                    cx,
+                ) && !secret_entry
+                {
+                    // Other panes can use SSH or a different keyboard protocol.
+                    self.broadcast_user_input(
+                        super::TerminalBroadcastInputKind::Protocol,
+                        semantic_bytes,
+                        cx,
+                    );
+                }
+            } else {
+                self.send_user_protocol_bytes(sequence.as_bytes(), cx);
+            }
             return true;
         }
 
@@ -394,6 +447,10 @@ impl TerminalPane {
     }
 
     pub fn handle_unfocused_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
+        if self.paste_editor.is_some() {
+            // Unhandled editor characters must reach its platform input handler, not the PTY.
+            return false;
+        }
         if self.focused {
             // Focused printable input is committed by the platform input
             // handler after keydown; forwarding it here would duplicate text.
@@ -436,6 +493,15 @@ impl TerminalPane {
 
     pub(crate) fn handle_key_up(&mut self, event: &KeyUpEvent, cx: &mut Context<Self>) {
         let mode = self.terminal.lock().mode();
+        if mode.contains(TermMode::WIN32_INPUT) {
+            // Modifiers may have changed since key-down. The delivered key identity,
+            // not the current chord, determines whether ConPTY needs a release.
+            if !self.win32_pressed_keys.remove(&event.keystroke.key) {
+                return;
+            }
+        } else {
+            self.win32_pressed_keys.clear();
+        }
         if let Some(sequence) = configurable_key_escape_sequence(
             &event.keystroke,
             &mode,
@@ -470,7 +536,7 @@ impl TerminalPane {
         self.pending_search_reveal = false;
 
         if mouse_mode(mode, event.modifiers.shift) {
-            self.clear_smooth_scroll_remainder();
+            self.clear_smooth_scroll_animation();
             let rows = scroll_delta.rows;
             if rows == 0 {
                 return;
@@ -488,7 +554,7 @@ impl TerminalPane {
         if mode.contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL)
             && !event.modifiers.shift
         {
-            self.clear_smooth_scroll_remainder();
+            self.clear_smooth_scroll_animation();
             if scroll_delta.rows == 0 {
                 return;
             }
@@ -587,13 +653,18 @@ impl TerminalPane {
     }
 
     pub(super) fn clear_smooth_scroll_remainder(&mut self) -> bool {
-        let had_remainder = f32::from(self.scroll_input_remainder_px).abs() > f32::EPSILON
-            || f32::from(self.smooth_scroll_offset_px).abs() > f32::EPSILON
-            || self.smooth_scroll_animation.is_some();
+        let had_remainder = f32::from(self.scroll_input_remainder_px).abs() > f32::EPSILON;
         self.scroll_input_remainder_px = px(0.0);
+        self.clear_smooth_scroll_animation() || had_remainder
+    }
+
+    fn clear_smooth_scroll_animation(&mut self) -> bool {
+        // Application mouse and alternate-scroll input must accumulate sub-row touchpad deltas.
+        let had_animation = f32::from(self.smooth_scroll_offset_px).abs() > f32::EPSILON
+            || self.smooth_scroll_animation.is_some();
         self.smooth_scroll_offset_px = px(0.0);
         self.smooth_scroll_animation = None;
-        had_remainder
+        had_animation
     }
 
     fn start_smooth_scroll_row_animation(&mut self, applied_rows: f32) {
@@ -1627,7 +1698,7 @@ impl TerminalPane {
         self.context_menu = Some(TerminalContextMenu {
             x: f32::from(event.position.x - bounds.origin.x),
             y: f32::from(event.position.y - bounds.origin.y),
-            modem_submenu_open: false,
+            serial_transfer_menu: false,
             target: self.terminal_point_for_position(event.position),
             has_selection: self.selected_text_snapshot().is_some(),
             reference_line: navigation_line,
@@ -3280,13 +3351,13 @@ mod tests {
     use gpui::{AppContext, IntoElement, Render, ScrollDelta, TestAppContext, Window, div, point};
     #[cfg(unix)]
     use oxideterm_terminal::{
-        GraphicsOptions, LocalPtyConfig, ShellInfo, TerminalEncoding, TerminalEvent,
-        TerminalSession, VIM_FREE_TYPE_INTEGRATION_SOURCE,
+        GraphicsOptions, LocalPtyConfig, ShellInfo, TerminalEditorClipboardOperation,
+        TerminalEncoding, TerminalEvent, TerminalSession, VIM_FREE_TYPE_INTEGRATION_SOURCE,
     };
     use oxideterm_terminal::{TerminalAttrs, TerminalCell, TerminalColor, TerminalCursorShape};
     use oxideterm_terminal::{
-        TerminalEditorApplication, TerminalEditorCapabilities, TerminalEditorClipboardOperation,
-        TerminalEditorIntegrationEvent, TerminalEditorMode, TerminalEditorSelection,
+        TerminalEditorApplication, TerminalEditorCapabilities, TerminalEditorIntegrationEvent,
+        TerminalEditorMode, TerminalEditorSelection,
     };
 
     struct TerminalScrollTestRoot;
@@ -3622,45 +3693,14 @@ mod tests {
     }
 
     #[gpui::test]
-    fn selection_follows_output_into_scrollback(cx: &mut TestAppContext) {
-        let (_, cx) = cx.add_window_view(|_window, _cx| TerminalScrollTestRoot);
-        let pane = cx.update(|window, cx| {
-            cx.new(|cx| {
-                TerminalPane::new_recording_playback(
-                    20,
-                    3,
-                    TerminalUiPreferences::default(),
-                    window,
-                    cx,
-                )
-                .unwrap()
-            })
-        });
-        pane.update(cx, |pane, _cx| {
-            pane.terminal
-                .lock()
-                .feed_recording_output(b"selected\r\nsecond\r\nthird");
-            let snapshot = pane.terminal.lock().snapshot();
-            pane.snapshot = pane.stamp_snapshot(snapshot);
-            pane.set_selection(Some(TerminalSelection {
-                anchor: TerminalGridPoint { line: 0, col: 0 },
-                head: TerminalGridPoint { line: 0, col: 7 },
-                mode: TerminalSelectionMode::Simple,
-            }));
-            pane.terminal.lock().feed_recording_output(b"\r\nfourth");
-            let snapshot = pane.terminal.lock().snapshot();
-            pane.snapshot = pane.stamp_snapshot(snapshot);
-            assert_eq!(pane.selected_text_snapshot().as_deref(), Some("selected"));
-            assert_eq!(pane.selection.unwrap().anchor.line, -1);
-        });
-    }
+    fn selections_keep_their_direction_and_corners_while_output_scrolls(cx: &mut TestAppContext) {
+        use TerminalSelectionMode::{Block, Simple};
 
-    #[gpui::test]
-    fn reversed_selections_keep_their_corners_while_output_scrolls(cx: &mut TestAppContext) {
         let (_, cx) = cx.add_window_view(|_window, _cx| TerminalScrollTestRoot);
-        for (mode, expected) in [
-            (TerminalSelectionMode::Simple, "bcde\nfghi"),
-            (TerminalSelectionMode::Block, "bcd\nghi"),
+        for (mode, anchor, head, shifted_anchor, shifted_head, expected) in [
+            (Simple, (0, 0), (0, 4), (-1, 0), (-1, 4), "abcde"),
+            (Simple, (1, 3), (0, 1), (0, 3), (-1, 1), "bcde\nfghi"),
+            (Block, (1, 3), (0, 1), (0, 3), (-1, 1), "bcd\nghi"),
         ] {
             let pane = cx.update(|window, cx| {
                 cx.new(|cx| {
@@ -3681,8 +3721,14 @@ mod tests {
                 let snapshot = pane.terminal.lock().snapshot();
                 pane.snapshot = pane.stamp_snapshot(snapshot);
                 pane.set_selection(Some(TerminalSelection {
-                    anchor: TerminalGridPoint { line: 1, col: 3 },
-                    head: TerminalGridPoint { line: 0, col: 1 },
+                    anchor: TerminalGridPoint {
+                        line: anchor.0,
+                        col: anchor.1,
+                    },
+                    head: TerminalGridPoint {
+                        line: head.0,
+                        col: head.1,
+                    },
                     mode,
                 }));
                 pane.terminal.lock().feed_recording_output(b"\r\npqrst");
@@ -3690,11 +3736,17 @@ mod tests {
                 pane.snapshot = pane.stamp_snapshot(snapshot);
                 assert_eq!(
                     pane.selection.unwrap().anchor,
-                    TerminalGridPoint { line: 0, col: 3 }
+                    TerminalGridPoint {
+                        line: shifted_anchor.0,
+                        col: shifted_anchor.1,
+                    }
                 );
                 assert_eq!(
                     pane.selection.unwrap().head,
-                    TerminalGridPoint { line: -1, col: 1 }
+                    TerminalGridPoint {
+                        line: shifted_head.0,
+                        col: shifted_head.1,
+                    }
                 );
                 assert_eq!(pane.selected_text_snapshot().as_deref(), Some(expected));
             });
@@ -5126,27 +5178,39 @@ mod tests {
     }
 
     #[test]
-    fn free_type_cursor_delta_uses_tracked_command_range_when_target_row_is_unmarked() {
-        let snapshot = test_snapshot_with_cursor(
-            vec![test_row("$ abc", false), test_row("def", true)],
-            1,
-            2,
-            6,
-        );
+    fn free_type_tracked_cursor_delta_handles_wrapped_and_unmarked_target_rows() {
         let input_state = TerminalAutosuggestInputState {
             value: "abcdef".to_string(),
             cursor_index: 6,
             is_cursor_at_end: true,
         };
-
-        assert_eq!(
-            active_input_cursor_delta(
-                &snapshot,
-                TerminalPoint { row: 0, col: 3 },
-                Some(&input_state)
+        for (rows, cursor_col, width, targets) in [
+            (
+                vec![test_row("$ abc", false), test_row("def", true)],
+                2,
+                6,
+                vec![(0, 3, -5)],
             ),
-            Some(-5)
-        );
+            (
+                vec![test_row("$ ab", true), test_row("cdef", true)],
+                4,
+                5,
+                vec![(0, 2, -6), (0, 4, -5), (1, 2, -2)],
+            ),
+        ] {
+            let snapshot = test_snapshot_with_cursor(rows, 1, cursor_col, width);
+            for (row, col, expected) in targets {
+                assert_eq!(
+                    active_input_cursor_delta(
+                        &snapshot,
+                        TerminalPoint { row, col },
+                        Some(&input_state)
+                    ),
+                    Some(expected),
+                    "width={width}, target=({row}, {col})"
+                );
+            }
+        }
     }
 
     #[test]
@@ -5233,46 +5297,6 @@ mod tests {
     }
 
     #[test]
-    fn free_type_cursor_delta_maps_tracked_command_across_wrapped_rows() {
-        let snapshot = test_snapshot_with_cursor(
-            vec![test_row("$ ab", true), test_row("cdef", true)],
-            1,
-            4,
-            5,
-        );
-        let input_state = TerminalAutosuggestInputState {
-            value: "abcdef".to_string(),
-            cursor_index: 6,
-            is_cursor_at_end: true,
-        };
-
-        assert_eq!(
-            active_input_cursor_delta(
-                &snapshot,
-                TerminalPoint { row: 0, col: 2 },
-                Some(&input_state)
-            ),
-            Some(-6)
-        );
-        assert_eq!(
-            active_input_cursor_delta(
-                &snapshot,
-                TerminalPoint { row: 0, col: 4 },
-                Some(&input_state)
-            ),
-            Some(-5)
-        );
-        assert_eq!(
-            active_input_cursor_delta(
-                &snapshot,
-                TerminalPoint { row: 1, col: 2 },
-                Some(&input_state)
-            ),
-            Some(-2)
-        );
-    }
-
-    #[test]
     fn free_type_cursor_move_combines_boundary_keys_with_arrow_fallbacks() {
         let input_state = TerminalAutosuggestInputState {
             value: "abcdef".to_string(),
@@ -5307,7 +5331,7 @@ mod tests {
     }
 
     #[test]
-    fn free_type_command_edit_bytes_insert_and_replace_command() {
+    fn free_type_command_edits_and_selection_deletes_preserve_shell_sequences() {
         let snapshot = test_snapshot_with_cursor(vec![test_row("$ abc", true)], 0, 5, 20);
         let input_state = TerminalAutosuggestInputState {
             value: "abc".to_string(),
@@ -5315,56 +5339,58 @@ mod tests {
             is_cursor_at_end: true,
         };
 
-        assert_eq!(
-            free_type_command_edit_bytes(
-                &snapshot,
-                TerminalPoint { row: 0, col: 3 },
-                &input_state,
-                "XYZ",
-                false,
-                TermMode::default(),
-            )
-            .as_deref(),
-            Some(b"\x1b[D\x1b[DXYZ".as_slice())
-        );
-        assert_eq!(
-            free_type_command_edit_bytes(
-                &snapshot,
-                TerminalPoint { row: 0, col: 3 },
-                &input_state,
-                "XYZ",
-                true,
-                TermMode::default(),
-            )
-            .as_deref(),
-            Some(b"\x08\x08\x08XYZ".as_slice())
-        );
-    }
-
-    #[test]
-    fn free_type_selection_delete_bytes_targets_command_selection() {
-        let snapshot = test_snapshot_with_cursor(vec![test_row("$ abc", true)], 0, 5, 20);
-        let selection = TerminalSelection {
-            anchor: TerminalGridPoint { line: 0, col: 3 },
-            head: TerminalGridPoint { line: 0, col: 3 },
-            mode: TerminalSelectionMode::Semantic,
-        };
-        let input_state = TerminalAutosuggestInputState {
-            value: "abc".to_string(),
-            cursor_index: 3,
-            is_cursor_at_end: true,
-        };
-
-        assert_eq!(
-            free_type_selection_delete_bytes(
-                &snapshot,
-                selection,
-                &input_state,
-                TermMode::default()
-            )
-            .as_deref(),
-            Some(b"\x1b[D\x08".as_slice())
-        );
+        for (replace, expected) in [
+            (false, b"\x1b[D\x1b[DXYZ".as_slice()),
+            (true, b"\x08\x08\x08XYZ".as_slice()),
+        ] {
+            assert_eq!(
+                free_type_command_edit_bytes(
+                    &snapshot,
+                    TerminalPoint { row: 0, col: 3 },
+                    &input_state,
+                    "XYZ",
+                    replace,
+                    TermMode::default(),
+                )
+                .as_deref(),
+                Some(expected),
+                "replace={replace}"
+            );
+        }
+        for (mode, start, end, expected) in [
+            (
+                TerminalSelectionMode::Semantic,
+                3,
+                3,
+                b"\x1b[D\x08".as_slice(),
+            ),
+            (
+                TerminalSelectionMode::Lines,
+                0,
+                5,
+                b"\x08\x08\x08".as_slice(),
+            ),
+        ] {
+            let selection = TerminalSelection {
+                anchor: TerminalGridPoint {
+                    line: 0,
+                    col: start,
+                },
+                head: TerminalGridPoint { line: 0, col: end },
+                mode,
+            };
+            assert_eq!(
+                free_type_selection_delete_bytes(
+                    &snapshot,
+                    selection,
+                    &input_state,
+                    TermMode::default()
+                )
+                .as_deref(),
+                Some(expected),
+                "selection mode={mode:?}"
+            );
+        }
     }
 
     #[test]
@@ -5477,32 +5503,6 @@ mod tests {
         assert_eq!(
             bytes,
             ["👩‍💻".as_bytes(), b"\x1b[D\x1b[D\x1b[D\x08".as_slice()].concat()
-        );
-    }
-
-    #[test]
-    fn free_type_selection_delete_bytes_clamps_line_selection_to_command() {
-        let snapshot = test_snapshot_with_cursor(vec![test_row("$ abc", true)], 0, 5, 20);
-        let selection = TerminalSelection {
-            anchor: TerminalGridPoint { line: 0, col: 0 },
-            head: TerminalGridPoint { line: 0, col: 5 },
-            mode: TerminalSelectionMode::Lines,
-        };
-        let input_state = TerminalAutosuggestInputState {
-            value: "abc".to_string(),
-            cursor_index: 3,
-            is_cursor_at_end: true,
-        };
-
-        assert_eq!(
-            free_type_selection_delete_bytes(
-                &snapshot,
-                selection,
-                &input_state,
-                TermMode::default()
-            )
-            .as_deref(),
-            Some(b"\x08\x08\x08".as_slice())
         );
     }
 

@@ -15,8 +15,8 @@ pub use app::{
     SharedTerminalSession, TerminalBroadcastInputKind, TerminalContextAction, TerminalCursorAnchor,
     TerminalCwdShellIntegrationStatus, TerminalInputBroadcaster, TerminalInputInterceptor,
     TerminalInputInterceptorResult, TerminalKeybindings, TerminalPane, TerminalPaneEvent,
-    TerminalSearchStatus, TerminalSerialAction, TerminalSerialStatus, TerminalShortcut,
-    TerminalTelnetAction, TerminalWorkingDirectorySource,
+    TerminalPluginTextAction, TerminalSearchStatus, TerminalSerialAction, TerminalSerialStatus,
+    TerminalShortcut, TerminalTelnetAction, TerminalWorkingDirectorySource,
 };
 pub use background_cache::{
     BackgroundImageRenderCache, BackgroundImageTargetSize, background_display_target,
@@ -24,6 +24,7 @@ pub use background_cache::{
 pub use command_facts::{
     SharedTerminalCommandHistory, TerminalAiCommandRecord, TerminalAutosuggestCommandRecord,
     TerminalAutosuggestInputState, TerminalCommandFact, TerminalCommandFactStatus,
+    TerminalHistoryStore,
 };
 pub use oxideterm_terminal::TerminalOutputProcessor;
 pub use oxideterm_terminal_recording::{TerminalRecordingState, TerminalRecordingStatus};

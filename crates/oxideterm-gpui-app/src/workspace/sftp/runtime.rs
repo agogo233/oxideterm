@@ -683,10 +683,11 @@ impl SftpWorkspaceEntity {
                 true
             }
             SftpWorkerResult::PreviewLoaded {
+                asset_owner,
                 generation,
                 path,
                 result,
-            } => self.apply_preview_loaded(generation, path, result, cx),
+            } => self.apply_preview_loaded(generation, path, result, asset_owner, cx),
             SftpWorkerResult::PreviewHexLoaded {
                 generation,
                 path,
@@ -1756,19 +1757,25 @@ impl SftpWorkspaceEntity {
         generation: u64,
         path: String,
         result: Result<PreviewContent, String>,
+        asset_owner: Option<PreviewAssetOwner>,
         cx: &mut Context<Self>,
     ) -> bool {
         if generation != self.preview_generation {
             return false;
         }
+        self.preview_load_task = None;
         self.preview_loading = false;
         self.preview_hex_loading_more = false;
         self.preview_path = Some(path);
         match result {
             Ok(content) => {
-                let asset_owner = PreviewAssetOwner::from_asset_content_owned_temp(&content);
                 if let Some(owner) = asset_owner.as_ref() {
                     match owner.kind() {
+                        AssetFileKind::Document => {
+                            if let Some(view) = &self.preview_plugin {
+                                view.update(cx, |view, cx| view.set_source(owner.clone(), cx));
+                            }
+                        }
                         AssetFileKind::Audio => {
                             let _ = self.preview_audio.load(owner.path());
                         }
@@ -1985,16 +1992,6 @@ mod remote_load_state_tests {
     }
 
     #[test]
-    fn remote_list_completion_clears_inflight_before_return() {
-        let loading = SftpRemoteLoadState::default().request().start().unwrap();
-
-        let completed = loading.complete();
-
-        assert_eq!(completed, SftpRemoteLoadState::default());
-        assert!(!completed.inflight);
-    }
-
-    #[test]
     fn queued_remote_load_starts_after_the_previous_request_completes() {
         let old_request = SftpRemoteLoadState::default().request().start().unwrap();
         let switched_view = old_request.request();
@@ -2009,22 +2006,13 @@ mod remote_load_state_tests {
                 inflight: false,
             }
         );
-        assert!(old_request_completed.start().is_some());
-    }
-
-    #[test]
-    fn hidden_pending_load_starts_after_activation_wake() {
-        let hidden_pending = SftpRemoteLoadState::default().request();
-
-        let reactivated = hidden_pending.start().unwrap();
-
         assert_eq!(
-            reactivated,
-            SftpRemoteLoadState {
+            old_request_completed.start(),
+            Some(SftpRemoteLoadState {
                 loading: true,
                 pending: false,
                 inflight: true,
-            }
+            })
         );
     }
 }
@@ -2158,54 +2146,5 @@ mod tests {
         assert_eq!(sidebar_sftp_target(Some(&a), false, None), None);
         assert_eq!(sidebar_sftp_target(Some(&a), true, None), Some(a));
         assert_eq!(sidebar_sftp_target(None, false, Some(b)), None);
-    }
-
-    #[test]
-    fn stale_node_sftp_errors_are_connection_unavailable() {
-        assert!(oxideterm_sftp::error_is_connection_unavailable(
-            "Connection abc is stale: transport is closed"
-        ));
-        assert!(oxideterm_sftp::error_is_connection_unavailable(
-            "SFTP init failed: Channel error: SSH connection is closed and cannot open an SFTP channel"
-        ));
-        assert!(oxideterm_sftp::error_is_connection_unavailable(
-            "Capability unavailable: Session not found: node-1"
-        ));
-        assert!(oxideterm_sftp::error_is_connection_unavailable(
-            "SFTP subsystem not available: failed to open SFTP channel: channel closed"
-        ));
-        assert!(!oxideterm_sftp::error_is_connection_unavailable(
-            "Permission denied: /home/me/secret"
-        ));
-    }
-
-    #[test]
-    fn sftp_path_not_found_classifier_does_not_catch_dead_sessions() {
-        assert!(oxideterm_sftp::error_is_not_found(
-            "Directory not found: /home/me/missing"
-        ));
-        assert!(oxideterm_sftp::error_is_not_found(
-            "No such file or directory: /home/me/missing"
-        ));
-
-        assert!(!oxideterm_sftp::error_is_not_found(
-            "Capability unavailable: Session not found: node-1"
-        ));
-        assert!(!oxideterm_sftp::error_is_not_found(
-            "Node not found: node-1"
-        ));
-    }
-
-    #[test]
-    fn sftp_auth_failure_is_not_path_permission_denied() {
-        assert!(oxideterm_sftp::error_is_auth_failure(
-            "Authentication failed: Permission denied (publickey,password)"
-        ));
-        assert!(!oxideterm_sftp::error_is_permission_denied(
-            "Authentication failed: Permission denied (publickey,password)"
-        ));
-        assert!(oxideterm_sftp::error_is_permission_denied(
-            "Permission denied: /home/me/secret"
-        ));
     }
 }

@@ -6,7 +6,7 @@ use std::{
 };
 
 use agent_client_protocol::{
-    AcpAgent, AcpAgentConfig, Agent, Client, ConnectTo, ConnectionTo, Lines, Role,
+    Agent, Client, ConnectTo, ConnectionTo, Lines, Role,
     schema::{
         ProtocolVersion,
         v1::{
@@ -43,8 +43,10 @@ use async_process::windows::CommandExt as AsyncProcessCommandExt;
 
 use crate::types::AiStreamEvent;
 
+mod cursor;
 mod handoff;
 mod runtime;
+pub use cursor::{CursorAskQuestion, CursorCreatePlan, CursorRequest, CursorResponseSender};
 pub use handoff::{
     AcpConversationHandoffCursor, AiMessageBackendKind, AiMessageBackendProvenance,
     acp_conversation_handoff_cursor, ai_message_backend_provenance, build_acp_conversation_handoff,
@@ -143,6 +145,10 @@ static ACP_FILE_REVIEW_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 pub enum AcpClientEvent {
     SessionUpdate(SessionNotification),
+    CursorRequest {
+        request: CursorRequest,
+        response_tx: AcpClientResponseSender<serde_json::Value>,
+    },
     RequestPermission {
         request: RequestPermissionRequest,
         response_tx: AcpClientResponseSender<RequestPermissionResponse>,
@@ -216,10 +222,23 @@ impl Drop for AcpTerminalCreateSpec {
 }
 
 impl AcpClientEvent {
+    pub fn tool_call_session(&self) -> Option<(String, String)> {
+        let Self::SessionUpdate(notification) = self else {
+            return None;
+        };
+        let id = match &notification.update {
+            SessionUpdate::ToolCall(call) => &call.tool_call_id,
+            SessionUpdate::ToolCallUpdate(call) => &call.tool_call_id,
+            _ => return None,
+        };
+        Some((id.to_string(), notification.session_id.to_string()))
+    }
+
     /// Returns the owning session without exposing ACP wire DTOs to the app crate.
     pub fn session_id(&self) -> Option<String> {
         let session_id = match self {
             Self::SessionUpdate(notification) => Some(&notification.session_id),
+            Self::CursorRequest { .. } => None,
             Self::RequestPermission { request, .. } => Some(&request.session_id),
             Self::CreateElicitation { request, .. } => match request.scope() {
                 ElicitationScope::Session(scope) => Some(&scope.session_id),
@@ -764,6 +783,10 @@ pub fn next_acp_file_review_id() -> String {
 
 pub fn acp_client_event_to_ai_stream_events(event: AcpClientEvent) -> Vec<AiStreamEvent> {
     match event {
+        AcpClientEvent::CursorRequest { response_tx, .. } => {
+            let _ = response_tx.send(Ok(CursorRequest::cancelled_response()));
+            Vec::new()
+        }
         AcpClientEvent::SessionUpdate(notification) => {
             acp_session_notification_to_ai_stream_events(&notification)
         }
@@ -1113,23 +1136,6 @@ pub enum AcpLaunchConfigError {
     CommandContainsNul,
     #[error("ACP agent environment variable name is invalid")]
     InvalidEnvName,
-    #[error("ACP agent cwd requires the custom stdio launcher")]
-    CwdRequiresCustomLauncher,
-}
-
-pub fn build_sdk_acp_agent(config: &AcpLaunchConfig) -> Result<AcpAgent, AcpLaunchConfigError> {
-    validate_launch_config(config)?;
-    if config.cwd.is_some() {
-        // The SDK AcpAgent wrapper does not expose current_dir. Full runtime
-        // support must use a custom SDK ConnectTo launcher for cwd-aware agents.
-        return Err(AcpLaunchConfigError::CwdRequiresCustomLauncher);
-    }
-
-    let command = config.command.trim();
-    let sdk_config = AcpAgentConfig::new(command)
-        .args(config.args.clone())
-        .envs(config.env.clone());
-    Ok(AcpAgent::new(sdk_config))
 }
 
 pub fn build_acp_stdio_launcher(
@@ -1292,6 +1298,8 @@ pub async fn with_acp_agent_runtime_events<R>(
 ) -> Result<R, agent_client_protocol::Error> {
     let session_update_tx = event_tx.clone();
     let request_permission_tx = event_tx.clone();
+    let cursor_question_tx = event_tx.clone();
+    let cursor_plan_tx = event_tx.clone();
     let create_elicitation_tx = event_tx.clone();
     let complete_elicitation_tx = event_tx.clone();
     let read_text_file_tx = event_tx.clone();
@@ -1305,6 +1313,32 @@ pub async fn with_acp_agent_runtime_events<R>(
     Client
         .builder()
         .name("OxideTerm")
+        .on_receive_request(
+            async move |request: CursorAskQuestion, responder, _connection| {
+                let response = forward_client_request(&cursor_question_tx, |response_tx| {
+                    AcpClientEvent::CursorRequest {
+                        request: CursorRequest::Questions(request),
+                        response_tx,
+                    }
+                })
+                .await;
+                responder.respond_with_result(response)
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |request: CursorCreatePlan, responder, _connection| {
+                let response = forward_client_request(&cursor_plan_tx, |response_tx| {
+                    AcpClientEvent::CursorRequest {
+                        request: CursorRequest::Plan(request),
+                        response_tx,
+                    }
+                })
+                .await;
+                responder.respond_with_result(response)
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
         .on_receive_notification(
             async move |notification: SessionNotification, _connection| {
                 send_client_event(
@@ -2070,22 +2104,6 @@ mod tests {
     }
 
     #[test]
-    fn sdk_agent_uses_structured_stdio_config() {
-        let agent = build_sdk_acp_agent(&launch_config()).expect("sdk acp agent");
-
-        assert_eq!(agent.config().command(), Path::new("codex"));
-        assert_eq!(agent.config().arguments(), &["--acp"]);
-        assert_eq!(
-            agent
-                .config()
-                .environment()
-                .get("API_KEY")
-                .map(String::as_str),
-            Some("env-secret")
-        );
-    }
-
-    #[test]
     fn launch_config_debug_redacts_args_and_env_values() {
         let debug = format!("{:?}", launch_config());
 
@@ -2105,46 +2123,6 @@ mod tests {
         assert!(!sanitized.contains(raw_secret));
         assert!(sanitized.contains("Authorization: Bearer [REDACTED]"));
         assert!(sanitized.len() <= 2 * 1024 + '…'.len_utf8());
-    }
-
-    #[test]
-    fn sdk_agent_rejects_cwd_until_custom_launcher_exists() {
-        let mut config = launch_config();
-        config.cwd = Some(PathBuf::from("/workspace"));
-
-        assert_eq!(
-            build_sdk_acp_agent(&config).unwrap_err(),
-            AcpLaunchConfigError::CwdRequiresCustomLauncher
-        );
-    }
-
-    #[test]
-    fn custom_launcher_preserves_cwd_for_runtime_spawn() {
-        let mut config = launch_config();
-        config.cwd = Some(PathBuf::from("/workspace"));
-
-        let launcher = build_acp_stdio_launcher(config).expect("cwd-aware launcher");
-
-        assert_eq!(
-            launcher.config().cwd.as_ref(),
-            Some(&PathBuf::from("/workspace"))
-        );
-    }
-
-    #[test]
-    fn initialize_request_starts_with_closed_host_capabilities() {
-        let request =
-            build_acp_initialize_request("2.0.0-test", &AcpHostCapabilityPolicy::default());
-
-        assert_eq!(request.protocol_version, ProtocolVersion::V1);
-        assert!(!request.client_capabilities.fs.read_text_file);
-        assert!(!request.client_capabilities.fs.write_text_file);
-        assert!(!request.client_capabilities.terminal);
-        assert!(request.client_capabilities.elicitation.is_none());
-        assert_eq!(
-            request.client_info.as_ref().map(|info| info.name.as_str()),
-            Some("OxideTerm")
-        );
     }
 
     #[test]
@@ -2236,33 +2214,6 @@ mod tests {
         .await
         .expect_err("path outside root is rejected");
         assert!(error.to_string().contains("outside the session root"));
-    }
-
-    #[tokio::test]
-    async fn initialize_agent_sends_v1_request_to_sdk_agent() {
-        let fake_agent = Agent.builder().on_receive_request(
-            async move |request: InitializeRequest, responder, _connection| {
-                assert_eq!(request.protocol_version, ProtocolVersion::V1);
-                assert!(!request.client_capabilities.fs.read_text_file);
-                assert!(!request.client_capabilities.fs.write_text_file);
-                assert!(!request.client_capabilities.terminal);
-                responder.respond(
-                    InitializeResponse::new(request.protocol_version)
-                        .agent_capabilities(AgentCapabilities::new()),
-                )
-            },
-            agent_client_protocol::on_receive_request!(),
-        );
-
-        let response = initialize_acp_agent(
-            fake_agent,
-            "2.0.0-test".to_string(),
-            AcpHostCapabilityPolicy::default(),
-        )
-        .await
-        .expect("initialize response");
-
-        assert_eq!(response.protocol_version, ProtocolVersion::V1);
     }
 
     #[tokio::test]
@@ -2388,6 +2339,15 @@ mod tests {
             .builder()
             .on_receive_request(
                 async move |request: InitializeRequest, responder, _connection| {
+                    assert_eq!(request.protocol_version, ProtocolVersion::V1);
+                    assert!(!request.client_capabilities.fs.read_text_file);
+                    assert!(!request.client_capabilities.fs.write_text_file);
+                    assert!(!request.client_capabilities.terminal);
+                    assert!(request.client_capabilities.elicitation.is_none());
+                    assert_eq!(
+                        request.client_info.as_ref().map(|info| info.name.as_str()),
+                        Some("OxideTerm")
+                    );
                     let capabilities = AgentCapabilities::new()
                         .auth(AgentAuthCapabilities::new().logout(LogoutCapabilities::new()))
                         .session_capabilities(
@@ -2459,6 +2419,10 @@ mod tests {
             "2.0.0-test".to_string(),
             AcpHostCapabilityPolicy::default(),
             async |runtime| {
+                assert_eq!(
+                    runtime.initialize_response.protocol_version,
+                    ProtocolVersion::V1
+                );
                 runtime.authenticate("agent-auth").await?;
                 let session = runtime
                     .start_session(NewSessionRequest::new(PathBuf::from("/workspace")))

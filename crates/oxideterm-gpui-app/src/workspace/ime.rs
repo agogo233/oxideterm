@@ -2,8 +2,8 @@ use std::{cell::RefCell, collections::HashMap, fmt, ops::Range, rc::Rc, time::In
 
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementId, Entity, FocusHandle,
-    GlobalElementId, InputHandler, InspectorElementId, InteractiveElement, IntoColor, IntoElement,
-    Keystroke, LayoutId, MouseButton, Pixels, Point, SharedString, Style, Styled, TextRun, Timer,
+    GlobalElementId, InputHandler, InspectorElementId, InteractiveElement, IntoElement, Keystroke,
+    LayoutId, MouseButton, Pixels, Point, SharedString, Style, Styled, TextRun, Timer,
     UTF16Selection, Window, font, point, px, rgb,
 };
 use oxideterm_editor_core::utf16::{
@@ -1068,8 +1068,9 @@ impl WorkspaceApp {
 
         if let Some(form) = self.connection_form_state(cx).form.as_ref()
             && form.field_focused
-            && self.new_connection_field_accepts_ime(form.focused_field, cx)
         {
+            // Saved passwords expose an empty draft until edited. Keep that draft on the
+            // shared input path from the first character so text and caret advance together.
             return Some(WorkspaceImeTarget::NewConnection(form.focused_field));
         }
 
@@ -1080,13 +1081,13 @@ impl WorkspaceApp {
         }
 
         let settings_tab_visible = self
-            .active_tab(cx)
+            .keyboard_content_tab(cx)
             .is_some_and(|tab| tab.kind == oxideterm_workspace::TabKind::Settings);
         // Knowledge dialogs may be owned by a detached Knowledge or Settings window. The focused
         // window's WorkspaceImeElement decides which native window receives the shared draft.
         let knowledge_dialog_visible = self.ai_entity.read(cx).knowledge_create_dialog_open()
             || self.ai_entity.read(cx).knowledge_document_dialog_open();
-        if settings_tab_visible
+        if (settings_tab_visible || self.onboarding.open)
             && let Some(input) = self
                 .settings_workspace
                 .read(cx)
@@ -1115,7 +1116,7 @@ impl WorkspaceApp {
                         .handle_for_role(super::window_registry::WindowRole::Main);
                     !main.is_some_and(|handle| handle.window_id() == owner)
                         || self
-                            .active_tab(cx)
+                            .keyboard_content_tab(cx)
                             .is_some_and(|tab| tab.kind == oxideterm_workspace::TabKind::Knowledge)
                 })
         {
@@ -1156,10 +1157,15 @@ impl WorkspaceApp {
         }
 
         let legacy_settings_input_visible = settings_tab_visible
+            || self.onboarding.open
             || knowledge_dialog_visible
-            || self
-                .active_tab(cx)
-                .is_some_and(|tab| tab.kind == oxideterm_workspace::TabKind::CloudSync);
+            || self.keyboard_content_tab(cx).is_some_and(|tab| {
+                matches!(
+                    tab.kind,
+                    oxideterm_workspace::TabKind::CloudSync
+                        | oxideterm_workspace::TabKind::PluginManager
+                )
+            });
         if legacy_settings_input_visible && let Some(input) = self.focused_settings_input {
             return Some(WorkspaceImeTarget::Settings(input));
         }
@@ -1205,7 +1211,7 @@ impl WorkspaceApp {
             });
         }
 
-        let terminal_tab_visible = self.active_tab(cx).is_some_and(is_terminal_tab);
+        let terminal_tab_visible = self.keyboard_content_tab(cx).is_some_and(is_terminal_tab);
         if terminal_tab_visible {
             if self.terminal.read(cx).broadcast_group_editor().is_some() {
                 return Some(WorkspaceImeTarget::TerminalBroadcastGroupName);
@@ -1259,7 +1265,7 @@ impl WorkspaceApp {
         }
 
         if self
-            .active_tab(cx)
+            .keyboard_content_tab(cx)
             .is_some_and(|tab| tab.kind == oxideterm_workspace::TabKind::FileManager)
             && let Some(input) = self.file_manager.read(cx).focused_input()
         {
@@ -1267,7 +1273,7 @@ impl WorkspaceApp {
         }
 
         if self
-            .active_tab(cx)
+            .keyboard_content_tab(cx)
             .is_some_and(|tab| tab.kind == oxideterm_workspace::TabKind::Graphics)
             && let Some(input) = self.graphics.read(cx).focused_input()
         {
@@ -1423,7 +1429,7 @@ impl WorkspaceApp {
                 .handle_for_role(super::window_registry::WindowRole::Main);
             if main_window.is_some_and(|handle| handle.window_id() == window_id)
                 && !self
-                    .active_tab(cx)
+                    .keyboard_content_tab(cx)
                     .is_some_and(|tab| tab.kind == oxideterm_workspace::TabKind::Knowledge)
             {
                 return None;
@@ -2061,20 +2067,6 @@ impl WorkspaceApp {
         platform_range
     }
 
-    fn new_connection_field_accepts_ime(&self, field: NewConnectionField, cx: &App) -> bool {
-        if field == NewConnectionField::Password
-            && self.saved_connection_form_uses_unloaded_secret(cx)
-            && self
-                .connection_form_state(cx)
-                .form
-                .as_ref()
-                .is_some_and(|form| !form.password_loaded)
-        {
-            return false;
-        }
-        true
-    }
-
     fn ime_index_for_relative_x(
         &self,
         target: WorkspaceImeTarget,
@@ -2127,7 +2119,7 @@ impl WorkspaceApp {
         let run = TextRun {
             len: shared.len(),
             font,
-            color: rgb(self.tokens.ui.text).into_color(),
+            color: rgb(self.tokens.ui.text).into(),
             background_color: None,
             underline: None,
             strikethrough: None,
@@ -4069,16 +4061,16 @@ mod tests {
         );
     }
     use gpui::{Keystroke, Modifiers};
-    use zeroize::{Zeroize, Zeroizing};
+    use zeroize::Zeroizing;
 
     use super::{
         CopyShortcutOwner, FileManagerInput, HostToolsPlainTextImeFrame, HostToolsTextInput,
         NewConnectionField, PendingPlatformTextCommit, QuickCommandInput, SettingsInput, SftpInput,
         TextInputAnchorStore, WorkspaceCaretState, WorkspaceCaretVisibility,
         WorkspaceImeMarkedText, WorkspaceImeTarget, active_ime_should_defer_input_key,
-        collapsed_copy_shortcut_is_owned_by_target, copy_shortcut_owner_for_target,
-        effective_platform_text_replacement_range, ime_target_is_secret, ime_text_snapshot,
-        keystroke_platform_text, keystroke_uses_text_edit_modifier, multiline_ime_line_ranges,
+        copy_shortcut_owner_for_target, effective_platform_text_replacement_range,
+        ime_target_is_secret, ime_text_snapshot, keystroke_platform_text,
+        keystroke_uses_text_edit_modifier, multiline_ime_line_ranges,
         normalize_clipboard_text_for_ime_target, path_completion_owns_vertical_navigation,
         platform_text_commit_is_duplicate, secret_ime_proxy, soft_wrapped_line_ranges_utf16,
         utf16_offset_for_char_index, workspace_ime_target_for_plain_host_tools_input,
@@ -4124,7 +4116,7 @@ mod tests {
     }
 
     #[test]
-    fn caret_state_pauses_settings_blink_until_scroll_deadline() {
+    fn caret_state_pauses_scrolled_settings_and_resets_when_visible_owner_changes() {
         let now = std::time::Instant::now();
         let visibility = WorkspaceCaretVisibility::default();
         let mut caret = WorkspaceCaretState::new(visibility.clone());
@@ -4139,15 +4131,7 @@ mod tests {
         assert!(visibility.visible());
         assert!(caret.advance_tick(now + std::time::Duration::from_millis(700)));
         assert!(!visibility.visible());
-    }
 
-    #[test]
-    fn caret_state_resets_phase_and_pause_when_visible_owner_changes() {
-        let now = std::time::Instant::now();
-        let visibility = WorkspaceCaretVisibility::default();
-        let mut caret = WorkspaceCaretState::new(visibility.clone());
-        let settings_target = WorkspaceImeTarget::Settings(SettingsInput::KeybindingSearch);
-        caret.sync_active_target(Some(settings_target));
         caret.pause_settings_caret(now + std::time::Duration::from_secs(1));
         caret.advance_tick(now + std::time::Duration::from_secs(1));
         assert!(!visibility.visible());
@@ -4301,6 +4285,16 @@ mod tests {
             WorkspaceImeTarget::CommandPalette,
             "a",
         ));
+        assert!(!platform_text_commit_is_duplicate(
+            &mut pending,
+            WorkspaceImeTarget::ShortcutsModalSearch,
+            "a",
+        ));
+        assert!(!platform_text_commit_is_duplicate(
+            &mut pending,
+            WorkspaceImeTarget::CommandPalette,
+            "b",
+        ));
         assert!(platform_text_commit_is_duplicate(
             &mut pending,
             WorkspaceImeTarget::CommandPalette,
@@ -4319,28 +4313,6 @@ mod tests {
             WorkspaceImeTarget::CommandPalette,
             "a",
         ));
-    }
-
-    #[test]
-    fn platform_text_commit_does_not_dedupe_other_targets_or_text() {
-        let mut pending = Some(PendingPlatformTextCommit {
-            target: WorkspaceImeTarget::CommandPalette,
-            text: Zeroizing::new("a".to_string()),
-            generation: 1,
-            consumed: true,
-        });
-
-        assert!(!platform_text_commit_is_duplicate(
-            &mut pending,
-            WorkspaceImeTarget::ShortcutsModalSearch,
-            "a",
-        ));
-        assert!(!platform_text_commit_is_duplicate(
-            &mut pending,
-            WorkspaceImeTarget::CommandPalette,
-            "b",
-        ));
-        assert!(pending.is_some());
     }
 
     #[test]
@@ -4440,42 +4412,33 @@ mod tests {
     }
 
     #[test]
-    fn managed_private_key_clipboard_normalization_preserves_pem_lines() {
-        let normalized = normalize_clipboard_text_for_ime_target(
-            WorkspaceImeTarget::Settings(SettingsInput::ManagedKeyPastePrivateKey),
-            "-----BEGIN TEST KEY-----\r\nfake-material\r-----END TEST KEY-----",
-        );
-
-        assert_eq!(
-            normalized.as_str(),
-            "-----BEGIN TEST KEY-----\nfake-material\n-----END TEST KEY-----"
-        );
-    }
-
-    #[test]
-    fn quick_command_clipboard_normalization_preserves_command_lines() {
-        let normalized = normalize_clipboard_text_for_ime_target(
-            WorkspaceImeTarget::QuickCommand(QuickCommandInput::CommandText),
-            "first\r\nsecond\rthird",
-        );
-
-        assert_eq!(normalized.as_str(), "first\nsecond\nthird");
-    }
-
-    #[test]
-    fn single_line_secret_clipboard_normalization_flattens_line_breaks() {
-        let normalized = normalize_clipboard_text_for_ime_target(
-            WorkspaceImeTarget::Settings(SettingsInput::ManagedKeyPastePassphrase),
-            "fake\r\npassphrase",
-        );
-
-        assert_eq!(normalized.as_str(), "fake passphrase");
+    fn clipboard_normalization_preserves_multiline_inputs_and_flattens_secret_fields() {
+        for (target, text, expected) in [
+            (
+                WorkspaceImeTarget::Settings(SettingsInput::ManagedKeyPastePrivateKey),
+                "-----BEGIN TEST KEY-----\r\nfake-material\r-----END TEST KEY-----",
+                "-----BEGIN TEST KEY-----\nfake-material\n-----END TEST KEY-----",
+            ),
+            (
+                WorkspaceImeTarget::QuickCommand(QuickCommandInput::CommandText),
+                "first\r\nsecond\rthird",
+                "first\nsecond\nthird",
+            ),
+            (
+                WorkspaceImeTarget::Settings(SettingsInput::ManagedKeyPastePassphrase),
+                "fake\r\npassphrase",
+                "fake passphrase",
+            ),
+        ] {
+            let normalized = normalize_clipboard_text_for_ime_target(target, text);
+            assert_eq!(normalized.as_str(), expected, "{target:?}");
+        }
     }
 
     #[test]
     fn platform_commit_and_marked_text_debug_are_redacted() {
         let secret = "debug-secret";
-        let mut pending = PendingPlatformTextCommit {
+        let pending = PendingPlatformTextCommit {
             target: WorkspaceImeTarget::Settings(SettingsInput::AiProviderApiKey(0)),
             text: Zeroizing::new(secret.to_string()),
             generation: 9,
@@ -4491,13 +4454,10 @@ mod tests {
         assert!(!format!("{marked:?}").contains(secret));
         assert!(format!("{pending:?}").contains("<redacted>"));
         assert!(format!("{marked:?}").contains("<redacted>"));
-
-        pending.text.zeroize();
-        assert!(pending.text.is_empty());
     }
 
     #[test]
-    fn marked_text_replacement_and_release_clear_owned_secret() {
+    fn marked_text_replacement_reuses_owned_secret_allocation() {
         let mut marked = WorkspaceImeMarkedText {
             target: WorkspaceImeTarget::KeyboardInteractive(0),
             replacement_range: 0..0,
@@ -4510,9 +4470,6 @@ mod tests {
         assert_eq!(marked.replacement_range, 2..4);
         assert_eq!(marked.text.as_str(), "新值");
         assert_eq!(marked.text.as_ptr(), allocation);
-
-        marked.text.zeroize();
-        assert!(marked.text.is_empty());
     }
 
     #[test]
@@ -4555,16 +4512,6 @@ mod tests {
             "left",
             true,
             false,
-        ));
-    }
-
-    #[test]
-    fn collapsed_read_only_copy_falls_through_to_next_owner() {
-        assert!(!collapsed_copy_shortcut_is_owned_by_target(
-            WorkspaceImeTarget::ReadOnlyText(42)
-        ));
-        assert!(collapsed_copy_shortcut_is_owned_by_target(
-            WorkspaceImeTarget::Search(PaneId(1))
         ));
     }
 

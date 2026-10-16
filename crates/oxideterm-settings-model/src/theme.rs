@@ -13,6 +13,70 @@ use oxideterm_theme::{AppUiColors, BUILT_IN_THEMES, TerminalTheme, ThemeTokens, 
 pub const CUSTOM_THEME_PREFIX: &str = "custom:";
 const CUSTOM_THEME_IMPORT_VERSION: u64 = 1;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ThemeTarget {
+    Application,
+    Terminal,
+}
+
+impl ThemeTarget {
+    pub fn system_themes(
+        self,
+        settings: &PersistedSettings,
+    ) -> &oxideterm_settings::SystemThemeSettings {
+        match self {
+            Self::Application => &settings.appearance.system_themes,
+            Self::Terminal => &settings.terminal.system_themes,
+        }
+    }
+
+    pub fn system_themes_mut(
+        self,
+        settings: &mut PersistedSettings,
+    ) -> &mut oxideterm_settings::SystemThemeSettings {
+        match self {
+            Self::Application => &mut settings.appearance.system_themes,
+            Self::Terminal => &mut settings.terminal.system_themes,
+        }
+    }
+
+    pub fn resolved_id(self, settings: &PersistedSettings, dark: bool) -> &str {
+        if !settings.appearance.follow_system_appearance {
+            self.selected_id(settings)
+        } else if dark {
+            &self.system_themes(settings).dark
+        } else {
+            &self.system_themes(settings).light
+        }
+    }
+
+    pub fn apply_for_scheme(
+        self,
+        settings: &mut PersistedSettings,
+        dark: Option<bool>,
+        id: String,
+    ) {
+        match dark {
+            Some(true) => self.system_themes_mut(settings).dark = id,
+            Some(false) => self.system_themes_mut(settings).light = id,
+            None => self.apply(settings, id),
+        }
+    }
+    pub fn selected_id(self, settings: &PersistedSettings) -> &str {
+        match self {
+            Self::Application => &settings.appearance.theme,
+            Self::Terminal => &settings.terminal.theme,
+        }
+    }
+
+    pub fn apply(self, settings: &mut PersistedSettings, id: String) {
+        match self {
+            Self::Application => settings.appearance.theme = id,
+            Self::Terminal => settings.terminal.theme = id,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct ThemeColorField {
     pub json_key: &'static str,
@@ -201,10 +265,14 @@ pub const UI_THEME_COLOR_FIELDS: &[ThemeColorField] = &[
 pub enum ThemeEditorSection {
     Terminal,
     Ui,
+    Background,
 }
 
 #[derive(Clone, Debug)]
 pub struct ThemeEditorState {
+    pub target: ThemeTarget,
+    pub system_dark: Option<bool>,
+    pub background: oxideterm_settings::BackgroundStyle,
     pub edit_theme_id: Option<String>,
     pub name: String,
     pub duplicate_theme: String,
@@ -216,10 +284,11 @@ pub struct ThemeEditorState {
 
 pub fn theme_editor_from_settings(
     settings: &PersistedSettings,
+    target: ThemeTarget,
     edit_theme_id: Option<String>,
     default_name: String,
 ) -> ThemeEditorState {
-    let fallback_id = valid_builtin_theme_id(&settings.terminal.theme)
+    let fallback_id = valid_builtin_theme_id(target.selected_id(settings))
         .unwrap_or("azurite")
         .to_string();
     let (name, duplicate_theme, terminal, ui) = edit_theme_id
@@ -243,13 +312,19 @@ pub fn theme_editor_from_settings(
         });
 
     ThemeEditorState {
+        target,
+        system_dark: None,
+        background: settings.terminal.background_style(),
         edit_theme_id,
         name,
         duplicate_theme,
         duplicate_theme_touched: false,
         terminal_colors: terminal_theme_to_colors(terminal),
         ui_colors: app_ui_colors_to_colors(ui),
-        active_section: ThemeEditorSection::Terminal,
+        active_section: match target {
+            ThemeTarget::Application => ThemeEditorSection::Ui,
+            ThemeTarget::Terminal => ThemeEditorSection::Terminal,
+        },
     }
 }
 
@@ -278,10 +353,15 @@ pub fn save_theme_editor_snapshot_to_settings(
     });
     let terminal = editor_terminal_theme(&editor.terminal_colors);
     let ui = editor_ui_colors(&editor.ui_colors);
+    let mut value = custom_theme_json(&name, terminal, ui);
+    value["background"] = serde_json::to_value(&editor.background).ok()?;
+    settings.custom_themes.insert(theme_id.clone(), value);
+    editor
+        .target
+        .apply_for_scheme(settings, editor.system_dark, theme_id);
     settings
-        .custom_themes
-        .insert(theme_id.clone(), custom_theme_json(&name, terminal, ui));
-    settings.terminal.theme = theme_id;
+        .terminal
+        .set_background_for_scheme(editor.system_dark, editor.background.clone());
     Some(name)
 }
 
@@ -291,10 +371,22 @@ pub fn delete_custom_theme_from_settings(
     fallback_theme_id: &str,
 ) {
     settings.custom_themes.remove(theme_id);
-    if settings.terminal.theme == theme_id {
-        settings.terminal.theme = valid_builtin_theme_id(fallback_theme_id)
-            .unwrap_or("azurite")
-            .to_string();
+    for target in [ThemeTarget::Application, ThemeTarget::Terminal] {
+        if target.selected_id(settings) == theme_id {
+            target.apply(
+                settings,
+                valid_builtin_theme_id(fallback_theme_id)
+                    .unwrap_or("azurite")
+                    .to_string(),
+            );
+        }
+        let system = target.system_themes_mut(settings);
+        if system.light == theme_id {
+            system.light = "paper-oxide".into();
+        }
+        if system.dark == theme_id {
+            system.dark = "magnetite".into();
+        }
     }
 }
 
@@ -315,14 +407,33 @@ pub fn custom_theme_display_name(settings: &PersistedSettings, id: &str) -> Stri
     custom_theme_name(settings, id).unwrap_or_else(|| theme_display_name(id))
 }
 
-pub fn custom_theme_tokens_from_settings(settings: &PersistedSettings) -> Option<ThemeTokens> {
-    let (terminal, ui) = custom_theme_terminal_and_ui(settings, &settings.terminal.theme)?;
-    let mut tokens = ThemeTokens::from_builtin(theme_by_id("azurite"));
-    tokens.terminal = terminal;
-    tokens.ui = ui;
-    // Custom palettes must not inherit Azurite's glass contrast profile.
+pub fn theme_tokens_from_settings(settings: &PersistedSettings) -> ThemeTokens {
+    theme_tokens_for_system(settings, false)
+}
+
+pub fn theme_tokens_for_system(settings: &PersistedSettings, dark: bool) -> ThemeTokens {
+    let application_id = ThemeTarget::Application.resolved_id(settings, dark);
+    let terminal_id = ThemeTarget::Terminal.resolved_id(settings, dark);
+    let mut tokens = ThemeTokens::from_builtin(theme_by_id(application_id));
+    tokens.ui = theme_ui_colors(settings, application_id);
+    tokens.terminal = settings
+        .custom_themes
+        .get(terminal_id)
+        .and_then(|theme| theme.get("terminalColors"))
+        .and_then(terminal_theme_from_value)
+        .unwrap_or_else(|| theme_by_id(terminal_id).terminal);
+    // Mixed palettes need separate surface and terminal contrast profiles.
     tokens.refresh_palette_metrics();
-    Some(tokens)
+    tokens
+}
+
+pub fn theme_ui_colors(settings: &PersistedSettings, id: &str) -> AppUiColors {
+    settings
+        .custom_themes
+        .get(id)
+        .and_then(|theme| theme.get("uiColors"))
+        .and_then(app_ui_colors_from_value)
+        .unwrap_or_else(|| ThemeTokens::from_builtin(theme_by_id(id)).ui)
 }
 
 pub fn custom_theme_terminal_and_ui(
@@ -730,6 +841,102 @@ mod tests {
     use super::*;
 
     #[test]
+    fn system_scheme_switches_both_themes_and_background_together() {
+        let mut settings = PersistedSettings::default();
+        settings.appearance.theme = "github-dark".into();
+        settings.terminal.theme = "monokai".into();
+        settings.appearance.system_themes.light = "code-light".into();
+        settings.appearance.system_themes.dark = "dracula".into();
+        settings.terminal.system_themes.light = "solarized-light".into();
+        settings.terminal.system_themes.dark = "tokyo-night".into();
+        settings.terminal.background_image = Some("fixed.png".into());
+        for (dark, image) in [(false, "day.png"), (true, "night.png")] {
+            settings.terminal.set_background_for_scheme(
+                Some(dark),
+                oxideterm_settings::BackgroundStyle {
+                    image: Some(image.into()),
+                    ..Default::default()
+                },
+            );
+        }
+        for (follow, dark, ui, terminal, image) in [
+            (false, false, 0x0d1117, 0x272822, "fixed.png"),
+            (false, true, 0x0d1117, 0x272822, "fixed.png"),
+            (true, false, 0xffffff, 0xfdf6e3, "day.png"),
+            (true, true, 0x282a36, 0x1a1b26, "night.png"),
+        ] {
+            settings.appearance.follow_system_appearance = follow;
+            let tokens = theme_tokens_for_system(&settings, dark);
+            assert_eq!(
+                (tokens.ui.bg, tokens.terminal.background),
+                (ui, terminal),
+                "follow={follow} dark={dark}"
+            );
+            assert_eq!(
+                settings.resolved_background(dark).image.as_deref(),
+                Some(image)
+            );
+        }
+        assert_eq!(settings.appearance.theme, "github-dark");
+        assert_eq!(settings.terminal.theme, "monokai");
+    }
+
+    #[test]
+    fn saving_a_dark_theme_draft_preserves_the_light_and_fixed_selections() {
+        let mut settings = PersistedSettings::default();
+        settings.terminal.theme = "monokai".into();
+        settings.appearance.follow_system_appearance = true;
+        let mut editor =
+            theme_editor_from_settings(&settings, ThemeTarget::Terminal, None, "Night".into());
+        editor.system_dark = Some(true);
+        editor.background.image = Some("night.png".into());
+        editor.background.opacity = 0.42;
+        editor.background.alignment = oxideterm_settings::BackgroundAlignment::BottomRight;
+        editor.background.pause_on_input = true;
+        editor.background.parallax = true;
+        editor.background.day_cycle = true;
+        editor.background.camera = Some(oxideterm_settings::BackgroundCameraSettings {
+            motion: oxideterm_settings::BackgroundCameraMotion::ZoomOut,
+            amount: 0.75,
+            speed: 0.5,
+        });
+        save_theme_editor_snapshot_to_settings(&mut settings, &editor).unwrap();
+        assert_eq!(settings.terminal.theme, "monokai");
+        assert_eq!(settings.terminal.system_themes.light, "paper-oxide");
+        assert_eq!(settings.terminal.system_themes.dark, "custom:night");
+        assert!(settings.appearance.follow_system_appearance);
+        let background = settings.terminal.background_for_scheme(Some(true));
+        assert_eq!(background.image.as_deref(), Some("night.png"));
+        assert_eq!(background.opacity, 0.42);
+        assert!(background.pause_on_input && background.parallax && background.day_cycle);
+        let light = settings.terminal.background_for_scheme(Some(false));
+        assert!(!light.pause_on_input && !light.parallax && !light.day_cycle);
+        assert_eq!(light.camera, None);
+        assert_eq!(
+            background.camera.unwrap().motion,
+            oxideterm_settings::BackgroundCameraMotion::ZoomOut
+        );
+        assert_eq!(
+            background.alignment,
+            oxideterm_settings::BackgroundAlignment::BottomRight
+        );
+        assert_eq!(
+            settings.custom_themes["custom:night"]["background"]["image"],
+            "night.png"
+        );
+        for key in ["pauseOnInput", "parallax", "dayCycle"] {
+            assert_eq!(
+                settings.custom_themes["custom:night"]["background"][key],
+                true
+            );
+        }
+        assert_eq!(
+            settings.custom_themes["custom:night"]["background"]["camera"],
+            serde_json::json!({"motion": "zoomOut", "amount": 0.75, "speed": 0.5})
+        );
+    }
+
+    #[test]
     fn parse_color_hex_accepts_hex_and_rgb_forms() {
         assert_eq!(parse_color_hex("#0f0"), Some(0x00ff00));
         assert_eq!(parse_color_hex("#112233aa"), Some(0x112233));
@@ -751,18 +958,79 @@ mod tests {
     }
 
     #[test]
-    fn saving_theme_editor_owns_custom_theme_persistence() {
+    fn application_and_terminal_theme_changes_resolve_independently() {
         let mut settings = PersistedSettings::default();
-        let editor = theme_editor_from_settings(&settings, None, "Mine".to_string());
+        for (target, id, expected_ui, expected_terminal) in [
+            (ThemeTarget::Application, "github-dark", 0x58a6ff, 0x09090b),
+            (ThemeTarget::Terminal, "monokai", 0x58a6ff, 0x272822),
+            (ThemeTarget::Application, "code-light", 0x007acc, 0x272822),
+            (ThemeTarget::Terminal, "dracula", 0x007acc, 0x282a36),
+        ] {
+            target.apply(&mut settings, id.into());
+            let tokens = theme_tokens_from_settings(&settings);
+            assert_eq!(tokens.ui.accent, expected_ui, "{target:?} {id}");
+            assert_eq!(
+                tokens.terminal.background, expected_terminal,
+                "{target:?} {id}"
+            );
+        }
+        let tokens = theme_tokens_from_settings(&settings);
+        assert_eq!(tokens.ui.bg, 0xffffff);
+        assert_eq!(tokens.metrics.window_vibrancy_tint_alpha, 0.72);
+        assert_eq!(tokens.metrics.terminal_vibrancy_alpha, 0.94);
+    }
 
-        let saved_name = save_theme_editor_to_settings(&mut settings, editor);
+    #[test]
+    fn custom_theme_editor_save_and_delete_preserve_the_other_theme_selection() {
+        for target in [ThemeTarget::Application, ThemeTarget::Terminal] {
+            let mut settings = PersistedSettings::default();
+            settings.appearance.theme = "github-dark".into();
+            settings.terminal.theme = "monokai".into();
+            let mut editor = theme_editor_from_settings(&settings, target, None, "Mine".into());
+            editor.terminal_colors[0] = "#102030".into();
+            editor.ui_colors[0] = "#203040".into();
+            assert_eq!(
+                save_theme_editor_to_settings(&mut settings, editor).as_deref(),
+                Some("Mine")
+            );
+            assert_eq!(target.selected_id(&settings), "custom:mine");
+            let saved = &settings.custom_themes["custom:mine"];
+            assert_eq!(saved["name"], "Mine");
+            assert_eq!(saved["terminalColors"]["background"], "#102030");
+            assert_eq!(saved["uiColors"]["bg"], "#203040");
+            let tokens = theme_tokens_from_settings(&settings);
+            match target {
+                ThemeTarget::Application => {
+                    assert_eq!(settings.terminal.theme, "monokai");
+                    assert_eq!(tokens.ui.bg, 0x203040);
+                    assert_eq!(tokens.terminal.background, 0x272822);
+                }
+                ThemeTarget::Terminal => {
+                    assert_eq!(settings.appearance.theme, "github-dark");
+                    assert_eq!(tokens.ui.bg, 0x0d1117);
+                    assert_eq!(tokens.terminal.background, 0x102030);
+                }
+            }
+            delete_custom_theme_from_settings(&mut settings, "custom:mine", "dracula");
+            assert_eq!(target.selected_id(&settings), "dracula");
+            assert!(!settings.custom_themes.contains_key("custom:mine"));
+            match target {
+                ThemeTarget::Application => assert_eq!(settings.terminal.theme, "monokai"),
+                ThemeTarget::Terminal => assert_eq!(settings.appearance.theme, "github-dark"),
+            }
+        }
+    }
 
-        assert_eq!(saved_name.as_deref(), Some("Mine"));
-        assert!(settings.terminal.theme.starts_with(CUSTOM_THEME_PREFIX));
-        assert!(
-            settings
-                .custom_themes
-                .contains_key(&settings.terminal.theme)
-        );
+    #[test]
+    fn deleting_a_custom_theme_used_by_both_targets_updates_both_references() {
+        let mut settings = PersistedSettings::default();
+        let editor =
+            theme_editor_from_settings(&settings, ThemeTarget::Application, None, "Shared".into());
+        save_theme_editor_to_settings(&mut settings, editor);
+        settings.terminal.theme = "custom:shared".into();
+        delete_custom_theme_from_settings(&mut settings, "custom:shared", "github-dark");
+        assert_eq!(settings.appearance.theme, "github-dark");
+        assert_eq!(settings.terminal.theme, "github-dark");
+        assert!(!settings.custom_themes.contains_key("custom:shared"));
     }
 }

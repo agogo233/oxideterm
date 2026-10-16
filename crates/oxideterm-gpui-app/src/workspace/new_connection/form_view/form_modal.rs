@@ -1,5 +1,8 @@
 use super::*;
 
+#[cfg(test)]
+mod layout_tests;
+
 /// Contains only values needed to build one modal frame after releasing the Entity borrow.
 struct ConnectionFormModalSnapshot {
     transport: NewConnectionTransport,
@@ -450,6 +453,9 @@ impl WorkspaceApp {
                                         .flex_col()
                                         .min_w(px(0.0))
                                         .gap(px(self.tokens.metrics.modal_section_gap))
+                                        .when(mosh_mode, |content| {
+                                            content.child(self.render_mosh_plugin_status(cx))
+                                        })
                                         .when(local_terminal_mode, |content| {
                                             content.child(self.render_local_terminal_form_branch(cx))
                                         })
@@ -582,17 +588,6 @@ impl WorkspaceApp {
                                         ))
                                     },
                                 )
-                                .when(prompt_mode && !drill_down_mode, |content| {
-                                    content.child(self.render_connection_group_select(
-                                        if edit_properties_mode || mosh_edit_mode {
-                                            self.i18n.t("sessionManager.edit_properties.group")
-                                        } else {
-                                            self.i18n.t("ssh.form.group")
-                                        },
-                                        &form.group,
-                                        cx,
-                                    ))
-                                })
                                 .when(drill_down_mode, |content| {
                                     content
                                         .child(self.render_drill_saved_next_hop_picker(cx))
@@ -725,6 +720,7 @@ impl WorkspaceApp {
                                                 )),
                                         )
                                         .child(selector)
+                                        .child(self.render_connection_totp_select(false, cx))
                                 .when(form.auth_tab == SshAuthTab::Password, |content| {
                                     if edit_properties_mode
                                         && form.saved_password_keychain_id.is_some()
@@ -815,6 +811,14 @@ impl WorkspaceApp {
                                             form.password_loaded = true;
                                             if form.empty_password { form.password.zeroize(); }
                                         }, cx,
+                                    ))
+                                })
+                                .when(prompt_mode, |content| {
+                                    content.child(self.render_connection_checkbox(
+                                        self.i18n.t("ssh.form.save_credentials_after_login"),
+                                        form.save_password,
+                                        |form| form.save_password = !form.save_password,
+                                        cx,
                                     ))
                                 })
                                 .when(

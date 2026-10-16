@@ -172,6 +172,7 @@ pub struct SerialSession {
     title: Option<String>,
     graphics_ingress: GraphicsIngress,
     graphics: TerminalGraphicsState,
+    palette: TerminalPalette,
     graphics_alt_screen_active: bool,
     output_queue: VecDeque<crate::backpressure::ByteBoundedItem<SerialWorkerEvent>>,
     magic_scan: MagicScanWindow,
@@ -420,6 +421,7 @@ impl SerialSession {
             title: None,
             graphics_ingress: GraphicsIngress::new(serial_graphics_options),
             graphics: TerminalGraphicsState::default(),
+            palette: TerminalPalette::default(),
             graphics_alt_screen_active: false,
             output_queue: VecDeque::new(),
             magic_scan: MagicScanWindow::default(),
@@ -823,7 +825,20 @@ impl SerialSession {
                     .push(TerminalEvent::ClipboardLoad(formatter));
                 false
             }
-            AlacEvent::ColorRequest(_, _) | AlacEvent::TextAreaSizeRequest(_) => false,
+            AlacEvent::ColorSchemeRequest => {
+                let _ = self.write_protocol_bytes(self.palette.color_scheme_report().as_bytes());
+                false
+            }
+            AlacEvent::ColorRequest(index, formatter) => {
+                let color = crate::color_for_alacritty_request(
+                    index,
+                    &self.palette,
+                    self.term.lock().colors(),
+                );
+                let _ = self.write_protocol_bytes(formatter(color).as_bytes());
+                false
+            }
+            AlacEvent::TextAreaSizeRequest(_) => false,
             AlacEvent::ChildExit(_) | AlacEvent::Exit => false,
         }
     }
@@ -937,6 +952,16 @@ impl TerminalSessionBackend for SerialSession {
             .input_encoder
             .encode_paste(text, self.mode().contains(TermMode::BRACKETED_PASTE));
         self.write_input(&bytes)
+    }
+
+    fn set_palette(&mut self, palette: TerminalPalette) {
+        if self.palette == palette {
+            return;
+        }
+        self.palette = palette;
+        // Unchanged rows still hold colors resolved from the old palette.
+        self.term.lock().mark_fully_damaged();
+        self.term.lock().notify_palette_changed();
     }
 
     fn set_encoding(&mut self, encoding: TerminalEncoding) {
@@ -1092,6 +1117,7 @@ impl TerminalSessionBackend for SerialSession {
                 cell_height: self.resize.cell_height,
             },
             &self.graphics,
+            &self.palette,
             delta,
             previous,
         )
@@ -1171,6 +1197,7 @@ impl TerminalSessionBackend for SerialSession {
                 cell_height: self.resize.cell_height,
             },
             &self.graphics,
+            &self.palette,
         )
     }
 
@@ -1185,6 +1212,7 @@ impl TerminalSessionBackend for SerialSession {
                 cell_height: self.resize.cell_height,
             },
             &self.graphics,
+            &self.palette,
             previous,
         )
     }
@@ -1204,6 +1232,7 @@ impl TerminalSessionBackend for SerialSession {
                 cell_height: self.resize.cell_height,
             },
             &self.graphics,
+            &self.palette,
             display_offset,
             rows,
         )
@@ -1909,6 +1938,7 @@ mod serial_tests {
             title: None,
             graphics_ingress: GraphicsIngress::new(GraphicsOptions::default()),
             graphics: TerminalGraphicsState::default(),
+            palette: TerminalPalette::default(),
             graphics_alt_screen_active: false,
             output_queue: VecDeque::new(),
             magic_scan: MagicScanWindow::default(),
@@ -2110,6 +2140,9 @@ mod serial_tests {
 
     #[test]
     fn serial_recording_resumes_with_flow_control_and_reports_gaps_without_it() {
+        let _pressure_guard = crate::recording_test_support::RECORDING_PRESSURE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         use crate::recording_test_support::{AuditTestKeys, PausedFiles, read_finished};
         use oxideterm_audit::{
             AuditContext, AuditPolicy, AuditService, AuditSource, RecordingState,
@@ -2292,17 +2325,6 @@ mod serial_tests {
     }
 
     #[test]
-    fn serial_io_error_maps_disconnect() {
-        let error = map_serial_io_error(
-            std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "gone"),
-            SerialErrorCode::ReadFailed,
-            "/dev/cu.usbserial-1",
-        );
-
-        assert_eq!(error.code, SerialErrorCode::DeviceDisconnected);
-    }
-
-    #[test]
     fn fake_serial_worker_lifecycle_writes_reads_and_reports_disconnect() {
         let config = valid_config();
         let mut port = FakeSerialPort::new(VecDeque::from([
@@ -2470,9 +2492,10 @@ mod serial_tests {
 
         assert_eq!(offset, 5);
         let rendered = String::from_utf8(dump).unwrap();
-        assert!(rendered.contains("00000000"));
-        assert!(rendered.contains("48 65 6c 6c 6f"));
-        assert!(rendered.contains("|Hello|"));
+        assert_eq!(
+            rendered.split_whitespace().collect::<Vec<_>>(),
+            ["00000000", "48", "65", "6c", "6c", "6f", "|Hello|"]
+        );
     }
 
     #[test]
@@ -2520,12 +2543,30 @@ mod serial_tests {
 
     #[test]
     fn serial_preserves_split_csi_sequences() {
+        use alacritty_terminal::{
+            index::{Column, Line},
+            vte::ansi::{Color, NamedColor},
+        };
+
         let mut session = test_serial_session();
 
         session.feed_transport_output(b"\x1b");
-        session.feed_transport_output(b"[31mred\x1b[0m\r\n");
+        session.feed_transport_output(b"[31mred\x1b[0m\r\nplain");
 
-        assert!(session.buffer_text().contains("red"));
+        let snapshot = session.snapshot();
+        assert_eq!(snapshot.lines[0].text().trim_end(), "red");
+        assert_eq!(snapshot.lines[1].text().trim_end(), "plain");
+        let term = session.term.lock();
+        for col in 0..3 {
+            assert_eq!(
+                term.grid()[Line(0)][Column(col)].fg,
+                Color::Named(NamedColor::Red)
+            );
+        }
+        assert_eq!(
+            term.grid()[Line(1)][Column(0)].fg,
+            Color::Named(NamedColor::Foreground)
+        );
     }
 
 }

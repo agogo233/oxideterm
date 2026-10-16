@@ -5,11 +5,12 @@
 
 use crate::{
     MAX_CATEGORIES, QuickCommand, QuickCommandAvailability, QuickCommandCategory,
-    QuickCommandConfirmationPolicy, QuickCommandIcon, QuickCommandTargetProtocol,
-    default_quick_command_categories, new_quick_category_id, new_quick_command_id,
+    QuickCommandConfirmationPolicy, QuickCommandIcon, QuickCommandMatchField,
+    QuickCommandTargetContext, QuickCommandTargetProtocol, default_quick_command_categories,
+    new_quick_category_id, new_quick_command_id,
 };
 
-const FALLBACK_QUICK_COMMAND_CATEGORY_ID: &str = "custom";
+pub const FALLBACK_QUICK_COMMAND_CATEGORY_ID: &str = "custom";
 
 #[derive(Clone, Eq, PartialEq)]
 pub struct QuickCommandDraft {
@@ -21,6 +22,7 @@ pub struct QuickCommandDraft {
     pub parameters: Option<Vec<crate::QuickCommandParameter>>,
     pub protocols: Option<Vec<QuickCommandTargetProtocol>>,
     pub host_patterns: Option<Vec<String>>,
+    pub match_field: Option<QuickCommandMatchField>,
     pub confirmation: Option<QuickCommandConfirmationPolicy>,
 }
 
@@ -43,14 +45,20 @@ pub fn visible_quick_commands(
     commands: &[QuickCommand],
     active_category: &str,
     query: &str,
-    target_fields: &[String],
+    target: Option<&QuickCommandTargetContext>,
 ) -> Vec<QuickCommand> {
     let normalized_query = query.trim().to_lowercase();
     commands
         .iter()
         .filter(|command| command.category == active_category)
         .filter(|command| {
-            match_quick_command_host_patterns(&command.availability.host_patterns, target_fields)
+            target.map_or_else(
+                || {
+                    command.availability.protocols.is_empty()
+                        && command.availability.host_patterns.is_empty()
+                },
+                |target| quick_command_available_for_target(command, target),
+            )
         })
         .filter(|command| quick_command_matches_query(command, &normalized_query))
         .cloned()
@@ -133,6 +141,11 @@ pub fn upsert_quick_command(
             .unwrap_or(existing_description),
         parameters: draft.parameters.unwrap_or(existing_parameters),
         availability: QuickCommandAvailability {
+            match_field: draft.match_field.unwrap_or_else(|| {
+                existing
+                    .map(|command| command.availability.match_field)
+                    .unwrap_or_default()
+            }),
             protocols: draft.protocols.unwrap_or(existing_protocols),
             host_patterns: draft
                 .host_patterns
@@ -203,20 +216,30 @@ pub fn delete_quick_command_category(
     commands: &mut [QuickCommand],
     id: &str,
 ) -> bool {
-    if default_quick_command_categories()
-        .iter()
-        .any(|category| category.id == id)
+    if id == FALLBACK_QUICK_COMMAND_CATEGORY_ID
         || !categories.iter().any(|category| category.id == id)
     {
         return false;
     }
 
-    // Custom groups are presentation metadata. Preserve their commands by
-    // returning them to the built-in fallback group before removing the group.
+    // Groups are presentation metadata; deleting one must not delete commands.
+    categories.retain(|category| category.id != id);
+    if !categories
+        .iter()
+        .any(|category| category.id == FALLBACK_QUICK_COMMAND_CATEGORY_ID)
+    {
+        // Imported snapshots can omit the fallback group. Recreate it so moved
+        // commands remain visible in the category list.
+        let mut fallback = default_quick_command_categories()
+            .into_iter()
+            .find(|category| category.id == FALLBACK_QUICK_COMMAND_CATEGORY_ID)
+            .expect("default categories contain the fallback group");
+        fallback.sort_order = next_category_sort_order(categories);
+        categories.push(fallback);
+    }
     for command in commands.iter_mut().filter(|command| command.category == id) {
         command.category = FALLBACK_QUICK_COMMAND_CATEGORY_ID.to_string();
     }
-    categories.retain(|category| category.id != id);
     true
 }
 
@@ -255,13 +278,29 @@ pub fn match_quick_command_host_patterns(patterns: &[String], target_fields: &[S
 
 pub fn quick_command_available_for_target(
     command: &QuickCommand,
-    protocol: QuickCommandTargetProtocol,
-    target_fields: &[String],
+    target: &QuickCommandTargetContext,
 ) -> bool {
     let protocol_matches = command.availability.protocols.is_empty()
-        || command.availability.protocols.contains(&protocol);
+        || command.availability.protocols.contains(&target.protocol);
+    let target_fields = match command.availability.match_field {
+        QuickCommandMatchField::All => crate::quick_command_target_match_fields(target),
+        QuickCommandMatchField::Host => target
+            .values
+            .host
+            .as_deref()
+            .into_iter()
+            .map(|host| host.to_string())
+            .collect(),
+        QuickCommandMatchField::ConnectionName => target
+            .values
+            .connection
+            .as_deref()
+            .into_iter()
+            .map(|name| name.to_string())
+            .collect(),
+    };
     let host_matches =
-        match_quick_command_host_patterns(&command.availability.host_patterns, target_fields);
+        match_quick_command_host_patterns(&command.availability.host_patterns, &target_fields);
     protocol_matches && host_matches
 }
 
@@ -341,6 +380,7 @@ mod tests {
                 parameters: None,
                 protocols: None,
                 host_patterns: Some(vec![" *.example.com ".to_string()]),
+                match_field: None,
                 confirmation: None,
             },
             11,
@@ -370,6 +410,7 @@ mod tests {
             availability: QuickCommandAvailability {
                 protocols: vec![QuickCommandTargetProtocol::Ssh],
                 host_patterns: vec!["one.example.com".to_string(), "two.example.com".to_string()],
+                match_field: QuickCommandMatchField::ConnectionName,
             },
             confirmation: QuickCommandConfirmationPolicy::Always,
             sort_order: 0,
@@ -389,6 +430,7 @@ mod tests {
                 parameters: None,
                 protocols: None,
                 host_patterns: None,
+                match_field: None,
                 confirmation: None,
             },
             11,
@@ -402,6 +444,10 @@ mod tests {
             [QuickCommandTargetProtocol::Ssh]
         );
         assert_eq!(commands[0].availability.host_patterns.len(), 2);
+        assert_eq!(
+            commands[0].availability.match_field,
+            QuickCommandMatchField::ConnectionName
+        );
         assert_eq!(
             commands[0].confirmation,
             QuickCommandConfirmationPolicy::Always

@@ -47,6 +47,19 @@ pub enum RemoteShellIntegrationState {
     NeedsUpdate,
 }
 
+// Errors carry only categories: remote paths, configuration content, and
+// underlying transport messages must not enter notifications or diagnostics.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RemoteShellIntegrationError {
+    EnvironmentUnavailable,
+    HomeUnavailable,
+    UnsupportedShell,
+    ReadFailed,
+    InvalidText,
+    WriteFailed,
+    RemoveFailed,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RemoteShellIntegrationStatus {
     pub shell: RemoteShellKind,
@@ -69,8 +82,8 @@ struct RemoteShellIntegrationLayout {
 pub async fn inspect_remote_shell_integration(
     sftp: &SftpSession,
     remote_env: Option<&RemoteEnvInfo>,
-) -> Result<RemoteShellIntegrationStatus, String> {
-    let layout = integration_layout(sftp, remote_env)?;
+) -> Result<RemoteShellIntegrationStatus, RemoteShellIntegrationError> {
+    let layout = integration_layout(sftp.home(), remote_env)?;
     let startup_content = read_optional_text(sftp, &layout.startup_file).await?;
     let expected_reference = startup_reference(layout.shell);
     let reference_matches = startup_content.as_deref().is_some_and(|content| {
@@ -111,8 +124,8 @@ pub async fn inspect_remote_shell_integration(
 pub async fn install_remote_shell_integration(
     sftp: &SftpSession,
     remote_env: Option<&RemoteEnvInfo>,
-) -> Result<RemoteShellIntegrationStatus, String> {
-    let layout = integration_layout(sftp, remote_env)?;
+) -> Result<RemoteShellIntegrationStatus, RemoteShellIntegrationError> {
+    let layout = integration_layout(sftp.home(), remote_env)?;
     ensure_remote_directory(sftp, &join_remote(&layout.home, ".oxideterm")).await?;
     ensure_remote_directory(sftp, &layout.integration_directory).await?;
 
@@ -120,7 +133,7 @@ pub async fn install_remote_shell_integration(
         let path = join_remote(&layout.integration_directory, name);
         sftp.write_content(&path, content.as_bytes())
             .await
-            .map_err(|error| format!("failed to write {path}: {error}"))?;
+            .map_err(|_| RemoteShellIntegrationError::WriteFailed)?;
     }
 
     if let Some(parent) = remote_parent(&layout.startup_file) {
@@ -132,12 +145,7 @@ pub async fn install_remote_shell_integration(
     let updated = install_managed_block(&current, &startup_reference(layout.shell));
     sftp.replace_config_content(&layout.startup_file, updated.as_bytes())
         .await
-        .map_err(|error| {
-            format!(
-                "failed to update startup file {}: {error}",
-                layout.startup_file
-            )
-        })?;
+        .map_err(|_| RemoteShellIntegrationError::WriteFailed)?;
 
     Ok(status_from_layout(
         layout,
@@ -150,30 +158,20 @@ pub async fn remove_remote_shell_integration(
     sftp: &SftpSession,
     remote_env: Option<&RemoteEnvInfo>,
     delete_owned_files: bool,
-) -> Result<RemoteShellIntegrationStatus, String> {
-    let layout = integration_layout(sftp, remote_env)?;
+) -> Result<RemoteShellIntegrationStatus, RemoteShellIntegrationError> {
+    let layout = integration_layout(sftp.home(), remote_env)?;
     if let Some(current) = read_optional_text(sftp, &layout.startup_file).await? {
         let updated = remove_managed_block(&current);
         if updated != current {
             sftp.replace_config_content(&layout.startup_file, updated.as_bytes())
                 .await
-                .map_err(|error| {
-                    format!(
-                        "failed to update startup file {}: {error}",
-                        layout.startup_file
-                    )
-                })?;
+                .map_err(|_| RemoteShellIntegrationError::WriteFailed)?;
         }
     }
     if delete_owned_files {
         match sftp.delete_recursive(&layout.integration_directory).await {
             Ok(_) | Err(SftpError::FileNotFound(_) | SftpError::DirectoryNotFound(_)) => {}
-            Err(error) => {
-                return Err(format!(
-                    "failed to delete {}: {error}",
-                    layout.integration_directory
-                ));
-            }
+            Err(_) => return Err(RemoteShellIntegrationError::RemoveFailed),
         }
     }
     let integration_file_exists = !delete_owned_files
@@ -189,25 +187,26 @@ pub async fn remove_remote_shell_integration(
 }
 
 fn integration_layout(
-    sftp: &SftpSession,
+    fallback_home: &str,
     remote_env: Option<&RemoteEnvInfo>,
-) -> Result<RemoteShellIntegrationLayout, String> {
-    let remote_env = remote_env.ok_or_else(|| {
-        "remote shell detection is still unavailable; reconnect and try again".to_string()
-    })?;
+) -> Result<RemoteShellIntegrationLayout, RemoteShellIntegrationError> {
+    let remote_env = remote_env.ok_or(RemoteShellIntegrationError::EnvironmentUnavailable)?;
     let home = remote_env
         .home
         .as_deref()
-        .unwrap_or_else(|| sftp.home())
+        .unwrap_or(fallback_home)
         .trim_end_matches(['/', '\\'])
         .to_string();
     if home.is_empty() {
-        return Err("remote home directory is unavailable".to_string());
+        return Err(RemoteShellIntegrationError::HomeUnavailable);
     }
-    let shell = detect_remote_shell(remote_env.shell.as_deref()).ok_or_else(|| {
-        let detected = remote_env.shell.as_deref().unwrap_or("unknown");
-        format!("unsupported remote shell: {detected}")
-    })?;
+    let detected_shell = remote_env
+        .shell
+        .as_deref()
+        .filter(|shell| !shell.trim().is_empty())
+        .ok_or(RemoteShellIntegrationError::EnvironmentUnavailable)?;
+    let shell = detect_remote_shell(Some(detected_shell))
+        .ok_or(RemoteShellIntegrationError::UnsupportedShell)?;
     let integration_directory = join_remote(&home, REMOTE_SHELL_INTEGRATION_RELATIVE_DIR);
     let integration_file = join_remote(&integration_directory, shell.integration_file_name());
     let startup_file = startup_file_path(shell, remote_env, &home);
@@ -400,31 +399,37 @@ fn complete_managed_blocks(content: &str) -> Vec<ManagedBlockSpan> {
     spans
 }
 
-async fn read_optional_text(sftp: &SftpSession, path: &str) -> Result<Option<String>, String> {
+async fn read_optional_text(
+    sftp: &SftpSession,
+    path: &str,
+) -> Result<Option<String>, RemoteShellIntegrationError> {
     match sftp.read_file_bytes(path).await {
         Ok(bytes) => String::from_utf8(bytes)
             .map(Some)
-            .map_err(|error| format!("remote file {path} is not UTF-8: {error}")),
+            .map_err(|_| RemoteShellIntegrationError::InvalidText),
         Err(SftpError::FileNotFound(_) | SftpError::DirectoryNotFound(_)) => Ok(None),
-        Err(error) => Err(format!("failed to read {path}: {error}")),
+        Err(_) => Err(RemoteShellIntegrationError::ReadFailed),
     }
 }
 
-async fn ensure_remote_directory(sftp: &SftpSession, path: &str) -> Result<(), String> {
+async fn ensure_remote_directory(
+    sftp: &SftpSession,
+    path: &str,
+) -> Result<(), RemoteShellIntegrationError> {
     match sftp.stat(path).await {
         Ok(info) if info.file_type == oxideterm_ssh::FileType::Directory => return Ok(()),
-        Ok(_) => return Err(format!("remote path is not a directory: {path}")),
+        Ok(_) => return Err(RemoteShellIntegrationError::WriteFailed),
         Err(SftpError::FileNotFound(_) | SftpError::DirectoryNotFound(_)) => {}
-        Err(error) => return Err(format!("failed to inspect {path}: {error}")),
+        Err(_) => return Err(RemoteShellIntegrationError::WriteFailed),
     }
     if let Some(parent) = remote_parent(path) {
         Box::pin(ensure_remote_directory(sftp, &parent)).await?;
     }
     match sftp.mkdir(path).await {
         Ok(()) => Ok(()),
-        Err(error) => match sftp.stat(path).await {
+        Err(_) => match sftp.stat(path).await {
             Ok(info) if info.file_type == oxideterm_ssh::FileType::Directory => Ok(()),
-            _ => Err(format!("failed to create {path}: {error}")),
+            _ => Err(RemoteShellIntegrationError::WriteFailed),
         },
     }
 }
@@ -635,6 +640,43 @@ mod tests {
     use super::*;
 
     #[test]
+    fn layout_failures_distinguish_missing_detection_from_unsupported_shell_without_remote_content()
+    {
+        assert_eq!(
+            integration_layout("/home/alice", None).unwrap_err(),
+            RemoteShellIntegrationError::EnvironmentUnavailable
+        );
+        let mut env = RemoteEnvInfo::unknown();
+        env.home = Some("/home/alice".to_string());
+        for (shell, expected) in [
+            (None, RemoteShellIntegrationError::EnvironmentUnavailable),
+            (
+                Some(" "),
+                RemoteShellIntegrationError::EnvironmentUnavailable,
+            ),
+            (
+                Some("/private/secret-token/tcsh"),
+                RemoteShellIntegrationError::UnsupportedShell,
+            ),
+        ] {
+            env.shell = shell.map(str::to_string);
+            assert_eq!(
+                integration_layout("/fallback", Some(&env)).unwrap_err(),
+                expected
+            );
+        }
+        env.shell = Some("/bin/bash".to_string());
+        env.home = None;
+        assert_eq!(
+            integration_layout("", Some(&env)).unwrap_err(),
+            RemoteShellIntegrationError::HomeUnavailable
+        );
+        let layout = integration_layout("/fallback", Some(&env)).unwrap();
+        assert_eq!(layout.shell, RemoteShellKind::Bash);
+        assert_eq!(layout.startup_file, "/fallback/.bashrc");
+    }
+
+    #[test]
     fn shell_detection_accepts_paths_and_windows_version_labels() {
         assert_eq!(
             detect_remote_shell(Some("/bin/bash")),
@@ -652,52 +694,52 @@ mod tests {
     }
 
     #[test]
-    fn managed_startup_block_is_idempotent_and_removable() {
-        let original = "export EDITOR=vim\n";
-        let block = startup_reference(RemoteShellKind::Bash);
-        let installed = install_managed_block(original, &block);
-        let reinstalled = install_managed_block(&installed, &block);
-        assert_eq!(installed, reinstalled);
-        assert_eq!(remove_managed_block(&installed), original);
-    }
-
-    #[test]
-    fn managed_block_parser_ignores_marker_text_and_preserves_incomplete_blocks() {
-        let block = startup_reference(RemoteShellKind::Zsh);
-        let original = format!(
+    fn managed_startup_blocks_preserve_user_content_during_install_upgrade_and_removal() {
+        let incomplete = format!(
             "echo '# {MANAGED_BLOCK_START}'\n# {MANAGED_BLOCK_START}\nlegacy without end\n"
         );
-        let installed = install_managed_block(&original, &block);
-        assert!(installed.starts_with(&original));
-        assert_eq!(complete_managed_blocks(&installed).len(), 1);
-        assert!(remove_managed_block(&installed).starts_with(&original));
-    }
-
-    #[test]
-    fn reinstall_replaces_first_complete_block_and_removes_duplicates() {
-        let desired = startup_reference(RemoteShellKind::Fish);
         let old = format!("# {MANAGED_BLOCK_START}\nold\n# {MANAGED_BLOCK_END}\n");
-        let duplicate = format!("head\n{old}middle\n{old}tail\n");
-        let installed = install_managed_block(&duplicate, &desired);
-        assert_eq!(complete_managed_blocks(&installed).len(), 1);
-        assert!(installed.contains("head\n"));
-        assert!(installed.contains("middle\n"));
-        assert!(installed.contains("tail\n"));
-    }
-
-    #[test]
-    fn version_three_managed_block_upgrades_in_place() {
         let old_block = format!(
             "# {MANAGED_BLOCK_START}\n# oxideterm-shell-integration-version: 3\nlegacy source\n# {MANAGED_BLOCK_END}"
         );
-        let original = format!("before\n{old_block}\nafter\n");
-        let upgraded = install_managed_block(&original, &startup_reference(RemoteShellKind::Bash));
-
-        assert!(upgraded.starts_with("before\n"));
-        assert!(upgraded.ends_with("after\n"));
-        assert!(upgraded.contains("oxideterm-shell-integration-version: 4"));
-        assert!(!upgraded.contains("legacy source"));
-        assert_eq!(complete_managed_blocks(&upgraded).len(), 1);
+        for (shell, original, prefix, suffix, removed) in [
+            (
+                RemoteShellKind::Bash,
+                "export EDITOR=vim\n".to_string(),
+                "export EDITOR=vim\n\n".to_string(),
+                "",
+                "export EDITOR=vim\n".to_string(),
+            ),
+            (
+                RemoteShellKind::Zsh,
+                incomplete.clone(),
+                format!("{incomplete}\n"),
+                "",
+                incomplete,
+            ),
+            (
+                RemoteShellKind::Fish,
+                format!("head\n{old}middle\n{old}tail\n"),
+                "head\n".to_string(),
+                "middle\ntail\n",
+                "head\nmiddle\ntail\n".to_string(),
+            ),
+            (
+                RemoteShellKind::Bash,
+                format!("before\n{old_block}\nafter\n"),
+                "before\n".to_string(),
+                "after\n",
+                "before\nafter\n".to_string(),
+            ),
+        ] {
+            let block = startup_reference(shell);
+            assert!(block.contains("oxideterm-shell-integration-version: 4"));
+            let expected = format!("{prefix}{block}\n{suffix}");
+            let installed = install_managed_block(&original, &block);
+            assert_eq!(installed, expected, "{original:?}");
+            assert_eq!(install_managed_block(&installed, &block), expected);
+            assert_eq!(remove_managed_block(&installed), removed, "{original:?}");
+        }
     }
 
     #[test]

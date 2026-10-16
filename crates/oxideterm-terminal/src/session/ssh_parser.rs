@@ -18,6 +18,7 @@ pub(super) struct SshParser {
     pub(super) title: Option<String>,
     graphics_ingress: GraphicsIngress,
     pub(super) graphics: TerminalGraphicsState,
+    pub(super) palette: TerminalPalette,
     graphics_alt_screen_active: bool,
     magic_scan: MagicScanWindow,
     encoding: TerminalEncoding,
@@ -104,6 +105,7 @@ impl SshParser {
                 title: None,
                 graphics_ingress: GraphicsIngress::new(graphics_options),
                 graphics: TerminalGraphicsState::default(),
+                palette: TerminalPalette::default(),
                 graphics_alt_screen_active: false,
                 magic_scan: MagicScanWindow::default(),
                 encoding,
@@ -146,6 +148,31 @@ impl SshParser {
         if let Some(consumer) = &mut self.trzsz_consumer {
             consumer.close();
         }
+    }
+
+    pub(super) fn restart_transport(&mut self, policy: Option<TrzszTransferPolicy>) {
+        self.interrupt_trzsz_transfer();
+        self.interrupt_modem_transfer();
+        self.retire_transport();
+        self.trzsz_consumer = None;
+        self.set_trzsz_policy(policy);
+        self.parser = Processor::new();
+        self.utf8_guard = Default::default();
+        self.output_decoder = TerminalOutputDecoder::new(self.encoding);
+        self.input_encoder = TerminalInputEncoder::new(self.encoding);
+        self.magic_scan = MagicScanWindow::default();
+        self.encoding_detector = EncodingMismatchDetector::new(self.encoding);
+        self.graphics_ingress.reset_stream();
+        if let Some(controller) = &mut self.tmux_controller {
+            controller.restart_transport();
+        }
+        if let Some(triggers) = &mut self.trigger_stream {
+            triggers.reset_stream();
+        }
+        self.privilege_prompt = TerminalPrivilegePromptStream::default();
+        self.shell_integration = TerminalShellIntegration::default();
+        self.transport_running = true;
+        self.term.lock().reset_session_preserving_history();
     }
 
     pub(super) fn set_recording_context(
@@ -595,7 +622,20 @@ impl SshParser {
                     .push(TerminalEvent::ClipboardLoad(formatter));
                 false
             }
-            AlacEvent::ColorRequest(_, _) | AlacEvent::TextAreaSizeRequest(_) => false,
+            AlacEvent::ColorSchemeRequest => {
+                let _ = self.write_protocol_bytes(self.palette.color_scheme_report().as_bytes());
+                false
+            }
+            AlacEvent::ColorRequest(index, formatter) => {
+                let color = crate::color_for_alacritty_request(
+                    index,
+                    &self.palette,
+                    self.display_term().lock().colors(),
+                );
+                let _ = self.write_protocol_bytes(formatter(color).as_bytes());
+                false
+            }
+            AlacEvent::TextAreaSizeRequest(_) => false,
             AlacEvent::ChildExit(_) | AlacEvent::Exit => false,
         }
     }
@@ -684,6 +724,21 @@ impl SshParser {
             return Ok(());
         }
         self.write_input(&bytes)
+    }
+
+    pub(super) fn set_palette(&mut self, palette: TerminalPalette) {
+        if self.palette == palette {
+            return;
+        }
+        self.palette = palette;
+        // Unchanged rows still hold colors resolved from the old palette.
+        self.term.lock().mark_fully_damaged();
+        self.term.lock().notify_palette_changed();
+        self.tmux_display.set_palette(palette);
+        let commands = self.tmux_display.palette_report_commands();
+        if !commands.is_empty() {
+            self.queue_tmux_commands(commands);
+        }
     }
 
     pub(super) fn set_encoding(&mut self, encoding: TerminalEncoding) {

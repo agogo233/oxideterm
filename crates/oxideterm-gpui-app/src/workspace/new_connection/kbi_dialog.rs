@@ -3,7 +3,8 @@ use gpui::{
     px, rgb, rgba,
 };
 use oxideterm_ssh::{
-    KeyboardInteractivePromptRequest, KeyboardInteractiveResponses, SshPromptError,
+    KeyboardInteractivePromptRequest, KeyboardInteractiveResponses, SshPasswordResponse,
+    SshPromptError,
 };
 use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
@@ -14,29 +15,96 @@ use crate::workspace::new_connection::entity::{
     KeyboardInteractiveKeyAction, KeyboardInteractiveSubmitResult,
 };
 use oxideterm_gpui_ui::{
-    MaterialRole, TextInputView,
+    TextInputView,
     button::{ButtonOptions, ButtonRadius, ButtonSize, ButtonVariant, ToolbarButtonOptions},
-    form_field, material_surface,
-    modal::{dismissible_dialog_backdrop, rounded_shell_child_radius},
+    form_field,
+    modal::{dialog_backdrop_color, modal_backdrop, modal_container, rounded_shell_child_radius},
     text_input, text_input_anchor_probe,
 };
 
 const KBI_PROMPT_TIMEOUT_SECS: u64 = 60;
 
+pub(in crate::workspace) enum NativeSshPromptSender {
+    Interactive(oneshot::Sender<Result<KeyboardInteractiveResponses, SshPromptError>>),
+    Password {
+        response_tx: oneshot::Sender<Result<SshPasswordResponse, SshPromptError>>,
+        on_authenticated: Option<Box<dyn FnOnce(zeroize::Zeroizing<String>) + Send>>,
+    },
+}
+
+impl From<oneshot::Sender<Result<KeyboardInteractiveResponses, SshPromptError>>>
+    for NativeSshPromptSender
+{
+    fn from(sender: oneshot::Sender<Result<KeyboardInteractiveResponses, SshPromptError>>) -> Self {
+        Self::Interactive(sender)
+    }
+}
+
+impl NativeSshPromptSender {
+    pub(super) fn is_closed(&self) -> bool {
+        match self {
+            Self::Interactive(sender) => sender.is_closed(),
+            Self::Password { response_tx, .. } => response_tx.is_closed(),
+        }
+    }
+
+    pub(super) fn can_remember(&self) -> bool {
+        matches!(
+            self,
+            Self::Password {
+                on_authenticated: Some(_),
+                ..
+            }
+        )
+    }
+
+    pub(super) fn send(
+        self,
+        result: Result<KeyboardInteractiveResponses, SshPromptError>,
+    ) -> Result<(), ()> {
+        self.send_with_remember(result, false)
+    }
+
+    pub(super) fn send_with_remember(
+        self,
+        result: Result<KeyboardInteractiveResponses, SshPromptError>,
+        remember: bool,
+    ) -> Result<(), ()> {
+        match self {
+            Self::Interactive(sender) => sender.send(result).map_err(|_| ()),
+            Self::Password {
+                response_tx,
+                on_authenticated,
+            } => {
+                let result = result.and_then(|mut responses| {
+                    if responses.len() != 1 {
+                        return Err(SshPromptError::Failed("Invalid password response".into()));
+                    }
+                    Ok(SshPasswordResponse {
+                        password: zeroize::Zeroizing::new(std::mem::take(&mut responses[0])),
+                        on_authenticated: if remember { on_authenticated } else { None },
+                    })
+                });
+                response_tx.send(result).map_err(|_| ())
+            }
+        }
+    }
+}
 pub(in crate::workspace) struct KeyboardInteractiveChallenge {
     pub(super) presence: oxideterm_gpui_ui::motion::ExitPresence,
     pub(super) request: KeyboardInteractivePromptRequest,
     pub(in crate::workspace) responses: KeyboardInteractiveResponses,
     pub(in crate::workspace) focused_prompt: usize,
+    pub(super) remember_password: bool,
+    pub(super) external_wait: bool,
     pub(super) expires_at: Instant,
-    pub(super) response_tx:
-        Option<oneshot::Sender<Result<KeyboardInteractiveResponses, SshPromptError>>>,
+    pub(super) response_tx: Option<NativeSshPromptSender>,
 }
 
 impl KeyboardInteractiveChallenge {
     pub(super) fn new(
         request: KeyboardInteractivePromptRequest,
-        response_tx: oneshot::Sender<Result<KeyboardInteractiveResponses, SshPromptError>>,
+        response_tx: NativeSshPromptSender,
     ) -> Self {
         let responses =
             KeyboardInteractiveResponses::new(vec![String::new(); request.prompts.len()]);
@@ -45,6 +113,8 @@ impl KeyboardInteractiveChallenge {
             request,
             responses,
             focused_prompt: 0,
+            remember_password: false,
+            external_wait: false,
             expires_at: Instant::now() + Duration::from_secs(KBI_PROMPT_TIMEOUT_SECS),
             response_tx: Some(response_tx),
         }
@@ -61,7 +131,7 @@ impl KeyboardInteractiveChallenge {
     }
 
     pub(super) fn all_responses_filled(&self) -> bool {
-        self.responses.iter().all(|response| !response.is_empty())
+        !self.external_wait && self.responses.iter().all(|response| !response.is_empty())
     }
 }
 
@@ -196,6 +266,7 @@ impl WorkspaceApp {
         let timed_out = challenge.timed_out();
         let seconds_left = challenge.seconds_left();
         let can_submit = !timed_out && challenge.all_responses_filled();
+        let external_wait = challenge.external_wait;
 
         let mut prompt_list = div()
             .flex()
@@ -260,7 +331,37 @@ impl WorkspaceApp {
             ));
         }
 
-        dismissible_dialog_backdrop()
+        if challenge
+            .response_tx
+            .as_ref()
+            .is_some_and(NativeSshPromptSender::can_remember)
+        {
+            prompt_list = prompt_list.child(
+                oxideterm_gpui_ui::checkbox_with(
+                    &self.tokens,
+                    self.i18n.t("ssh.kbi.save_password_after_login"),
+                    challenge.remember_password,
+                    oxideterm_gpui_ui::CheckboxOptions {
+                        disabled: timed_out,
+                        ..Default::default()
+                    },
+                )
+                .id("ssh-prompt-save-password")
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.connection_flow.update(cx, |flow, cx| {
+                            flow.toggle_prompt_password_remember(cx);
+                        });
+                        cx.stop_propagation();
+                    }),
+                ),
+            );
+        }
+
+        // Authentication fields redraw while waiting and typing. Avoid sampling
+        // the entire window for blur on each of those frames.
+        modal_backdrop(dialog_backdrop_color())
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _event, _window, cx| {
@@ -273,7 +374,8 @@ impl WorkspaceApp {
             .child(oxideterm_gpui_ui::motion::form_transition(
                 &self.tokens,
                 "keyboard-interactive-dialog-transition",
-                material_surface(&self.tokens, div(), MaterialRole::Dialog)
+                modal_container(&self.tokens)
+                    .bg(rgb(theme.bg_elevated))
                     .w(px(self.tokens.metrics.modal_width))
                     .rounded(px(self.tokens.radii.md))
                     .overflow_hidden()
@@ -377,13 +479,15 @@ impl WorkspaceApp {
                                 false,
                                 cx,
                             ))
-                            .child(self.render_keyboard_interactive_button(
-                                self.i18n.t("ssh.kbi.continue"),
-                                true,
-                                true,
-                                !can_submit,
-                                cx,
-                            )),
+                            .when(!external_wait, |footer| {
+                                footer.child(self.render_keyboard_interactive_button(
+                                    self.i18n.t("ssh.kbi.continue"),
+                                    true,
+                                    true,
+                                    !can_submit,
+                                    cx,
+                                ))
+                            }),
                     ),
                 dialog_visible,
             ))

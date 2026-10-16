@@ -87,9 +87,10 @@ pub(super) fn native_plugin_host_api_snapshot_from_workspace(
         "categories": &quick_command_store.categories,
         "commands": &quick_command_store.commands,
     });
-    let theme_tokens =
-        native_plugin_theme_tokens_snapshot(&workspace.tokens, &settings.terminal.theme);
-    let available_themes = native_plugin_available_themes(settings);
+    let theme_name = oxideterm_settings_model::ThemeTarget::Application
+        .resolved_id(settings, workspace.system_dark);
+    let theme_tokens = native_plugin_theme_tokens_snapshot(&workspace.tokens, theme_name);
+    let available_themes = native_plugin_available_themes(settings, theme_name);
     let (cloud_sync_summary, cloud_sync_history) = {
         let cloud_sync = workspace.cloud_sync.read(cx);
         let persisted_state = cloud_sync.controller.store.state();
@@ -113,7 +114,7 @@ pub(super) fn native_plugin_host_api_snapshot_from_workspace(
         i18n: workspace.i18n.clone(),
         settings: serde_json::to_value(settings).unwrap_or_else(|_| json!({})),
         locale: settings.general.language.as_str().to_string(),
-        theme_name: settings.terminal.theme.clone(),
+        theme_name: theme_name.to_string(),
         // Tauri's PluginAppAPI exposes the compact ssh_get_pool_stats shape,
         // not the full native monitor payload. Keep this RPC-compatible.
         pool_stats: json!({
@@ -139,6 +140,7 @@ pub(super) fn native_plugin_host_api_snapshot_from_workspace(
         cloud_sync_summary,
         cloud_sync_history,
         host_tools_snapshots,
+        workspace_summary: workspace.native_plugin_workspace_summary(cx),
     }
 }
 
@@ -237,11 +239,14 @@ fn native_plugin_notifications_snapshot(
 }
 
 /// Returns discoverable theme identities without exposing custom theme source payloads.
-fn native_plugin_available_themes(settings: &oxideterm_settings::PersistedSettings) -> Value {
+fn native_plugin_available_themes(
+    settings: &oxideterm_settings::PersistedSettings,
+    active: &str,
+) -> Value {
     let mut custom_ids = settings.custom_themes.keys().cloned().collect::<Vec<_>>();
     custom_ids.sort();
     json!({
-        "active": &settings.terminal.theme,
+        "active": active,
         "builtIn": BUILT_IN_THEMES.iter().map(|theme| theme.id).collect::<Vec<_>>(),
         "custom": custom_ids,
     })
@@ -508,6 +513,7 @@ mod tests {
     #[test]
     fn saved_connection_snapshot_omits_secret_refs_paths_and_commands() {
         let connection = ConnectionInfo {
+            totp_credential_id: None,
             empty_password: false,
             id: "saved-1".to_string(),
             name: "Production".to_string(),
@@ -525,6 +531,7 @@ mod tests {
             gssapi_server_identity: None,
             gssapi_delegate_credentials: false,
             proxy_chain: vec![ProxyHopInfo {
+                totp_credential_id: None,
                 empty_password: false,
                 host: "jump.example.test".to_string(),
                 port: 22,
@@ -641,6 +648,7 @@ mod tests {
             availability: oxideterm_quick_commands::QuickCommandAvailability {
                 protocols: Vec::new(),
                 host_patterns: vec!["private-host-*".to_string()],
+                ..oxideterm_quick_commands::QuickCommandAvailability::default()
             },
             confirmation: oxideterm_quick_commands::QuickCommandConfirmationPolicy::Inherit,
             sort_order: 0,

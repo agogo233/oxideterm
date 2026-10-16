@@ -4,7 +4,7 @@
 use std::{cell::Cell, collections::BTreeMap, ops::Range, rc::Rc};
 
 use gpui::{
-    Anchor, AnchoredPositionMode, AnyElement, App, AppContext, ColorExt, Context, CursorStyle, Div,
+    Anchor, AnchoredPositionMode, AnyElement, App, AppContext, Context, CursorStyle, Div,
     EmptyView, Entity, InteractiveElement, IntoElement, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, ParentElement, Render, ScrollWheelEvent, SharedString,
     StatefulInteractiveElement, Styled, Window, anchored, deferred, div, prelude::FluentBuilder,
@@ -235,7 +235,28 @@ impl Render for TextEditorView {
         if let Some(menu) = self.context_menu {
             root = root.child(self.render_context_menu(menu, window, cx));
         }
-        root
+        let Some(language) = self
+            .language
+            .clone()
+            .filter(|language| language.plugin_key().is_some())
+        else {
+            return root.into_any_element();
+        };
+        if self.presentation == EditorPresentation::Inline || self.is_large_file() {
+            return root.into_any_element();
+        }
+        let Some(notice) =
+            crate::render_language_plugin_notice(language, &self.language_notice_tokens, cx)
+        else {
+            return root.into_any_element();
+        };
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .child(notice)
+            .child(div().flex_1().min_h(px(0.0)).child(root))
+            .into_any_element()
     }
 }
 
@@ -844,10 +865,10 @@ impl TextEditorView {
                 if is_current_line && display_row.is_first && self.settings.highlight_current_line {
                     rgba((self.appearance.accent_hex << 8) | CM_ACTIVE_GUTTER_ACCENT_ALPHA)
                 } else if is_selected_line {
-                    self.editor_panel_background(self.appearance.gutter_background_hex)
-                        .blend(&rgba(
-                            (self.appearance.accent_hex << 8) | CM_SELECTED_LINE_ACCENT_ALPHA,
-                        ))
+                    gpui::ColorExt::blend(
+                        &self.editor_panel_background(self.appearance.gutter_background_hex),
+                        &rgba((self.appearance.accent_hex << 8) | CM_SELECTED_LINE_ACCENT_ALPHA),
+                    )
                 } else {
                     self.editor_panel_background(self.appearance.gutter_background_hex)
                 },
@@ -1524,7 +1545,7 @@ fn visible_indentation_columns(
 mod tests {
     use super::visible_indentation_columns;
     use crate::surface::wrap::DisplayRow;
-    use oxideterm_editor_syntax::{LanguageId, StructureCache, SyntaxSession};
+    use oxideterm_editor_syntax::{LanguageId, StructureCache};
 
     fn display_row(line: usize, start_col: usize, end_col: usize) -> DisplayRow {
         DisplayRow {
@@ -1539,7 +1560,7 @@ mod tests {
     #[test]
     fn indentation_guides_follow_syntax_ranges() {
         let source = "fn main() {\n    if ready {\n        call();\n    }\n}\n";
-        let session = SyntaxSession::parse(LanguageId::Rust, source).unwrap();
+        let session = crate::grammar_fixture::parse(LanguageId::Rust, source).unwrap();
         let mut cache = StructureCache::default();
         cache.update(&session, source, 4, None);
         let rows = [display_row(0, 0, 120), display_row(2, 0, 120)];

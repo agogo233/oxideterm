@@ -41,6 +41,11 @@ pub enum AppIconVariant {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppearanceSettings {
+    pub theme: String,
+    #[serde(default)]
+    pub follow_system_appearance: bool,
+    #[serde(default)]
+    pub system_themes: SystemThemeSettings,
     #[serde(default)]
     pub app_icon: AppIconVariant,
     pub sidebar_collapsed_default: bool,
@@ -63,6 +68,9 @@ pub struct AppearanceSettings {
 impl Default for AppearanceSettings {
     fn default() -> Self {
         Self {
+            theme: DEFAULT_COLOR_THEME.to_string(),
+            follow_system_appearance: false,
+            system_themes: SystemThemeSettings::default(),
             app_icon: AppIconVariant::default(),
             sidebar_collapsed_default: false,
             ui_density: UiDensity::Comfortable,
@@ -144,6 +152,15 @@ pub enum SessionSortOrder {
     ConnectedFirst,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginMarketplaceSort {
+    #[default]
+    Name,
+    RecentUpdates,
+    NewestListings,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SidebarUiState {
@@ -151,6 +168,8 @@ pub struct SidebarUiState {
     pub session_sort_order: SessionSortOrder,
     #[serde(default)]
     pub session_manual_order: Vec<String>,
+    #[serde(default)]
+    pub hidden_local_terminal_profile_ids: Vec<String>,
     pub collapsed: bool,
     pub active_section: String,
     pub width: i64,
@@ -170,6 +189,7 @@ impl Default for SidebarUiState {
             active_section: "sessions".to_string(),
             session_sort_order: SessionSortOrder::Default,
             session_manual_order: Vec::new(),
+            hidden_local_terminal_profile_ids: Vec::new(),
             width: 300,
             ai_sidebar_collapsed: true,
             ai_sidebar_width: AI_SIDEBAR_DEFAULT_WIDTH,

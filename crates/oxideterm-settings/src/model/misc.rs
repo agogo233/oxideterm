@@ -469,6 +469,8 @@ pub struct PersistedSettings {
     #[serde(default)]
     pub command_palette_mru: Vec<String>,
     #[serde(default)]
+    pub plugin_marketplace_sort: PluginMarketplaceSort,
+    #[serde(default)]
     pub keybindings: KeybindingSettings,
     #[serde(default)]
     pub custom_themes: Map<String, Value>,
@@ -510,6 +512,7 @@ impl Default for PersistedSettings {
             onboarding_disclaimer_accepted: false,
             onboarding_completed: false,
             command_palette_mru: Vec::new(),
+            plugin_marketplace_sort: PluginMarketplaceSort::Name,
             keybindings: KeybindingSettings::default(),
             custom_themes: Map::new(),
             agent_roles: None,
@@ -596,45 +599,21 @@ mod misc_tests {
     }
 
     #[test]
-    fn legacy_settings_default_onboarding_disclaimer_acceptance_when_missing() {
+    fn missing_settings_fields_preserve_onboarding_appearance_and_ssh_defaults() {
         let mut serialized = PersistedSettings::default().to_value();
-        serialized
-            .as_object_mut()
-            .expect("settings should be an object")
-            .remove("onboardingDisclaimerAccepted");
-
-        let restored: PersistedSettings =
-            serde_json::from_value(serialized).expect("legacy settings should deserialize");
-
-        assert!(!restored.onboarding_disclaimer_accepted);
-    }
-
-    #[test]
-    fn legacy_appearance_settings_default_to_visible_window_titlebar() {
-        let mut serialized = PersistedSettings::default().to_value();
+        let root = serialized.as_object_mut().unwrap();
+        root.remove("onboardingDisclaimerAccepted");
+        root.remove("sshConfig");
         serialized["appearance"]
             .as_object_mut()
-            .expect("appearance should be an object")
+            .unwrap()
             .remove("showWindowTitlebar");
 
-        let restored: PersistedSettings =
-            serde_json::from_value(serialized).expect("legacy settings should deserialize");
+        let restored: PersistedSettings = serde_json::from_value(serialized).unwrap();
 
+        assert!(!restored.onboarding_disclaimer_accepted);
         assert!(restored.appearance.show_window_titlebar);
         assert_eq!(restored.appearance.window_opacity, DEFAULT_WINDOW_OPACITY);
-    }
-
-    #[test]
-    fn legacy_settings_default_to_automatic_ssh_config_discovery() {
-        let mut serialized = PersistedSettings::default().to_value();
-        serialized
-            .as_object_mut()
-            .expect("settings should be an object")
-            .remove("sshConfig");
-
-        let restored: PersistedSettings =
-            serde_json::from_value(serialized).expect("legacy settings should deserialize");
-
         assert!(restored.ssh_config.auto_load_hosts);
         assert!(!restored.ssh_config.auto_sync_hosts);
         assert!(!restored.ssh_config.allow_proxy_command);

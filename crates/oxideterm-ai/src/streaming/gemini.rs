@@ -141,7 +141,12 @@ pub(crate) fn gemini_chat_contents(messages: &[AiChatMessage]) -> (Option<String
     let mut contents = Vec::<Value>::new();
     let mut tool_names_by_id = HashMap::<String, String>::new();
     for message in messages {
-        if message.role == AiChatRole::Assistant
+        let role = if crate::runtime_context::is_runtime_context_message(message) {
+            AiChatRole::User
+        } else {
+            message.role
+        };
+        if role == AiChatRole::Assistant
             && let Some(parts) =
                 ai_provider_parts(message, "gemini").filter(|parts| !parts.is_empty())
         {
@@ -156,7 +161,7 @@ pub(crate) fn gemini_chat_contents(messages: &[AiChatMessage]) -> (Option<String
             }));
             continue;
         }
-        match message.role {
+        match role {
             AiChatRole::System => {
                 system_instruction = Some(match system_instruction {
                     // Gemini's Tauri adapter uses JavaScript truthiness here:
@@ -202,7 +207,7 @@ pub(crate) fn gemini_chat_contents(messages: &[AiChatMessage]) -> (Option<String
                 contents.push(serde_json::json!({ "role": "model", "parts": parts }));
             }
             AiChatRole::User | AiChatRole::Assistant => {
-                let role = if message.role == AiChatRole::Assistant {
+                let role = if role == AiChatRole::Assistant {
                     "model"
                 } else {
                     "user"
@@ -391,6 +396,7 @@ fn parse_gemini_error(status: u16, body: &str) -> String {
 mod tests {
     use super::*;
     use crate::{AiExecutionBackend, AiPolicySafetyMode, AiToolUsePolicy};
+    use serde_json::json;
 
     fn config(model: &str, effort: &str) -> AiChatStreamConfig {
         AiChatStreamConfig {
@@ -435,25 +441,21 @@ mod tests {
     }
 
     #[test]
-    fn gemini_three_uses_official_thinking_level_field() {
-        let body = gemini_chat_body(&config("gemini-3.6-flash", "medium"), &[]);
-        assert_eq!(
-            body["generationConfig"]["thinkingConfig"]["thinkingLevel"].as_str(),
-            Some("medium")
-        );
-    }
-
-    #[test]
-    fn gemini_two_five_maps_levels_to_official_budgets() {
-        let body = gemini_chat_body(&config("gemini-2.5-flash", "none"), &[]);
-        assert_eq!(
-            body["generationConfig"]["thinkingConfig"]["thinkingBudget"].as_i64(),
-            Some(0)
-        );
-        let body = gemini_chat_body(&config("gemini-2.5-pro", "high"), &[]);
-        assert_eq!(
-            body["generationConfig"]["thinkingConfig"]["thinkingBudget"].as_i64(),
-            Some(24576)
-        );
+    fn thinking_config_matches_model_generation() {
+        for (model, effort, expected) in [
+            (
+                "gemini-3.6-flash",
+                "medium",
+                json!({"thinkingLevel": "medium"}),
+            ),
+            ("gemini-2.5-flash", "none", json!({"thinkingBudget": 0})),
+            ("gemini-2.5-pro", "high", json!({"thinkingBudget": 24576})),
+        ] {
+            let body = gemini_chat_body(&config(model, effort), &[]);
+            assert_eq!(
+                body["generationConfig"]["thinkingConfig"], expected,
+                "{model}/{effort}"
+            );
+        }
     }
 }

@@ -1,5 +1,23 @@
 {
   "terminal": {
+    "history": {
+      "save": "コマンド履歴をこの端末に保存",
+      "save_hint": "保存済みの SSH、Telnet、Mosh、シリアル接続のコマンド全体を暗号化されていないローカルファイルに保存します。引数内のパスワードやトークンも含まれます。有効にした時点から保存します。",
+      "retention": "保存期間（日）",
+      "retention_hint": "0 は無期限です。保存済みの接続全体で最大 10,000 件を保存します。",
+      "current": "現在の接続",
+      "all": "すべての接続",
+      "pause": "この接続の履歴記録を一時停止",
+      "resume": "この接続の履歴記録を再開",
+      "clear_current": "この接続の履歴を消去",
+      "clear_all": "保存済みの全接続の履歴を消去",
+      "clear_confirm": "保存済みの全接続について、ファイルおよびメモリ内のコマンド履歴を削除しますか？シェルの履歴ファイルは変更されません。",
+      "clear_confirm_current": "この接続の保存済みおよびメモリ内のコマンド履歴を削除しますか？シェルの履歴ファイルは変更されません。",
+      "delete": "履歴から削除",
+      "empty": "一致するコマンドがありません",
+      "error": "履歴を読み込みまたは保存できませんでした。最近のコマンドはメモリ内で引き続き使用できます。"
+    },
+    "reconnect_hint": "セッションが切断されました · Enter キーで再接続",
     "control_bar": {
       "show_controls": "操作欄を表示",
       "hide_controls": "操作欄を非表示"
@@ -51,6 +69,11 @@
       "risk_configured": "設定済み"
     },
     "paste": {
+      "edit": "編集",
+      "edit_title": "貼り付け前に編集",
+      "strip_fence": "コードブロックの記号を削除",
+      "undo": "元に戻す",
+      "redo": "やり直す",
       "title": "複数行が検出されました ({{count}}行)",
       "more_lines": "... さらに{{count}}行",
       "confirm": "確認",
@@ -84,6 +107,12 @@
       "clear_screen": "画面をクリア"
     },
     "modem": {
+      "timeout": "相手側からの応答がタイムアウトしました。相手側の転送プログラムを起動してから再試行してください。",
+      "protocol_error": "相手側から無効または予期しない転送データが送信されました。",
+      "file_error": "転送ファイルを読み書きできません。アクセス権と空き容量を確認してください。",
+      "file_too_large": "ファイルがこのプロトコルのサイズ上限を超えています。",
+      "buffer_overflow": "相手側から転送バッファの容量を超えるデータが送信されました。",
+      "worker_stopped": "転送処理が予期せず停止しました。再試行してください。",
       "binary_transfer": "バイナリ転送",
       "xmodem_upload": "XMODEM アップロード",
       "xmodem_receive": "XMODEM 受信",
@@ -258,7 +287,12 @@
       "command_placeholder": "Command",
       "template_hint": "Use {{param.name}} or {{ctx.host}}; add |sh for POSIX shell quoting.",
       "description_placeholder": "Description",
-      "host_pattern_placeholder": "Host pattern, e.g. *.prod",
+      "match_field": "照合対象",
+      "match_host": "ホストアドレス",
+      "match_connection": "接続名",
+      "match_all": "すべての項目",
+      "match_hint": "空欄は対象を制限しません。* を使用でき、複数の規則はカンマで区切ります。すべての項目にはアドレス、ユーザー名、接続名、端末タイトルが含まれます。",
+      "host_pattern_placeholder": "照合規則（例：prod-*）",
       "confirm_title": "Run quick command?",
       "confirm_description": "Run: {{command}}",
       "confirm_risky_description": "This command may be destructive or sensitive. Run: {{command}}",
@@ -266,7 +300,8 @@
       "add_group": "Add group",
       "edit_group": "Edit group",
       "delete_group": "Delete group",
-      "delete_group_description": "「{{name}}」内のコマンドは、グループを削除する前にデフォルトグループへ移動されます。",
+      "delete_group_description": "このグループを削除する前に、「{{name}}」内のコマンドを「{{destination}}」へ移動します。",
+      "reorder_groups": "ハンドルをドラッグしてグループを並べ替え",
       "save_group": "Save group",
       "group_name_placeholder": "Group name",
       "icon_terminal": "Terminal",
@@ -538,6 +573,8 @@
     "typeLocal": "ローカル",
     "typeSsh": "SSH",
     "privilege_helper": {
+      "choose_hint": "Enter を押して権限昇格の認証情報を選択",
+      "choose_title": "権限昇格の認証情報を選択",
       "fill": "パスワード入力",
       "filling": "入力中...",
       "fill_title": "{{label}} を入力",

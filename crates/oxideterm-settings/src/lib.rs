@@ -10,14 +10,15 @@ mod store;
 
 pub use background_images::{
     background_images_directory, clear_background_images, ensure_bundled_background_image,
-    import_background_images, is_managed_background_image, is_supported_background_image,
-    list_background_images, remove_background_image,
+    import_background_images, import_background_pack, is_managed_background_image,
+    is_supported_background_image, list_background_images, remove_background_image,
 };
 pub use model::*;
 pub use normalize::{SanitizedSettings, sanitize_settings_value};
 pub use oxide_snapshot::{
     ALL_OXIDE_SETTINGS_SECTIONS, DEFAULT_OXIDE_SETTINGS_SECTIONS, OXIDE_SETTINGS_FORMAT,
     OXIDE_SETTINGS_VERSION, export_oxide_settings_snapshot_json, merge_oxide_settings_snapshot,
+    migrate_legacy_theme_selection,
 };
 pub use oxideterm_portable_runtime as portable_runtime;
 pub use session_log_template::*;

@@ -13,6 +13,12 @@ function bugIssue({
   extra = '',
   labels = ['bug'],
   state = 'open',
+  checklist = `- [x] I tested with the latest release, can still reproduce the issue, and searched existing issues / 我已使用最新正式版测试，问题仍然存在，并已搜索过已有 Issue
+- [x] This is one reproducible bug, not a usage question or feature request / 这是一个可复现的 bug，而不是使用问题或功能建议
+- [x] I provided the OxideTerm version, platform, and steps to reproduce; I understand vague, incomplete, or inactive issues may be closed.
+我已提供 OxideTerm 版本、平台及复现步骤；我理解描述模糊、信息不足或长期无回复的 Issue 可能会被关闭。
+- [x] I removed passwords, private keys, and other secrets from this report.
+我已从本报告中删除密码、私钥及其他敏感信息。`,
 } = {}) {
   return {
     number,
@@ -44,49 +50,37 @@ ${extra}
 
 ### Checklist
 
-- [x] I tested with the latest release and searched existing issues.
+${checklist}
 `,
   };
 }
 
-test('routes a bounded non-sensitive bug to the future agent candidate queue', () => {
-  const report = policy.analyzeIssue(bugIssue());
-
-  assert.equal(report.route, 'candidate_for_agent');
-  assert.equal(report.reasons.includes('release_or_update_boundary'), false);
-  assert.equal(report.confidence, 'high');
-  assert.deepEqual(report.recommendedLabels, ['automation:candidate']);
-  assert.equal(report.mutationAllowed, false);
-  assert.equal(report.writesPerformed, false);
-});
-
-test('accepts GraphQL uppercase issue states during offline audits', () => {
-  const report = policy.analyzeIssue(bugIssue({ state: 'OPEN' }));
-
-  assert.equal(report.route, 'candidate_for_agent');
-});
-
-test('keeps Windows-only reports behind platform validation', () => {
-  const report = policy.analyzeIssue(bugIssue({ platform: 'Windows 11' }));
-
-  assert.equal(report.route, 'needs_human');
-  assert.deepEqual(report.platforms, ['windows']);
-  assert.deepEqual(report.recommendedLabels, [
-    'automation:needs-human',
-    'automation:windows-validation',
-  ]);
-  assert.equal(report.reasons.includes('windows_only_validation'), true);
-});
-
-test('keeps credential and authentication work out of automatic implementation', () => {
-  const report = policy.analyzeIssue(bugIssue({
-    title: '私钥认证失败',
-    extra: '使用 private key 登录时 authentication failed。',
-  }));
-
-  assert.equal(report.route, 'needs_human');
-  assert.equal(report.reasons.includes('credential_or_secret_boundary'), true);
-  assert.equal(report.reasons.includes('authentication_boundary'), true);
+test('routes bug reports by state, platform, credentials and quality without authorizing writes', () => {
+  for (const [name, input, route, reasons, recommendedLabels, platforms, confidence] of [
+    ...['open', 'OPEN'].map((state) => [
+      state, { state }, 'candidate_for_agent', ['bounded_bug_with_reproduction'],
+      ['automation:candidate'], ['macos'], 'high',
+    ]),
+    ['Windows', { platform: 'Windows 11' }, 'needs_human', ['windows_only_validation'],
+      ['automation:needs-human', 'automation:windows-validation'], ['windows'], 'medium'],
+    ['credentials', { title: '私钥认证失败', extra: '使用 private key 登录时 authentication failed。' },
+      'needs_human', ['credential_or_secret_boundary', 'authentication_boundary'],
+      ['automation:needs-human'], ['macos'], 'medium'],
+    ['quality gate', { labels: ['bug', 'incomplete'] }, 'blocked_by_quality_gate',
+      ['quality_gate_blocking'], [], ['macos'], 'medium'],
+    ['missing confirmations', { checklist: '' }, 'blocked_by_quality_gate',
+      ['quality_gate_blocking'], [], ['macos'], 'medium'],
+    ['closed', { state: 'closed' }, 'observe_only', ['issue_not_open'], [], ['macos'], 'medium'],
+  ]) {
+    const report = policy.analyzeIssue(bugIssue(input));
+    assert.equal(report.route, route, name);
+    assert.deepEqual(report.reasons, reasons, name);
+    assert.deepEqual(report.recommendedLabels, recommendedLabels, name);
+    assert.deepEqual(report.platforms, platforms, name);
+    assert.equal(report.confidence, confidence, name);
+    assert.equal(report.mutationAllowed, false, name);
+    assert.equal(report.writesPerformed, false, name);
+  }
 });
 
 test('keeps feature decisions with the maintainer', () => {
@@ -108,21 +102,19 @@ VNC 无法满足虚拟机控制场景中的低延迟和设备共享需求。
 ### Why is this important? / 为什么这个功能对你重要？
 
 虚拟机维护需要低延迟画面和设备共享能力。
+
+### Checklist
+
+- [x] I am using the latest release, confirmed this feature does not already exist, and searched existing issues / 我正在使用最新正式版，已确认该功能尚不存在，并已搜索过已有 Issue
+- [x] This is one focused request within OxideTerm's scope / 这是一个聚焦且属于 OxideTerm 范围内的请求
+- [x] I have described a concrete problem/use case and proposed solution; I understand feature requests are handled best-effort, and vague or inactive issues may be closed.
+我已描述具体问题/使用场景和期望方案；我理解功能请求会尽力处理，描述模糊或长期无回复的 Issue 可能会被关闭。
 `,
   };
   const report = policy.analyzeIssue(issue);
 
   assert.equal(report.route, 'needs_human');
   assert.equal(report.reasons.includes('product_decision_required'), true);
-});
-
-test('respects the existing quality gate without taking closure ownership', () => {
-  const report = policy.analyzeIssue(bugIssue({
-    labels: ['bug', 'incomplete'],
-  }));
-
-  assert.equal(report.route, 'blocked_by_quality_gate');
-  assert.equal(report.mutationAllowed, false);
 });
 
 test('never copies raw issue content into the shadow report', () => {
@@ -132,7 +124,7 @@ test('never copies raw issue content into the shadow report', () => {
   assert.equal(JSON.stringify(report).includes(sentinel), false);
 });
 
-test('managed comments are idempotent and never claim a fix or release', () => {
+test('managed comments are created once and updated in place when routing changes', () => {
   const report = policy.analyzeIssue(bugIssue());
   const body = policy.buildManagedComment(report);
   const existing = {
@@ -153,22 +145,12 @@ test('managed comments are idempotent and never claim a fix or release', () => {
     policy.findManagedComment([existing], 'oxideterm-maintainer[bot]'),
     existing
   );
-});
-
-test('updates one existing managed comment when routing changes', () => {
-  const candidate = policy.buildManagedComment(policy.analyzeIssue(bugIssue()));
   const needsHuman = policy.buildManagedComment(policy.analyzeIssue(
     bugIssue({ platform: 'Windows 11' })
   ));
-  const existing = {
-    id: 43,
-    body: candidate,
-    user: { login: 'oxideterm-maintainer[bot]', type: 'Bot' },
-  };
-
   assert.deepEqual(policy.decideCommentMutation(existing, needsHuman), {
     action: 'update',
-    commentId: 43,
+    commentId: 42,
     body: needsHuman,
   });
 });

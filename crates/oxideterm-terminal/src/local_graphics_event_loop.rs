@@ -833,7 +833,9 @@ where
                     {
                         state.parser.stop_sync(&mut *self.terminal.lock());
                         self.event_proxy.send_event(Event::Wakeup);
-                        continue;
+                        // Recording capacity can return through a poll notification
+                        // without any fd events. Still refresh PTY interest below;
+                        // otherwise Linux leaves reads disabled after backpressure.
                     }
 
                     if !self.drain_recv_channel(&mut state) {
@@ -1011,7 +1013,7 @@ impl OnResize for LocalGraphicsNotifier {
 #[derive(Debug)]
 pub(crate) enum EventLoopSendError {
     Io(io::Error),
-    Send(mpsc::SendError<LocalGraphicsMsg>),
+    Send(Box<mpsc::SendError<LocalGraphicsMsg>>),
 }
 
 impl Display for EventLoopSendError {
@@ -1040,7 +1042,9 @@ pub(crate) struct LocalGraphicsEventLoopSender {
 
 impl LocalGraphicsEventLoopSender {
     pub(crate) fn send(&self, msg: LocalGraphicsMsg) -> Result<(), EventLoopSendError> {
-        self.sender.send(msg).map_err(EventLoopSendError::Send)?;
+        self.sender
+            .send(msg)
+            .map_err(|error| EventLoopSendError::Send(Box::new(error)))?;
         self.poller.notify().map_err(EventLoopSendError::Io)
     }
 }

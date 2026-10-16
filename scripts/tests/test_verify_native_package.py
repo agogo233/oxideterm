@@ -2,6 +2,7 @@
 """Tests for native package verification helpers."""
 
 from pathlib import Path
+import hashlib
 import sys
 import tarfile
 import tempfile
@@ -13,6 +14,7 @@ import zipfile
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "release"))
 
 import verify_native_package
+import conpty_runtime
 
 
 class ArtifactNameTests(unittest.TestCase):
@@ -24,43 +26,100 @@ class ArtifactNameTests(unittest.TestCase):
             "2.0.0-gpui-preview.15",
         )
 
-    def test_windows_artifacts_include_installer_and_portable(self) -> None:
-        self.assertEqual(
-            verify_native_package.expected_artifact_names(
-                "x86_64-pc-windows-msvc", "2.0.0"
-            ),
-            {
+    def test_artifact_names_cover_platforms_and_stable_update_compatibility(self) -> None:
+        for target, version, expected in [
+            ("x86_64-pc-windows-msvc", "2.0.0", {
                 "OxideTerm_2.0.0_windows_x64-setup.exe",
                 "OxideTerm_2.0.0_windows_x64_portable.zip",
-            },
-        )
+            }),
+            ("aarch64-unknown-linux-gnu", "2.0.0", {
+                "OxideTerm_2.0.0_linux_arm64.AppImage",
+                "OxideTerm_2.0.0_linux_arm64.deb",
+                "OxideTerm_2.0.0_linux_arm64.rpm",
+                "OxideTerm_2.0.0_linux_arm64_portable.tar.gz",
+            }),
+            ("aarch64-apple-darwin", "2.0.0", {
+                "OxideTerm_2.0.0_macos_arm64.app.zip",
+                "OxideTerm_2.0.0_macos_arm64.app.tar.gz",
+                "OxideTerm_2.0.0_macos_arm64.dmg",
+                "OxideTerm_2.0.0_macos_arm64_portable.tar.gz",
+            }),
+            ("aarch64-apple-darwin", "2.0.0-gpui-preview.15", {
+                "OxideTerm_2.0.0-gpui-preview.15_macos_arm64.app.zip",
+                "OxideTerm_2.0.0-gpui-preview.15_macos_arm64.dmg",
+                "OxideTerm_2.0.0-gpui-preview.15_macos_arm64_portable.tar.gz",
+            }),
+        ]:
+            with self.subTest(target=target, version=version):
+                self.assertEqual(
+                    verify_native_package.expected_artifact_names(target, version), expected
+                )
 
-    def test_linux_artifacts_include_all_distribution_shapes(self) -> None:
-        names = verify_native_package.expected_artifact_names(
-            "aarch64-unknown-linux-gnu", "2.0.0"
-        )
-        self.assertEqual(len(names), 4)
-        self.assertTrue(any(name.endswith(".AppImage") for name in names))
-        self.assertTrue(any(name.endswith(".deb") for name in names))
-        self.assertTrue(any(name.endswith(".rpm") for name in names))
-        self.assertTrue(any(name.endswith(".tar.gz") for name in names))
 
-    def test_stable_macos_requires_tauri_bridge_archive(self) -> None:
-        stable = verify_native_package.expected_artifact_names(
-            "aarch64-apple-darwin", "2.0.0"
-        )
-        preview = verify_native_package.expected_artifact_names(
-            "aarch64-apple-darwin", "2.0.0-gpui-preview.15"
-        )
+class WindowsInstallerTests(unittest.TestCase):
+    def test_installer_checks_runtime_in_normal_and_update_payloads(self) -> None:
+        digest = hashlib.sha256(b"runtime fixture").hexdigest()
+        files = ("conpty.dll", "arm64/OpenConsole.exe")
+        cases = [("valid", None, None)]
+        for root in ("", "install"):
+            for name in files:
+                relative = str(Path(root) / "resources/conpty" / name)
+                cases.extend([
+                    (f"missing {relative}", relative, None),
+                    (f"corrupt {relative}", None, relative),
+                ])
+        for label, missing, corrupt in cases:
+            with self.subTest(case=label):
+                def extract(args):
+                    if args[1] == "l":
+                        return "\n".join(verify_native_package.REQUIRED_DOCUMENTS | {
+                            "VERSION", "oxideterm-native.exe", "oxideterm-update-helper.exe",
+                        })
+                    directory = Path(next(arg[2:] for arg in args if arg.startswith("-o")))
+                    # 7-Zip exposes both NSIS File /r destinations, not just the install branch.
+                    for root in ("", "install"):
+                        (directory / root).mkdir(parents=True, exist_ok=True)
+                        (directory / root / "VERSION").write_text("2.2.1\n")
+                        for name in files:
+                            relative = str(Path(root) / "resources/conpty" / name)
+                            if relative == missing:
+                                continue
+                            file = directory / relative
+                            file.parent.mkdir(parents=True, exist_ok=True)
+                            file.write_bytes(b"corrupt" if relative == corrupt else b"runtime fixture")
+                    return ""
 
-        self.assertIn("OxideTerm_2.0.0_macos_arm64.app.tar.gz", stable)
-        self.assertNotIn(
-            "OxideTerm_2.0.0-gpui-preview.15_macos_arm64.app.tar.gz",
-            preview,
-        )
+                with (
+                    patch.object(verify_native_package.shutil, "which", return_value="7z"),
+                    patch.object(verify_native_package, "run_checked", side_effect=extract),
+                    patch.object(conpty_runtime, "RUNTIMES", {
+                        "aarch64-pc-windows-msvc": ("arm64", digest, digest),
+                    }),
+                ):
+                    if missing or corrupt:
+                        with self.assertRaisesRegex(
+                            RuntimeError, "must contain" if missing else "SHA-256 mismatch",
+                        ) as error:
+                            verify_native_package.verify_windows_installer(
+                                Path("setup.exe"), "2.2.1", "aarch64-pc-windows-msvc",
+                            )
+                        self.assertIn(Path(missing or corrupt).as_posix(), str(error.exception))
+                    else:
+                        verify_native_package.verify_windows_installer(
+                            Path("setup.exe"), "2.2.1", "aarch64-pc-windows-msvc",
+                        )
 
 
 class PortableArchiveTests(unittest.TestCase):
+    def setUp(self) -> None:
+        digest = hashlib.sha256(b"data").hexdigest()
+        runtime = patch.object(conpty_runtime, "RUNTIMES", {
+            "x86_64-pc-windows-msvc": ("x64", digest, digest),
+            "aarch64-pc-windows-msvc": ("arm64", digest, digest),
+        })
+        runtime.start()
+        self.addCleanup(runtime.stop)
+
     def required_entries(self, root: str, executable: str) -> list[str]:
         return [
             f"{root}/{executable}",
@@ -68,6 +127,10 @@ class PortableArchiveTests(unittest.TestCase):
             f"{root}/VERSION",
             f"{root}/data/plugins/",
             *(f"{root}/{name}" for name in verify_native_package.REQUIRED_DOCUMENTS),
+            *([
+                f"{root}/resources/conpty/conpty.dll",
+                f"{root}/resources/conpty/x64/OpenConsole.exe",
+            ] if executable.endswith(".exe") else []),
         ]
 
     def entry_bytes(self, name: str, executable: str) -> bytes:
@@ -75,17 +138,47 @@ class PortableArchiveTests(unittest.TestCase):
             return b"2.0.0\n"
         return b"data"
 
-    def test_windows_portable_archive_has_required_entries(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "portable.zip"
-            with zipfile.ZipFile(path, "w") as archive:
-                for name in self.required_entries("OxideTerm", "oxideterm-native.exe"):
-                    archive.writestr(
-                        name, self.entry_bytes(name, "oxideterm-native.exe")
-                    )
-            verify_native_package.verify_portable_archive(
-                path, "x86_64-pc-windows-msvc", "2.0.0"
-            )
+    def test_portable_archive_validates_contents_version_runtime_and_update_ownership(self) -> None:
+        cases = [
+            ("valid", None, None, None),
+            ("version", None, "VERSION", "contains version"),
+            ("plugins", "/data/plugins/", None, "data/plugins"),
+            ("manifest", None, "portable-update.json", "includes user data"),
+            ("wrong architecture", None, None, "conpty"),
+        ]
+        for entry in ("conpty.dll", "OpenConsole.exe"):
+            cases.extend([
+                (f"missing {entry}", entry, None, "conpty"),
+                (f"corrupt {entry}", None, entry, "conpty"),
+            ])
+        for name, omitted, replaced, expected_error in cases:
+            with self.subTest(case=name), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "portable.zip"
+                with zipfile.ZipFile(path, "w") as archive:
+                    for entry in self.required_entries("OxideTerm", "oxideterm-native.exe"):
+                        if omitted and entry.endswith(omitted):
+                            continue
+                        content = self.entry_bytes(entry, "oxideterm-native.exe")
+                        if replaced and entry.endswith(replaced):
+                            if replaced == "VERSION":
+                                content = b"1.9.0\n"
+                            elif replaced == "portable-update.json":
+                                content = content.replace(
+                                    b'"portable-update.json"]',
+                                    b'"portable-update.json","data"]',
+                                )
+                            else:
+                                content = b"corrupt runtime"
+                        archive.writestr(entry, content)
+                target = (
+                    "aarch64-pc-windows-msvc" if name == "wrong architecture"
+                    else "x86_64-pc-windows-msvc"
+                )
+                if expected_error:
+                    with self.assertRaisesRegex(RuntimeError, expected_error):
+                        verify_native_package.verify_portable_archive(path, target, "2.0.0")
+                else:
+                    verify_native_package.verify_portable_archive(path, target, "2.0.0")
 
     def test_linux_portable_archive_rejects_missing_agent_notice(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

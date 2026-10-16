@@ -3,6 +3,598 @@
 Stable releases are listed newest first. The release workflow uses each versioned
 section as the detailed changelog attached to the corresponding GitHub Release.
 
+## 2.2.3
+
+### 中文
+
+OxideTerm 2.2.3 新增动态背景、可叠加的视觉效果和按需安装的背景素材包，允许为系统浅色与深色模式分别配置完整外观，并重新整理首次使用引导。同时明确云同步的下载、合并与上传方向，修复 SSH 会话重连、Linux 粘贴编辑、macOS 远程桌面文件剪贴板，以及更新与便携版数据保留问题。
+
+#### 🎨 完整亮暗外观与背景编辑
+
+- “跟随系统外观”支持分别配置浅色和深色两套外观，每套包含应用主题、终端主题与背景。切换系统亮暗模式时，界面、现有终端和背景一起更新，无须重新连接会话。
+- 背景设置将图片或视频素材、叠加特效和背景交互分区展示；可以单独使用程序生成的效果，也可以把效果叠加在图片、动图或视频上。
+- 新增九点对齐，结合现有适配方式决定裁切后保留的位置；素材不透明度、模糊、阅读遮罩、作用范围和启用页面可分别调整。
+- 主题预览与编辑预览同时呈现背景、透明度和裁切效果。主题编辑使用独立草稿，取消后恢复原来的外观。
+- 素材卡片左上角显示文件格式，右上角保留删除按钮，并标明当前使用的素材。修复部分视频和导入图片无法显示缩略图的问题。
+- 按素材和效果的实际能力显示参数，静态内容不再出现无效的播放速度等控制。修复新增滑杆点击、拖动时偏离鼠标的位置，以及切换选项后设置页滚动位置跳动的问题。
+
+#### ✨ 程序生成效果与背景交互
+
+- 新增轻纹理、雾光、光潮、光潮与粒子组合、流星、景深粒子和水面折光；各效果提供适用的强度、颜色、大小、速度、方向、粗糙度、光泽或密度控制，默认颜色可取自当前主题。
+- 特效强度与素材不透明度分别控制，统一有无素材时的强度表现，改善特效叠加在图片、视频和动图上过淡的问题。
+- 新增“输入时暂停动效”，连续输入时暂停动态素材和效果，停止输入约一秒后恢复。此选项由用户开启。
+- 新增背景视差，静态图片和效果层可随鼠标轻微移动；景深粒子的不同层使用不同位移幅度，终端文字保持固定。
+- 新增静态图片的缓慢运镜，支持平移、推近和拉远，可调整幅度与速度，并在往返运动时保留画面边缘覆盖。
+- 新增全天候光照，按本地时间渐变背景光线与色彩，并可预览清晨、午后、傍晚和夜间。应用与终端主题仍按各自的亮暗配置切换。
+- 背景切换增加平滑过渡；窗口不活跃、不可见或最小化时暂停播放，并遵循现有减少动态效果设置。
+
+#### 🎬 原生视频播放与按需素材包
+
+- 视频背景接入 macOS 系统媒体解码、Windows Media Foundation 和 Linux GStreamer；支持原生视频缓冲或纹理进入对应图形后端，在能力允许时减少 CPU 拷贝与重复上传。
+- 保留软件解码和像素上传路径；自动模式按持续处理负载调整播放尺寸与帧率，用户手动设置的上限保持不变。硬件加速是否可用取决于设备、驱动和视频格式。
+- 背景与预览复用同一媒体处理结果，按视频时间调度显示，限制提前解码和缓冲占用；将支持路径上的缩放、裁切与模糊交给图形后端处理。
+- 修复 Windows 视频缓冲未提供行跨度时导致缩略图和背景不显示的问题；修复 4K 软件缩放后不透明视频的颜色与透明度处理。
+- Linux 发行包补齐媒体解码组件及插件扫描器定位，使打包后的程序能够发现自带的解码支持。
+- 新增插件市场“背景素材”分类与素材库“获取更多背景”入口。视频素材独立于主程序分发，可按需安装，主程序保留现有静态背景。
+- 背景包安装后将声明的素材导入当前配置的素材库；便携版使用自己的数据目录。安装不改变当前主题和背景，卸载包后已导入素材继续保留，可在素材库单独删除。
+- 已发布的 OxideTerm Backgrounds 1.0.0 提供“晨雾”和“夜流”两段原创 3840 × 2160、24 帧/秒、16 秒循环视频，适用于浅色和深色外观；需使用本次或更高的主程序版本安装。
+
+#### 🧭 首次使用引导与界面体验
+
+- 首次使用引导整理为五页：欢迎与须知、外观、连接与操作、AI 与命令行、开始使用。宽窗口采用分栏，窄窗口自动调整布局，内容区随窗口尺寸变化。
+- 首页使用独立应用标记与标题，保留语言选择和必要说明；主题预览集中在外观页，最后一页聚焦打开终端、新建连接和导入连接。
+- 步骤导航和页数居中，复用现有切换与入场动画；按钮颜色跟随当前主题，提示与说明重新整理为更直接的引导文案。
+- 新用户只显示欢迎引导，不再同时显示旧版迁移介绍；完成引导前先保存状态，避免重新启动后重复出现。保存失败时保留引导并给出提示。（Issue [#666](https://github.com/AnalyseDeCircuit/oxideterm/issues/666)）
+- 半透明面板与侧边区域新增随主题和透明度调整的柔和边缘层次，改善背景下分割线突兀的问题；背景和媒体绘制保留圆角裁切。
+- 新建连接表单改用已安装插件的状态判断，避免绘制时反复探测外部程序；SSH 代理发现也减少阻塞探测，改善 Windows 打开表单和切换远程桌面页面的卡顿。
+- 调整 Windows 背景与界面绘制路径，减少重复图形工作；修复依赖真实时间的弹层关闭状态，保持界面动画时钟一致。
+
+#### ☁️ 云同步方向与首次下载
+
+- 新增只读“查看云端”入口，允许先检查云端配置，再决定是否应用。
+- 同步预览明确提供“使用云端配置”“合并本机与云端”“用本机更新云端”三种方向，并使用对应的说明和确认按钮。
+- 新设备首次发现已有云端配置时，默认预览“使用云端配置”，确认后下载应用并建立同步基线，不上传本机默认设置；首次自动同步同样需要明确确认。（Discussion [#663](https://github.com/AnalyseDeCircuit/oxideterm/discussions/663)）
+- 预览中的本机更改保留在计划内，取消不会提前推进已保存的同步基线。合并时重新读取本机当前设置，纳入预览期间发生的本机更改；各方向均保留未选同步范围，云端自身存在冲突时，下载前需完成选择。
+- 下载完成后记录正确的云端状态与下载历史，保留现有恢复机制和同步密码修改流程。
+
+#### 🔌 终端、SSH、SFTP 与远程桌面修复
+
+- SSH 远端 Shell 退出后，可通过原窗格的重连按钮或 Enter 恢复会话，保留窗格身份和滚动历史；仍在使用的 SFTP、端口转发和其他消费者继续持有共享连接。（Issue [#669](https://github.com/AnalyseDeCircuit/oxideterm/issues/669)）
+- 远程 Shell 集成失败时显示具体原因，包括 SFTP 不可用、不支持的 Shell、读写权限和安装未完成，并明确终端本身是否仍可使用，避免把可选集成问题误认为 SSH 连接失败。（Issue [#664](https://github.com/AnalyseDeCircuit/oxideterm/issues/664)）
+- 修复 Linux 多行粘贴编辑窗口只能退格、删除却无法输入字符的问题；文字输入进入现有编辑器，编辑期间不会被转发给后台终端，确认粘贴后才发送。（Issue [#677](https://github.com/AnalyseDeCircuit/oxideterm/issues/677)）
+- 修复 SFTP 文件拖放释放鼠标时先清理拖动状态的问题，使跨窗格拖放正确进入上传、下载或冲突处理流程。
+- 修复 macOS RDP 文件剪贴板同步，连接建立或切回窗口时同步本地复制的文件，使远端菜单能直接识别可粘贴文件，并避免把远端文件重复回传。（Issue [#670](https://github.com/AnalyseDeCircuit/oxideterm/issues/670)）
+- 修复 Linux 客户端标题栏关闭窗口时的工作区重入问题。
+
+#### 📦 更新与便携版
+
+- 更新完成后先释放当前工作区更新，再执行保存历史和退出流程，修复 macOS 旧进程在更新退出时出现崩溃提示的问题。
+- Windows 应用内更新统一由主程序启动更新辅助程序，等待旧进程结束后替换并启动新版，避免安装器重复启动辅助程序影响自动重启。
+- 启用便携存储时，更新包仍匹配当前运行形式：macOS 应用包、Linux AppImage 和解压式便携版分别使用对应安装包。
+- macOS 替换应用包时保留包内的便携标记、配置和数据目录；替换或数据恢复失败时回滚，避免更新后丢失便携数据。
+
+#### 📌 升级说明
+
+- 背景动效、输入时暂停、视差、运镜和全天候光照均可自行选择；需要保持静态外观时可关闭这些选项。播放性能和可用加速路径随硬件、驱动及媒体格式变化，可在自动模式之外手动设置分辨率和帧率。
+- 视频素材包从插件市场按需安装，不随主程序携带。背景包导入的视频会占用当前配置的数据目录空间；卸载插件不会自动删除这些已导入的素材。
+- 更新退出、安装和重启修复由新版客户端执行，从旧版首次升级时，旧客户端仍使用原有更新逻辑。
+- 本版更新日志范围：[v2.2.2…v2.2.3](https://github.com/AnalyseDeCircuit/oxideterm/compare/v2.2.2...v2.2.3)。
+
+### English
+
+OxideTerm 2.2.3 adds animated backgrounds, composable visual effects, and on-demand background packs, with complete appearance profiles for the system's light and dark modes and a redesigned first-run guide. It also makes cloud download, merge, and upload directions explicit and fixes SSH session reconnection, Linux paste editing, macOS remote desktop file clipboard synchronization, and update handling for installed and portable builds.
+
+#### 🎨 Complete light and dark appearances and background editing
+
+- Follow System Appearance now supports separate light and dark profiles, each containing an application theme, terminal theme, and background. System appearance changes update the interface, existing terminals, and background together without reconnecting sessions.
+- Background settings separate image or video media, overlay effects, and interactions. Generated effects can stand alone or be layered over images, animations, and videos.
+- Added nine-point alignment to control which part of a background remains visible after cropping. Media opacity, blur, a readability overlay, background scope, and enabled pages can be configured separately.
+- Theme and editor previews show the background, transparency, and crop together. Theme editing uses a separate draft; cancellation restores the previous appearance.
+- Media cards show their file format at the top left, retain deletion at the top right, and identify the active item. Fixed missing thumbnails for some videos and imported images.
+- Controls now reflect the selected media and effect, hiding irrelevant playback-speed controls for static content. Fixed pointer offsets in new sliders and settings scroll jumps after changing options.
+
+#### ✨ Generated effects and background interactions
+
+- Added subtle texture, fog glow, light tides, combined tides and particles, meteors, depth particles, and water caustics. Effects expose applicable strength, color, size, speed, direction, roughness, sheen, or density controls, with default colors derived from the current theme.
+- Effect strength and media opacity are independent. Strength behaves consistently with or without media, improving overlays that were too faint on images, videos, and animations.
+- Added an optional Pause Effects While Typing setting. Animated media and effects pause during continuous input and resume approximately one second after typing stops.
+- Added background parallax for static images and effect layers. Depth-particle layers move by different amounts while terminal text stays fixed.
+- Added slow camera motion for static images, with pan, zoom-in, and zoom-out options, adjustable amount and speed, and edge coverage throughout the repeating motion.
+- Added all-day lighting that gradually changes background light and color with local time, with morning, afternoon, evening, and night previews. Application and terminal themes continue to follow their configured light and dark profiles.
+- Background changes now transition smoothly. Playback pauses when the window is inactive, hidden, or minimized and follows the existing reduced-motion settings.
+
+#### 🎬 Native video playback and on-demand background packs
+
+- Video backgrounds use macOS system media decoding, Windows Media Foundation, and Linux GStreamer. Native video buffers or textures can enter the corresponding graphics backend to reduce CPU copies and repeated uploads where supported.
+- Software decoding and pixel-upload paths remain available. Automatic mode adjusts playback dimensions and frame rate under sustained processing load while preserving manually configured limits. Hardware acceleration depends on the device, driver, and video format.
+- Backgrounds and previews share media processing results, schedule presentation by video time, and bound decode-ahead work and buffering. Supported paths perform scaling, cropping, and blur in the graphics backend.
+- Fixed missing Windows video thumbnails and backgrounds when decoded buffers omit their row stride. Fixed color and opacity handling for opaque videos resized at 4K through the software path.
+- Linux packages now include media decoding components and locate the bundled plugin scanner so packaged applications can discover their decoder support.
+- Added a Background Media marketplace category and a Get More Backgrounds entry in the media library. Videos are distributed independently as optional packs; the application retains its existing static backgrounds.
+- Installing a pack imports its declared media into the current configuration's library, including the portable data directory. Installation leaves the current theme and background unchanged. Imported media remains after uninstalling the pack and can be deleted separately from the library.
+- The published OxideTerm Backgrounds 1.0.0 pack provides two original 3840 × 2160, 24 fps, 16-second loops, Dawn Mist and Night Flow, for light and dark appearances. Installation requires this host release or a later version.
+
+#### 🧭 First-run guide and interface experience
+
+- Reorganized onboarding into five pages: Welcome and Notices, Appearance, Connections and Operations, AI and Command Line, and Getting Started. Wide windows use columns; narrow windows adapt the layout, and the content area follows the window size.
+- The first page uses a separate application mark and title, retaining language selection and essential information. Theme preview is concentrated on Appearance, and the final page focuses on opening a terminal, creating a connection, and importing connections.
+- Centered step navigation and page numbering, reused existing entry and switching animations, made button colors follow the theme, and rewrote guidance more directly.
+- New users see onboarding without the old-version migration introduction. Completion is saved before closing to avoid showing the guide again after restart; a failed save keeps the guide open with a message. (Issue [#666](https://github.com/AnalyseDeCircuit/oxideterm/issues/666))
+- Translucent panels and sidebar regions now have softer edge definition that follows the theme and opacity, improving abrupt separators over backgrounds. Background and media rendering retain rounded clipping.
+- Connection forms use installed-plugin state instead of repeatedly probing external programs during rendering. SSH agent discovery also avoids blocking probes, improving responsiveness when opening forms and switching remote desktop pages on Windows.
+- Updated Windows background and interface rendering to reduce repeated graphics work. Fixed overlay dismissal states that depended on wall-clock time so they use the interface animation clock consistently.
+
+#### ☁️ Cloud sync direction and first-device downloads
+
+- Added a read-only View Cloud Configuration entry to inspect remote configuration before applying it.
+- Sync previews explicitly offer Use Cloud Configuration, Merge Local and Cloud, and Update Cloud from This Device, with matching explanations and confirmation buttons.
+- A new device discovering existing cloud configuration defaults to previewing Use Cloud Configuration. Confirmation downloads and applies it, establishes a sync baseline, and does not upload local defaults. Initial automatic sync also requires explicit confirmation. (Discussion [#663](https://github.com/AnalyseDeCircuit/oxideterm/discussions/663))
+- Local preview edits remain in the plan; cancellation does not advance the saved sync baseline. Merging re-reads current local configuration to include edits made during the preview. All directions preserve excluded scope, and downloads require choices for conflicts already present in the cloud.
+- Download completion records the correct cloud state and download history, retaining existing recovery and sync-password-change flows.
+
+#### 🔌 Terminal, SSH, SFTP, and remote desktop fixes
+
+- After a remote SSH shell exits, its reconnect button or Enter restores the session in the original pane, preserving pane identity and scrollback. SFTP, forwarding, and other consumers retain their ownership of the shared connection. (Issue [#669](https://github.com/AnalyseDeCircuit/oxideterm/issues/669))
+- Remote shell integration failures now explain the cause, including unavailable SFTP, unsupported shells, read/write permissions, and incomplete installation, and clarify whether the SSH terminal remains usable. (Issue [#664](https://github.com/AnalyseDeCircuit/oxideterm/issues/664))
+- Fixed the Linux multiline paste editor accepting Backspace and Delete but not typed characters. Text reaches the existing editor, editing keys are not forwarded to the background terminal, and content is sent only after confirming the paste. (Issue [#677](https://github.com/AnalyseDeCircuit/oxideterm/issues/677))
+- Fixed SFTP mouse release clearing drag state before completing a drop, restoring upload, download, and conflict handling across panes.
+- Fixed macOS RDP file clipboard synchronization. Connecting or returning to the window advertises locally copied files so the remote menu can recognize available files without a preceding paste shortcut, while avoiding echoing remote-origin files. (Issue [#670](https://github.com/AnalyseDeCircuit/oxideterm/issues/670))
+- Fixed workspace reentry when closing a Linux window through its client-side titlebar.
+
+#### 📦 Updates and portable builds
+
+- Update completion releases the current workspace update before saving history and quitting, fixing the macOS old process reporting a crash during update shutdown.
+- Windows in-app updates now launch the helper from the application, wait for the old process to exit, replace files, and start the new version, avoiding duplicate helper launches from the installer that interfered with automatic restart.
+- Portable storage preserves the running package's update format: macOS application bundles, Linux AppImages, and extracted portable builds each select their corresponding package.
+- macOS application replacement preserves bundle-local portable markers, configuration, and data directories, with rollback if replacement or data restoration fails.
+
+#### 📌 Upgrade notes
+
+- Background effects, typing pauses, parallax, camera motion, and all-day lighting are optional. Disable them for a static appearance. Playback performance and acceleration depend on hardware, drivers, and media formats; resolution and frame rate can be set manually instead of using automatic mode.
+- Video packs are installed on demand from the marketplace and are not bundled with the application. Imported videos occupy space in the current configuration's data directory; uninstalling a plugin does not automatically delete imported media.
+- Update shutdown, installation, and restart fixes are performed by the new client. The first upgrade from an older version still uses that older client's update logic.
+- Full release range: [v2.2.2…v2.2.3](https://github.com/AnalyseDeCircuit/oxideterm/compare/v2.2.2...v2.2.3).
+
+## 2.2.2
+
+### 中文
+
+OxideTerm 2.2.2 将 ACP 代理适配器、RDP/VNC 引擎和 Mosh 传输移入独立插件，新增 FIDO 安全密钥认证，并启用可持续扩展的 v2 插件市场。语言识别和嵌入语法由插件动态声明，同时完善插件安装、AI 对话、文件预览和连接交互。
+
+#### 🧩 插件市场与独立更新
+
+- 插件市场切换到 v2：先加载插件摘要，再按需获取各插件的版本历史并校验内容；继续按应用版本和平台选择最高兼容版本。
+- 新增按名称、最近更新、最近上架排序，记住用户选择。排序作用于完整筛选结果，再进行分页；切换排序时回到第一页，保留搜索和分类条件。
+- 安装采用队列和单插件状态，分别显示安装中、排队、失败重试和取消排队入口；安装期间仍可搜索、筛选、翻页和添加其他安装任务。
+- 市场与已安装插件的展开详情显示许可证；插件提供相应地址时，可查看许可证和第三方许可说明。
+- 缺少、禁用或不兼容的 ACP、RDP、VNC、Mosh 插件会提供明确说明和插件管理入口，避免旧连接升级后只显示“提供器不可用”。
+
+#### 🔌 ACP 与远程连接插件
+
+- Codex、Claude Code 的 ACP 适配器，以及 RDP、VNC 和 Mosh 的运行程序改为从市场插件加载，独立于主程序更新。原生聊天、远程桌面、终端、连接配置和认证流程继续由应用提供。
+- ACP 代理通过标准 ACP 直接与主程序通信；RDP/VNC 和 Mosh 也使用各自的专用通信协议。停用、更新或卸载插件时会停止其相关进程和会话。
+- 删除设置中的 ACP 页面。安装并启用 ACP 插件后自动创建代理配置，无须填写启动命令；工作目录、额外参数和环境变量仍可按需设置。
+- 支持复用本机已安装的 OpenCode、Antigravity、Cursor、Grok Build、GitHub Copilot CLI、Qwen Code 和 Kimi CLI。此类插件负责发现和启动程序，用户需要先安装对应官方命令行程序并完成登录。
+- 接入 Cursor 的提问选择和计划确认，支持单选、多选、批准、拒绝及取消，避免代理等待这些交互时停滞。
+- RDP/VNC 连接底栏与工作区状态栏对齐；SSH 活动会话的展开箭头与其他连接类型统一。Nix 打包同步移除已外置的远程桌面程序。
+
+#### 🔐 FIDO 安全密钥认证
+
+- 新增 FIDO Security Key 插件入口，支持使用现有 `ed25519-sk`、`ecdsa-sk` 私钥文件进行 SSH 认证；应用提供原生 PIN 输入、触摸提示和取消操作。
+- 签名程序按认证请求启动，通过私有管道通信，校验协议版本和签名，并在取消、超时或插件停用后停止并回收。PIN 和凭据句柄不写入设置或日志，临时缓冲区使用后清理。
+- 插件不生成安全密钥、不导出设备私钥、不缓存 PIN；请先通过支持 FIDO 的 OpenSSH 生成密钥并将公钥配置到服务器。协议和软件签名路径已有验证，真实设备的触摸、PIN 和 SSH 登录仍需硬件实测。
+
+#### 🎨 动态语言支持
+
+- 语言插件可声明语言名称、扩展名和精确文件名；宿主动态识别并提供安装入口，后续新增语言不再需要逐个修改主程序中的语言名单。
+- 安装、启用、停用或更新语言插件后，已打开的编辑器和本地、SFTP 代码预览会刷新语言支持。
+- 支持插件携带嵌入语法，供 Vue、Svelte 等混合语言文件分别高亮脚本、样式与标记内容。
+- 市场新增 XML、DTD、INI、Kotlin、Dart、Nix、Julia、Vue、Svelte、Slint，以及 AWK、jq、Justfile、Groovy、Clojure/ClojureScript、Erlang、OCaml、OCaml Interface 和 Typst 等语言插件。Lua、TOML、YAML 继续内置。
+
+#### 💬 AI 与工作区体验
+
+- AI 工具活动改为紧凑的平面列表，聚合相关工具调用，展示状态、数量和耗时，并可展开查看具体调用与结果；减少逐项卡片占用的空间。
+- ACP 上下文用量使用代理报告的数据，不再用普通模型对话历史的估算值代替，避免过早显示接近上限的提示。
+- 动态运行观察放在固定提示前缀之后，保留最新目标、状态和时间信息，同时减少固定提示内容的变化。
+- 开始页的连接、终端、导入和管理入口统一为按钮，保留最近连接和快捷键入口。
+- 本地 PDF 预览上限放宽至 100 MiB，本地音视频直接使用原文件播放。其他本地预览仍保留原有大小限制，SFTP 预览限制不变。
+
+#### 🛠️ 连接与输入修复
+
+- 本地与 SFTP 路径栏按 Enter 默认进入输入的路径；只有方向键明确选择候选后才进入候选目录，Tab 仍可接受补全，避免候选加载快慢改变导航结果。（Issue [#659](https://github.com/AnalyseDeCircuit/oxideterm/issues/659)）
+- 终端右键菜单按实际渲染尺寸定位，在窗口边缘正确调整位置，覆盖缩放显示和插件菜单。（Issue [#658](https://github.com/AnalyseDeCircuit/oxideterm/issues/658)）
+- SSH 交互式认证弹窗使用不透明遮罩，并在等待输入期间暂停连接动画，减少光标和倒计时重绘触发的图形工作。（Issue [#612](https://github.com/AnalyseDeCircuit/oxideterm/issues/612)）
+
+#### 📌 升级说明
+
+- 从旧版升级后，请在插件市场安装并启用需要的 ACP、RDP、VNC、Mosh 插件；原连接配置继续使用。各插件的平台支持与外部程序要求以详情为准。
+- FIDO 和新增动态语言能力需要 OxideTerm 2.2.2 或更高版本；原生进程插件仍需用户确认本机代码权限。
+- 插件市场 v1 已永久冻结，原地址、索引内容和对应安装包继续保留。后续插件及版本只更新 v2，旧客户端需升级主程序才能获取新的插件和更新。
+
+### English
+
+OxideTerm 2.2.2 moves ACP adapters, RDP/VNC engines, and Mosh transport into independently updated plugins, adds FIDO security-key authentication, and introduces the extensible v2 marketplace. Plugins can now declare language associations and embedded grammars dynamically, alongside improvements to plugin installation, AI conversations, file previews, and connection interactions.
+
+#### 🧩 Marketplace and independent updates
+
+- Switched the marketplace to v2: plugin summaries load first, with individual version histories fetched and verified on demand. The client continues to select the highest release compatible with the application and platform.
+- Added sorting by name, recently updated, and newly listed, with the selection saved. Sorting applies to the complete filtered result before pagination; changing it returns to the first page while preserving search and category filters.
+- Added an installation queue with individual installing, queued, retry, and cancel-queued states. Search, filters, pagination, and additional installation requests remain available during installation.
+- Expanded marketplace and installed-plugin details display the license, with links to license text and third-party notices when provided by the plugin.
+- Missing, disabled, or incompatible ACP, RDP, VNC, and Mosh plugins now show explicit guidance and a plugin-management entry, replacing ambiguous provider-unavailable messages after upgrades.
+
+#### 🔌 ACP and remote connection plugins
+
+- Codex and Claude Code ACP adapters, plus RDP, VNC, and Mosh executables, now load from marketplace plugins and update independently. The application retains its native chat, remote desktop, terminal, connection profiles, and authentication flows.
+- ACP agents communicate directly with the application using standard ACP; RDP/VNC and Mosh use their dedicated protocols. Disabling, updating, or uninstalling a plugin stops its associated processes and sessions.
+- Removed the ACP settings page. Installing and enabling an ACP plugin automatically creates its agent configuration without a startup-command form. Working directory, additional arguments, and environment variables remain optional settings.
+- Added launchers for locally installed OpenCode, Antigravity, Cursor, Grok Build, GitHub Copilot CLI, Qwen Code, and Kimi CLI. These plugins discover and start the program; users must install and sign in to the corresponding official CLI first.
+- Integrated Cursor question selection and plan confirmation, including single choice, multiple choice, approval, rejection, and cancellation, so agents can complete these interactions.
+- Aligned the RDP/VNC footer with the workspace status bar and the SSH session expansion arrow with other connection types. Nix packaging also stops bundling the extracted remote desktop executables.
+
+#### 🔐 FIDO security-key authentication
+
+- Added integration with the FIDO Security Key plugin for SSH authentication using existing `ed25519-sk` and `ecdsa-sk` private-key files, with native PIN, touch, and cancellation prompts.
+- Starts the signing provider on demand through private pipes, verifies protocol versions and signatures, and stops and reaps it on cancellation, timeout, or plugin retirement. PINs and credential handles are excluded from settings and logs, and temporary buffers are cleared after use.
+- The plugin does not enroll keys, export device private keys, or cache PINs. Generate keys with FIDO-capable OpenSSH and configure the public key on the server first. Protocol and software-signing paths have been verified; real-device touch, PIN, and SSH login still need hardware validation.
+
+#### 🎨 Dynamic language support
+
+- Language plugins can declare language names, extensions, and exact filenames. The host discovers these associations and installation entries dynamically, allowing future languages without adding each one to a host-side list.
+- Open editors and local or SFTP code previews refresh language support when plugins are installed, enabled, disabled, or updated.
+- Plugins can include embedded grammars so mixed-language files such as Vue and Svelte highlight scripts, styles, and markup separately.
+- Added marketplace plugins for XML, DTD, INI, Kotlin, Dart, Nix, Julia, Vue, Svelte, Slint, AWK, jq, Justfile, Groovy, Clojure/ClojureScript, Erlang, OCaml, OCaml Interface, and Typst. Lua, TOML, and YAML remain built in.
+
+#### 💬 AI and workspace experience
+
+- Replaced individual AI tool cards with compact flat activity lists that group related calls, show status, count, and duration, and expand to reveal calls and results.
+- ACP context usage now uses agent-reported data instead of ordinary model-history estimates, avoiding premature context-limit warnings.
+- Placed changing runtime observations after the stable prompt prefix, retaining current targets, state, and timestamps while reducing changes to the fixed prompt.
+- Unified the start page's connection, terminal, import, and management entries as buttons, retaining recent connections and shortcut entries.
+- Raised the local PDF preview limit to 100 MiB. Local audio and video play from the original files. Other local previews retain their existing limits, and SFTP preview limits are unchanged.
+
+#### 🛠️ Connection and input fixes
+
+- Enter in local and SFTP path bars now opens the typed path by default. A completion is opened only after explicit arrow-key selection; Tab still accepts completion, so suggestion timing no longer changes navigation. (Issue [#659](https://github.com/AnalyseDeCircuit/oxideterm/issues/659))
+- Terminal context menus use their rendered size for positioning and correctly adjust at window edges, including scaled displays and plugin menus. (Issue [#658](https://github.com/AnalyseDeCircuit/oxideterm/issues/658))
+- SSH interactive-authentication dialogs now use an opaque overlay and pause connection animations while awaiting input, reducing graphical work triggered by cursor and countdown redraws. (Issue [#612](https://github.com/AnalyseDeCircuit/oxideterm/issues/612))
+
+#### 📌 Upgrade notes
+
+- After upgrading, install and enable the ACP, RDP, VNC, or Mosh plugins you need from the marketplace. Existing connection profiles remain usable; consult plugin details for platform support and external-program requirements.
+- FIDO integration and the new dynamic-language capabilities require OxideTerm 2.2.2 or later. Native process plugins still require approval to run local code.
+- Marketplace v1 is permanently frozen, with its original URL, index contents, and packages retained. Future plugins and releases are published only to v2; older clients must upgrade the application to receive them.
+
+## 2.2.1
+
+### 中文
+
+OxideTerm 2.2.1 完善了插件市场、按需语言支持和文件预览，新增供工作概览、主机来源与文本工具使用的原生插件能力。同时，本版本升级云同步合并与恢复机制，支持分别设置应用和终端主题，并修复 SFTP 文件夹上传导致连接中断、IDE 多选、终端输入和 Windows 控制台兼容问题。
+
+#### 🧩 插件市场与按需语言支持
+
+- 插件市场和已安装列表统一采用紧凑行布局，保留介绍、版本、状态与操作入口，展开详情减少重复说明和嵌套容器。分类来自市场索引，已安装插件也可以按分类筛选。
+- 两个列表均支持分页，默认每页 10 项，可自定义每页数量并直接跳转页码；每页数量设置放在列表底部。启用、禁用等结果提示使用插件名称。
+- 修复插件管理器搜索框及分页输入框获得焦点后无法输入文字的问题。
+- 刷新插件列表或启用、禁用、卸载其他插件时，保留未发生变化的运行中插件入口和界面，修复 Toolbox 等插件报“标签页未声明”的问题。
+- 插件入口集中排列在内置工具下方，以分隔线区分；修复插件侧栏面板声明底部位置却显示在上方的问题。插件标签页复用应用统一页头、原生控件和主题。
+- 将 C、C++、C#、CSS、Common Lisp、Elixir、Go、HTML、Java、JavaScript、Objective-C、Perl、PHP、R、Ruby、Rust、Scala、Swift、TypeScript、TSX、Zig 共 21 种语言的语法支持移入独立插件；另增加 Nginx、Terraform/HCL 和 Protobuf 的识别与插件入口。
+- 继续内置 Bash、Zsh、Fish、PowerShell、JSON、YAML、TOML、Markdown、Dockerfile、Make、CMake、Diff、Python、Lua、SQL 共 15 种语言。外置语言缺少插件时仍可编辑文件，并通过语言插件提示补装语法支持。
+- 市场按当前主程序和平台选择最高兼容插件版本，区分可安装更新与需要升级主程序的新版。启动时重新检查已安装插件，覆盖应用升级和降级；不兼容时保留插件文件和设置。
+
+#### 🔎 原生文件预览与插件工作区
+
+- 本地文件管理器和 SFTP 的文件预览入口支持调用已安装的 PDF、SQLite、证书和二进制检查插件，无需为每种文件打开额外工作区。
+- 本地代码预览也会显示缺少语言支持的安装入口；只读预览接入原生编辑器，并在安装语言插件后更新高亮。
+- PDF 预览支持翻页；SQLite 使用原生表格展示表和分页数据，保持只读。远程数据库存在非空 WAL、回滚日志或下载期间发生变化时会拒绝预览，避免展示不完整的数据库副本。
+- 证书预览支持浏览同一文件中的多个证书，分别展示有效期和详细字段；有效期不等同于系统信任或吊销检查。二进制检查可展示格式、架构和节区，并结合现有十六进制预览定位文件偏移。
+- 关闭预览会取消相关后台任务并释放远程临时文件，继续使用共享 SSH 连接的终端和其他消费者不受影响。进程插件沿用启用时的本机代码信任确认。
+- 为 Workspace Dashboard 提供工作区状态摘要和跳转能力，可聚合最近连接、活动标签页、录制状态、连接与插件问题，并返回对应应用页面；终端正文和诊断内容不包含在摘要中。
+- 为 Tailscale、Ansible 等主机来源插件提供原生连接表单入口：发现的主机信息交由用户检查并配置认证，再保存或连接。
+- 为 Toolbox 等文本工具提供多行输入、只读结果、复制及连续处理能力。终端右键入口在点击时捕获选区，切换标签后仍使用当时选择的内容；结果不会自动发送回终端。
+
+#### ☁️ 云同步合并与恢复
+
+- 云同步改为汇总各设备的独立加密快照，自动合并互不冲突的修改；并发冲突保留候选值，由用户明确选择。未纳入同步的资源不会因此从云端删除。
+- 新增同步应用中断后的恢复记录，协调连接、转发、设置、快捷命令、插件数据和凭据变更。上传重试复用已准备的数据，上传期间的新本地修改继续保留待同步状态。
+- 桌面、命令行和 MCP 使用同一同步流程；命令行支持预览合并结果后再应用。旧云端数据可导入新机制，原对象保留，旧版 `.oxide` 文件仍可读取。
+- 修复旧备份和旧云同步数据升级时丢失应用主题选择的问题。
+
+#### 🎨 主题与工作区
+
+- 应用界面和终端配色可以分别选择，并在设置中通过同一个工作区预览查看组合效果；透明度在接近不透明的区间提供更细调整。（PR [#650](https://github.com/AnalyseDeCircuit/oxideterm/pull/650)）
+- 终端使用当前配色响应颜色查询和明暗外观请求；SSH 主题更新通过队列发送，避免阻塞界面。（PR [#650](https://github.com/AnalyseDeCircuit/oxideterm/pull/650)）
+- 各类工作区页面均可放入分屏标签布局。IDE 文件树支持修饰键多选、连续选择和对应批量操作，底栏高度与其他工作区统一。
+- 命令面板可以找到已保存的本地终端和 WSL 配置；启动失败会在工作区显示原因，列表悬停状态也能正确刷新。（PR [#649](https://github.com/AnalyseDeCircuit/oxideterm/pull/649)）
+
+#### 🛠️ 连接、传输与终端修复
+
+- 修复 SFTP 上传文件夹时共享 SSH 传输可能被关闭、连带断开终端的问题，完善底层通道流控和断开诊断。
+- 恢复已保存连接的认证选择，并仅在认证成功后持久化用户确认的凭据，确保保存目标对应实际完成认证的连接。（PR [#647](https://github.com/AnalyseDeCircuit/oxideterm/pull/647)）
+- 修复 JumpServer 等回显验证码提示下的 TOTP 自动填写，以及便携模式从错误目录查找用户 SSH 配置的问题。
+- trzsz 和 ZMODEM 下载正确执行用户选择的覆盖行为。
+- 修复双向文本中的宽字符网格定位、输入法候选位置与预编辑颜色、触控板滚动增量，以及括号粘贴中的换行保留。（PR [#651](https://github.com/AnalyseDeCircuit/oxideterm/pull/651)）
+- Windows 随包提供固定版本的 ConPTY，修复管道就绪与空读取处理、Ctrl+J 身份以及按键释放与已发送按下事件的配对。（PR [#648](https://github.com/AnalyseDeCircuit/oxideterm/pull/648)）
+- 修复窗口宽度或时间戳栏变化时，未修改的终端行被重新标记为当前时间的问题；保留对有样式空白的实际内容变化识别。（PR [#655](https://github.com/AnalyseDeCircuit/oxideterm/pull/655)）
+- 更新原生界面依赖与相关平台适配，撤回会触发重复悬停样式断言的标签页改动。
+
+#### 👥 贡献者
+
+- @stabey：贡献应用与终端主题分离、本地和 WSL 配置查找、SSH 认证恢复，以及终端输入和 Windows 控制台修复。（PR [#647](https://github.com/AnalyseDeCircuit/oxideterm/pull/647)、PR [#648](https://github.com/AnalyseDeCircuit/oxideterm/pull/648)、PR [#649](https://github.com/AnalyseDeCircuit/oxideterm/pull/649)、PR [#650](https://github.com/AnalyseDeCircuit/oxideterm/pull/650)、PR [#651](https://github.com/AnalyseDeCircuit/oxideterm/pull/651)）
+- @m00nLi：修复终端行时间戳随网格宽度变化而错误更新的问题。（PR [#655](https://github.com/AnalyseDeCircuit/oxideterm/pull/655)）
+
+#### 📌 升级说明
+
+- 外置语言及本次新增宿主能力对应的插件需要 OxideTerm 2.2.1 或更高版本，通过插件市场按需安装；插件独立发布，具体平台支持和运行依赖以插件详情为准。
+- 多设备同步请将参与设备统一升级。新版本升级旧云端数据后使用新的同步机制，不再向旧机制回写；HTTP JSON 自托管后端需要支持新的对象列表和删除接口。
+- RDP、VNC 本版继续内置，插件化安排在后续版本。
+
+### English
+
+OxideTerm 2.2.1 improves the plugin marketplace, on-demand language support, and file previews, with native plugin capabilities for workspace summaries, host discovery, and text tools. This release also upgrades cloud-sync merging and recovery, separates application and terminal themes, and fixes shared SSH disconnects during SFTP directory uploads, IDE multiselection, terminal input, and Windows console behavior.
+
+#### 🧩 Plugin marketplace and on-demand languages
+
+- The marketplace and installed-plugin pages use compact rows with descriptions, versions, status, and actions. Expanded details remove repeated descriptions and nested containers. Categories come from the catalog and also filter installed plugins.
+- Both lists support pagination, defaulting to 10 entries per page, with a custom page size and direct page navigation. Page-size controls appear below the list, and enable/disable notifications use plugin names.
+- Fixed focused search and pagination fields in the plugin manager not accepting text input.
+- Refreshing the plugin list or enabling, disabling, or uninstalling another plugin preserves unchanged running plugins' navigation entries and views, fixing undeclared-tab errors in plugins such as Toolbox.
+- Plugin navigation entries are grouped below built-in tools with a separator. Plugin sidebar panels now honor their declared bottom position. Plugin tabs reuse the application's page headers, native controls, and themes.
+- Moved syntax support for 21 languages into independent plugins: C, C++, C#, CSS, Common Lisp, Elixir, Go, HTML, Java, JavaScript, Objective-C, Perl, PHP, R, Ruby, Rust, Scala, Swift, TypeScript, TSX, and Zig. Added file recognition and plugin entry points for Nginx, Terraform/HCL, and Protobuf.
+- Kept 15 languages built in: Bash, Zsh, Fish, PowerShell, JSON, YAML, TOML, Markdown, Dockerfile, Make, CMake, Diff, Python, Lua, and SQL. Files remain editable when an external language plugin is missing, with a prompt to install syntax support.
+- The marketplace selects the highest plugin version compatible with the host and platform, distinguishing available updates from newer releases that require an application upgrade. Installed plugins are checked again at startup after upgrades or downgrades; incompatible plugins retain their files and settings.
+
+#### 🔎 Native file previews and plugin workspaces
+
+- Local file-manager and SFTP previews can use installed PDF, SQLite, certificate, and binary-inspection plugins through the existing preview entry point.
+- Local code previews also offer installation of missing language support. Read-only previews use the native editor and update highlighting after a language plugin is installed.
+- PDF previews support page navigation. SQLite previews provide read-only native tables with table selection and pagination. Remote databases with nonempty WAL or rollback journals, or changes during download, are rejected to avoid displaying an incomplete copy.
+- Certificate previews browse multiple certificates in one file and show validity dates separately from trust or revocation verification. Binary inspection displays format, architecture, and sections, with offset navigation through the existing hexadecimal preview.
+- Closing a preview cancels its background work and releases remote temporary files without disconnecting other consumers of the shared SSH connection. Process plugins retain the existing enable-time approval for trusted local code.
+- Added workspace summaries and navigation for Workspace Dashboard, supporting recent connections, active tabs, recording states, connection and plugin issues, and links back to application pages. Summaries exclude terminal content and diagnostic text.
+- Host-source plugins such as Tailscale and Ansible can open the native connection form with discovered host metadata for users to review, configure authentication, and then save or connect.
+- Text tools such as Toolbox can use multiline input, read-only results, copying, and chained operations. Terminal context-menu actions capture the selection at click time, preserve it across tab changes, and never send results back to the terminal automatically.
+
+#### ☁️ Cloud-sync merging and recovery
+
+- Cloud sync now combines independent encrypted snapshots from participating devices, automatically merging nonconflicting edits and retaining concurrent candidates for explicit resolution. Excluding a resource from sync does not delete it remotely.
+- Added recovery records for interrupted application of connection, forwarding, settings, Quick Command, plugin, and credential changes. Upload retries reuse prepared data, while edits made during upload remain pending for the next sync.
+- Desktop, CLI, and MCP share the synchronization flow, with CLI support for previewing merges before applying them. Legacy cloud data can be imported into the new mechanism without deleting the original objects, and older `.oxide` files remain readable.
+- Fixed application-theme preservation when upgrading legacy backups and cloud-sync data.
+
+#### 🎨 Themes and workspaces
+
+- Application and terminal themes can be selected independently and viewed together in a workspace preview. Opacity offers finer adjustment near the opaque end of the slider. (PR [#650](https://github.com/AnalyseDeCircuit/oxideterm/pull/650))
+- Terminal color and appearance queries use the active palette. SSH palette updates are queued to avoid blocking the interface. (PR [#650](https://github.com/AnalyseDeCircuit/oxideterm/pull/650))
+- Workspace pages can share split-tab layouts. The IDE file tree supports modifier-key multiselection, range selection, and related batch actions, with a bottom bar aligned to other workspaces.
+- The command palette finds saved local-terminal and WSL profiles. Launch failures surface in the workspace, and hovered list rows refresh correctly. (PR [#649](https://github.com/AnalyseDeCircuit/oxideterm/pull/649))
+
+#### 🛠️ Connection, transfer, and terminal fixes
+
+- Fixed shared SSH transport shutdown during SFTP directory uploads, which could also disconnect the terminal, with improvements to channel flow control and disconnect diagnostics.
+- Restored saved authentication choices and persisted confirmed credentials only after successful authentication, against the connection that actually authenticated. (PR [#647](https://github.com/AnalyseDeCircuit/oxideterm/pull/647))
+- Fixed TOTP autofill for echoed verification prompts such as JumpServer's, and SSH configuration discovery from the wrong directory in portable mode.
+- trzsz and ZMODEM downloads honor the requested overwrite behavior.
+- Fixed wide-glyph placement in bidirectional rows, IME caret positioning and preedit colors, touchpad scroll accumulation, and newline preservation in bracketed paste. (PR [#651](https://github.com/AnalyseDeCircuit/oxideterm/pull/651))
+- Bundled a pinned ConPTY runtime on Windows and fixed pipe readiness, empty reads, Ctrl+J identity, and key-release pairing with delivered key presses. (PR [#648](https://github.com/AnalyseDeCircuit/oxideterm/pull/648))
+- Fixed unchanged terminal rows receiving new timestamps when the window or timestamp gutter changes width, while preserving detection of meaningful styled-blank changes. (PR [#655](https://github.com/AnalyseDeCircuit/oxideterm/pull/655))
+- Updated native UI dependencies and platform integration, and reverted tab hover changes that could trigger a duplicate-hover-style assertion.
+
+#### 👥 Contributors
+
+- @stabey contributed independent application and terminal themes, saved local and WSL profile discovery, SSH authentication restoration, terminal input fixes, and Windows console fixes. (PR [#647](https://github.com/AnalyseDeCircuit/oxideterm/pull/647), PR [#648](https://github.com/AnalyseDeCircuit/oxideterm/pull/648), PR [#649](https://github.com/AnalyseDeCircuit/oxideterm/pull/649), PR [#650](https://github.com/AnalyseDeCircuit/oxideterm/pull/650), PR [#651](https://github.com/AnalyseDeCircuit/oxideterm/pull/651))
+- @m00nLi fixed terminal row timestamps changing when the grid width changes. (PR [#655](https://github.com/AnalyseDeCircuit/oxideterm/pull/655))
+
+#### 📌 Upgrade notes
+
+- External language plugins and plugins using the new host capabilities require OxideTerm 2.2.1 or later and are installed separately through the marketplace. Consult each plugin's details for supported platforms and runtime dependencies.
+- Upgrade all participating devices for multi-device sync. After importing legacy cloud data, the new client uses the new synchronization mechanism and does not write back to the legacy one. Self-hosted HTTP JSON backends must support the new object-listing and deletion endpoints.
+- RDP and VNC remain bundled in this release; plugin migration is planned for a later version.
+
+## 2.2.0
+
+### 中文
+
+OxideTerm 2.2.0 新增了通知与审计工作区、加密会话录制和可复用的 TOTP 验证码凭据，让连接、命令、文件操作及自动化任务可以在同一个应用中回顾。同时，本版本加入终端粘贴编辑，完善本地会话管理和快捷命令分组，提供 Linux Nix 安装方式，并修复云同步闪退、Windows 终端输出和 Linux 录制恢复等问题。
+
+#### 📋 通知与审计工作区
+
+- 通知中心扩展为“通知与审计”，提供通知、审计记录、会话汇总和会话录制入口。审计开关直接显示在页面顶部，**默认关闭**；开启后记录后续操作，关闭后仍可查看已经保存的记录。
+- 审计记录可以按时间、类别、级别、事件来源和结果筛选，并按内容、连接、会话、本机账号或远程账号等字段搜索。记录详情展示操作过程、耗时、结果依据，以及可获得的退出码或传输字节数。
+- 会话视图汇总命令、文件操作、其他操作和连接次数，支持继续查看该会话的相关记录。操作详情可沿父子关系查看子操作，方便追踪一次请求触发的后续任务。
+- 事件来源区分用户、命令栏、快捷命令、广播、AI、MCP、插件、命令行和系统。操作结果区分已发送、成功、失败、取消、部分完成、中断和未知，保留判断结果所依据的协议响应、退出码或生命周期事件。
+- 操作记录的默认保留策略为 **90 天、512 MiB**。保留天数和容量均可直接输入，支持 1–3650 天和 1 MiB–64 GiB；达到保留条件后自动清理，也可手动清除记录。
+- 支持按当前筛选范围导出 JSON 或 CSV 摘要。需要命令、路径、账号和端点等详情时，可单独选择“导出受保护详情”，确认后生成明文文件。
+
+使用方法：打开侧栏的“通知与审计”，在顶部启用审计，再通过筛选和会话汇总查看操作。审计数据在本机保存，敏感详情加密存储。
+
+#### 🔎 覆盖连接、文件和自动化操作
+
+- SSH 审计覆盖主机密钥验证、认证尝试、交互式认证、连接状态、共享连接使用关系和重连阶段。终端与文件浏览等功能共用连接时，记录仍保留各自的会话、通道和实际连接代次。
+- 本地终端、Telnet、Mosh、串口以及远程桌面的连接和退出过程接入审计；串口控制、Telnet 控制、远程桌面剪贴板与文件传输等操作也有相应记录。
+- 终端命令、快捷命令、广播发送和 tmux 操作可以追溯到发起入口。命令完成状态使用可获得的 Shell 集成或退出码信息，单纯发送输入会保留“已发送”这一结果。
+- 文件审计覆盖本地和远程文件浏览、搜索、预览、打开、创建目录、复制、移动、重命名、删除、上传下载及编辑器保存，也记录传输的暂停、恢复、取消和中断，以及文件冲突处理。
+- 端口转发的创建、启动、停止、暂停、恢复和规则变更接入审计；主机面板中的进程、服务、容器、计划任务及日志查询等操作保留对应目标和结果。
+- 设置、连接配置、密钥与凭据管理、云同步、备份恢复、应用锁、便携保险库、更新和诊断报告等操作接入记录。凭据管理记录操作及结果，省略密码、私钥和令牌内容。
+- AI 工具调用、后台任务、MCP 请求及权限变更、插件操作和知识库管理可以关联到具体请求。授权、拒绝、取消和执行结果保留各自状态，便于了解自动化任务执行到了哪一步。
+
+#### 🎞️ 加密会话录制与回放
+
+- 新增本地终端、SSH、Telnet、Mosh 和串口的审计录制，保存终端显示的输出与尺寸变化。**输出录制默认关闭**，首次开启时会单独确认。
+- 录制内容在本地加密保存，不参与云同步；不采集键盘输入和终端文件传输载荷。终端显示出的敏感内容仍可能进入录制，开启时会明确提示。
+- 录制页面支持播放、暂停、从头播放、时间定位和倍速播放，并显示录制中、已结束、已中断、不完整或已过期等状态。回放按需读取内容，长录制无需一次载入全部输出。
+- 录制使用有容量上限的队列与后台写入。存储处理不及时会向终端读取路径传递背压，输入、取消和关闭继续获得处理；输出及尺寸变化保持原有顺序，采集缺口会明确标记。
+- 修复 Linux 在录制队列恢复容量后，PTY 读取未重新启用、持续输出停住的问题。
+- 录制内容默认保留 **7 天、2 GiB**，可独立于操作记录设置保留时间和容量。
+
+使用方法：先启用审计，再进入“会话录制”开启“记录终端输出”。需要回顾时，从录制列表打开对应会话。
+
+#### 🔐 可复用的 TOTP 验证码凭据
+
+- “设置 → 凭据”统一放置提权凭据和动态验证码凭据。TOTP 支持 Base32 密钥及 `otpauth://` 链接，并支持 SHA-1、SHA-256、SHA-512、6 位或 8 位验证码和自定义更新周期。
+- 一个验证码凭据可以供多个 SSH 连接使用，目标主机和各级跳板分别选择自己的凭据。它可以配合已有密码、密钥或交互式认证使用。
+- 自动填写仅处理 SSH 认证阶段的提示。默认识别 `MFA CODE`、`Verification code`、`OTP` 等验证码提示，也支持自定义正则表达式；只有一个明确匹配的隐藏输入项时才自动填写。
+- 同一轮认证包含其他问题时，先收集人工回答，再生成当前验证码。每次认证只自动提交一次，服务器继续追问时转为人工输入；多个连接需要人工验证时会排队显示。
+- 密钥存入受保护存储，连接配置只保存凭据引用。凭据可编辑、停用并被多个连接共用，仍有连接绑定时会阻止删除。
+- 加密连接文件和云同步保留凭据及连接之间的关系，仅在选择包含敏感凭据时携带密钥。接收端将密钥存入自己的受保护存储；仅同步元数据时，不会把旧密钥当成已经更新的新密钥。
+
+使用方法：在“设置 → 凭据”中添加动态验证码凭据，然后在 SSH 连接或跳板的编辑页面选择它。
+
+#### ✍️ 终端粘贴前编辑
+
+- 新增“编辑后粘贴”，使用应用现有编辑器修改剪贴板中的命令或脚本，支持多行编辑、选择和撤销。多行粘贴确认流程也可以进入编辑，确认后才发送到终端。
+- 提供明确的代码围栏移除操作，方便处理从 Markdown 文档或对话中复制的代码块。仅在用户选择该操作时移除包裹代码的围栏。
+- 打开编辑器后未修改内容，或撤销全部修改时，保留原始粘贴内容及换行；编辑后的内容保留来源的 CRLF 换行约定。
+
+#### 💻 本地会话与远程终端管理
+
+- 已保存的本地终端配置在侧栏拥有独立的会话条目，按配置组织正在运行的终端；可以折叠、展开，并从该配置继续新建终端。（PR [#631](https://github.com/AnalyseDeCircuit/oxideterm/pull/631)）
+- 选择本地会话时可以聚焦其运行中的终端，移除会话会关闭该配置对应的终端并记住侧栏隐藏状态；从会话管理器重新打开配置后，会再次显示并获得焦点。（PR [#631](https://github.com/AnalyseDeCircuit/oxideterm/pull/631)）
+- 修复 Windows 将暂时没有输出的 PTY 读取误判为结束，导致后续终端输出不再显示的问题。（PR [#631](https://github.com/AnalyseDeCircuit/oxideterm/pull/631)）
+- SSH、Telnet、Mosh 和串口会话结束后保留终端窗格与已有输出，便于查看退出原因或最后的错误信息；本地命令行环境保留原有退出自动关闭行为。
+- 打开会话不再改变用户选择的侧栏可见状态，退出专注模式时恢复原有侧栏选择。
+
+#### 🗂️ 快捷命令分组
+
+- 支持删除“系统”“网络”“文件”“Docker”等预设分组，组内命令会移动到“自定义”分组。“自定义”作为接收命令的默认分组保留。
+- 在快捷命令管理页拖动分组左侧的手柄即可调整顺序，重启后保持排序。
+- 删除和排序在保存成功后生效；保存失败时保留原有分组及命令状态。
+
+#### 🛠️ 界面、输入与同步修复
+
+- 修复云同步预览渲染中的状态借用冲突，解决相关同步及本地导出流程可能触发的闪退。
+- 修复终端视口短暂改变后恢复原尺寸，仍应用过期尺寸请求的问题，避免侧栏动画等操作留下错误的终端行列数。
+- 修复相邻滚动区域共用交互状态导致滚动异常的问题，让各区域保持独立滚动。
+- 终端右键菜单和串口传输菜单会随焦点离开而关闭，打开串口传输菜单时先聚焦对应窗格。
+- 手动 X/Y/ZMODEM 操作集中到串口控制栏的“二进制传输”；SSH 等终端继续在检测到远端传输程序后提示选择文件或目录。传输失败提示区分超时、协议错误、文件读写和文件过大等原因。
+- 修复替换已保存密码时首个字符与光标位置不同步的问题，以及会话日志遇到连续回车或跨数据块回车时产生多余空行的问题。
+- 终端与 IDE 的中文／CJK 字体设置均支持手动填写自定义字体名称。笔记页面未使用背景图片时恢复不透明背景。
+- 审计事件、会话和录制列表的行背景及分隔线铺满可用宽度，搜索与保留策略字段使用现有输入框交互。
+- Windows 安装脚本明确采用 UTF-8 编码，修复本地化安装提示在系统代码页下显示异常的问题。
+
+#### 🐧 Linux Nix 支持与项目文档
+
+- 新增 Linux x86_64 和 aarch64 的 Nix Flake，提供应用包、命令行入口、开发环境、overlay 与 NixOS 模块，可使用 `nix build .#oxideterm`、`nix run .#oxideterm` 或 `nix develop`。（PR [#623](https://github.com/AnalyseDeCircuit/oxideterm/pull/623)）
+- Nix 安装由应用识别，更新交由 Nix 管理；包内包含运行所需资源、辅助程序和桌面集成，并完善 Linux 视频预览依赖处理。（PR [#623](https://github.com/AnalyseDeCircuit/oxideterm/pull/623)）
+- 更新 Nix 使用的 SSH 依赖哈希，加入打包校验，并补充 Nix 构建、开发及依赖维护文档。（PR [#632](https://github.com/AnalyseDeCircuit/oxideterm/pull/632)）
+- Nix 校验现由独立工作流执行，按相关文件变更触发，也可手动运行。
+- 各语言 README 增加贡献者墙及内存占用对比说明，更新了相关用户指南。
+
+#### 👥 贡献者
+
+感谢以下外部贡献者参与本次更新：
+
+- @dzzzc：完善已保存本地会话的侧栏管理、移除与聚焦行为，并修复 Windows PTY 后续输出丢失的问题。（PR [#631](https://github.com/AnalyseDeCircuit/oxideterm/pull/631)）
+- @sgnay：引入 Linux Nix 打包、NixOS 集成及 Nix 更新识别，并完善依赖哈希、打包校验和维护文档。（PR [#623](https://github.com/AnalyseDeCircuit/oxideterm/pull/623)、PR [#632](https://github.com/AnalyseDeCircuit/oxideterm/pull/632)）
+
+#### 📌 使用与升级说明
+
+- 审计与会话输出录制均需主动开启。操作记录和输出录制的保留策略分别管理，关闭审计不会删除已有记录。
+- 审计记录反映 OxideTerm 能观察到的操作及结果；本机账号表示操作系统会话，命令退出状态取决于对应协议或 Shell 集成提供的信息。
+- 选择导出受保护详情会生成明文文件；会话录制则继续在本机加密保存，不随云同步上传。
+- Nix 安装请通过 Nix 更新；其他安装方式继续使用对应平台的安装包或应用内更新。
+
+### English
+
+OxideTerm 2.2.0 introduces a Notification & Audit workspace, encrypted session recordings, and reusable TOTP credentials, bringing connection history, commands, file operations, and automated tasks into one place. This release also adds editing before terminal paste, improves local session management and quick-command groups, introduces Linux Nix packaging, and fixes cloud-sync crashes, Windows terminal output, and Linux recording recovery.
+
+#### 📋 Notification & Audit Workspace
+
+- Expanded the notification center into Notification & Audit, with views for notifications, audit records, session summaries, and session recordings. The audit switch is visible at the top of the page and is **off by default**. Enabling it captures subsequent operations; existing records remain readable after it is turned off.
+- Added filtering by time, category, severity, source, and outcome, plus searches for content, connections, sessions, local accounts, and remote accounts. Record details show operation history, duration, the basis for an outcome, and exit codes or transferred bytes when available.
+- Added session summaries with command, file-operation, other-operation, and connection counts. Open a session's related records or follow parent and child operations to trace the work triggered by a request.
+- Distinguished user actions, the command bar, quick commands, broadcasts, AI, MCP, plugins, CLI commands, and system activity. Outcomes distinguish sent, succeeded, failed, cancelled, partially completed, interrupted, and unknown, with their supporting protocol response, exit code, or lifecycle event.
+- Set default operation retention to **90 days and 512 MiB**. Days and capacity accept direct numeric input, from 1–3650 days and 1 MiB–64 GiB. Records are pruned according to these limits and can also be cleared manually.
+- Added JSON and CSV summary export for the current filters. A separate protected-details export includes commands, paths, accounts, and endpoints in a plaintext file after confirmation.
+
+To use it, open Notification & Audit from the sidebar, enable auditing at the top, and use filters or session summaries to review activity. Audit data stays on the device, with sensitive details stored encrypted.
+
+#### 🔎 Connection, File, and Automation Coverage
+
+- Added SSH auditing for host-key verification, authentication attempts, interactive authentication, connection state, shared-connection consumers, and reconnect stages. Terminals and file browsers sharing a connection retain their own session, channel, and physical-connection identities.
+- Added connection and exit records for local terminals, Telnet, Mosh, serial sessions, and remote desktops, along with serial controls, Telnet controls, and remote-desktop clipboard and file transfers.
+- Traced terminal commands, quick commands, broadcasts, and tmux operations back to their entry point. Command completion uses available shell integration or exit-code evidence; sending input alone retains a sent outcome.
+- Covered local and remote file browsing, search, preview, opening, directory creation, copying, moving, renaming, deletion, uploads, downloads, and editor saves. Records also include transfer pause, resume, cancellation, interruption, and file-conflict decisions.
+- Added auditing for port-forward creation, start, stop, suspension, restoration, and rule changes, plus host-panel operations involving processes, services, containers, scheduled tasks, and log queries.
+- Added records for settings, connection profiles, keys and credentials, cloud sync, backup and restore, app lock, the portable vault, updates, and support reports. Credential management records actions and outcomes while omitting passwords, private keys, and tokens.
+- Associated AI tool calls, background tasks, MCP requests and permission changes, plugin operations, and knowledge-base management with their originating requests. Authorization, denial, cancellation, and execution outcomes retain distinct states.
+
+#### 🎞️ Encrypted Session Recording and Playback
+
+- Added audit recordings for local terminals, SSH, Telnet, Mosh, and serial sessions, capturing displayed terminal output and size changes. **Output recording is off by default** and requires a separate confirmation when enabled.
+- Stored recordings locally with encryption and excluded them from cloud sync. Keyboard input and terminal file-transfer payloads are not captured. Sensitive information displayed in terminal output can appear in recordings, as explained when recording is enabled.
+- Added play, pause, restart, seeking, and playback-speed controls, with active, finished, interrupted, partial, and expired states. Playback reads content as needed instead of loading an entire long recording at once.
+- Used bounded recording queues and background writes. Slow storage applies backpressure to terminal reads while input, cancellation, and closure continue to be serviced. Output and resize events retain their order, and capture gaps are identified explicitly.
+- Fixed Linux PTY reads remaining disabled after recording capacity became available again, which could leave sustained output stalled.
+- Set default recording retention to **7 days and 2 GiB**, configurable independently of operation-record retention.
+
+To use it, enable auditing, open Session Recordings, and enable Record Terminal Output. Open a recorded session from the list to review it.
+
+#### 🔐 Reusable TOTP Credentials
+
+- Brought privilege credentials and TOTP credentials together under Settings → Credentials. TOTP accepts Base32 secrets and `otpauth://` URIs, with SHA-1, SHA-256, SHA-512, six or eight digits, and a configurable period.
+- Allowed multiple SSH connections to share one TOTP credential, with an explicit selection for the target host and each jump host. TOTP works alongside existing password, key, or interactive authentication.
+- Limited autofill to SSH authentication prompts. Defaults recognize prompts such as `MFA CODE`, `Verification code`, and `OTP`; custom regular expressions are supported. Autofill requires exactly one matching hidden input.
+- Collected manual answers to other questions before generating a current code. Each authentication attempt submits a code automatically once, then uses manual input for further challenges. Concurrent manual authentication prompts are queued.
+- Stored secrets in protected storage and kept credential references in connection profiles. Credentials can be edited, disabled, and shared, with deletion blocked while a saved connection still uses them.
+- Preserved credential bindings in encrypted connection archives and cloud sync. Secrets are included only when sensitive credentials are selected and are restored into the receiving device's protected storage. Metadata-only synchronization does not reuse an old seed as though it were a newly rotated one.
+
+To use it, add a TOTP credential under Settings → Credentials, then select it when editing an SSH connection or jump host.
+
+#### ✍️ Edit Before Terminal Paste
+
+- Added Edit Before Paste using the existing editor, with multiline editing, selection, and undo. The multiline paste-confirmation flow can also open the editor; content is sent only after confirmation.
+- Added an explicit code-fence removal action for code copied from Markdown documents or conversations. Surrounding fences are removed only when that action is selected.
+- Preserved original clipboard content and line endings when no edits remain, including after undoing all changes. Edited content retains the source's CRLF convention.
+
+#### 💻 Local Sessions and Remote Terminal Management
+
+- Gave saved local terminal profiles persistent sidebar session entries that group their running terminals, support expand and collapse, and can open additional terminals with the same startup configuration. (PR [#631](https://github.com/AnalyseDeCircuit/oxideterm/pull/631))
+- Focused a running terminal when selecting its local session. Removing a session closes that profile's terminals and remembers its hidden sidebar state; reopening the profile from the session manager restores visibility and focus. (PR [#631](https://github.com/AnalyseDeCircuit/oxideterm/pull/631))
+- Fixed Windows treating a temporarily empty PTY read as end-of-file, which prevented later terminal output from appearing. (PR [#631](https://github.com/AnalyseDeCircuit/oxideterm/pull/631))
+- Kept SSH, Telnet, Mosh, and serial terminal panes and their output available after a session ends, making final errors and exit messages readable. Local shells retain their existing automatic close-on-exit behavior.
+- Preserved the chosen sidebar visibility when opening sessions and restored that choice when leaving Zen mode.
+
+#### 🗂️ Quick-Command Groups
+
+- Allowed removal of preset groups such as System, Network, Files, and Docker. Their commands move into Custom, which remains the default destination group.
+- Added drag handles for reordering groups in the quick-command manager, with the order retained after restart.
+- Applied deletion and reordering only after saving succeeds. A failed save preserves the previous groups and commands.
+
+#### 🛠️ Interface, Input, and Sync Fixes
+
+- Fixed a state-borrow conflict while rendering cloud-sync previews that could crash related synchronization and local-export flows.
+- Cancelled obsolete terminal resize requests when the viewport returned to its original size, preventing sidebar animations and similar changes from leaving the terminal with incorrect dimensions.
+- Fixed adjacent scroll areas sharing interaction state, keeping their scrolling independent.
+- Dismissed terminal context menus and serial-transfer menus when focus leaves the pane, and focused the relevant serial pane before opening its transfer menu.
+- Consolidated manual X/Y/ZMODEM actions under Binary Transfer in the serial toolbar. SSH and other terminals continue to prompt for files or directories after detecting a remote transfer program. Failure notices now distinguish timeouts, protocol errors, file I/O, and oversized files.
+- Fixed first-character caret positioning when replacing saved passwords, and extra session-log lines caused by repeated or chunk-split carriage returns.
+- Added custom Chinese/CJK font names to both terminal and IDE settings. Restored an opaque notes background when no background image is configured.
+- Made audit-event, session, and recording rows and separators fill the available width, and used the existing input controls for audit search and retention settings.
+- Explicitly encoded Windows installer scripts as UTF-8 to preserve localized prompts across system code pages.
+
+#### 🐧 Linux Nix Support and Documentation
+
+- Added a Linux x86_64 and aarch64 Nix flake with application packages, a CLI entry point, a development shell, an overlay, and a NixOS module. Use `nix build .#oxideterm`, `nix run .#oxideterm`, or `nix develop`. (PR [#623](https://github.com/AnalyseDeCircuit/oxideterm/pull/623))
+- Recognized Nix installations and delegated updates to Nix. Packages include runtime resources, helpers, and desktop integration, with improved Linux video-preview dependency handling. (PR [#623](https://github.com/AnalyseDeCircuit/oxideterm/pull/623))
+- Updated the Nix SSH dependency hash, added package verification, and documented Nix builds, development, and dependency maintenance. (PR [#632](https://github.com/AnalyseDeCircuit/oxideterm/pull/632))
+- Moved Nix validation into a dedicated workflow triggered by relevant file changes or manual dispatch.
+- Added contributor walls and idle-memory comparisons to the localized READMEs and updated related user guides.
+
+#### 👥 Contributors
+
+Thank you to the external contributors to this release:
+
+- @dzzzc: Improved saved local-session sidebar management, removal, and focus, and fixed missing Windows PTY output after an empty read. (PR [#631](https://github.com/AnalyseDeCircuit/oxideterm/pull/631))
+- @sgnay: Introduced Linux Nix packaging, NixOS integration, and Nix update detection, then improved dependency hashes, package verification, and maintenance documentation. (PR [#623](https://github.com/AnalyseDeCircuit/oxideterm/pull/623), PR [#632](https://github.com/AnalyseDeCircuit/oxideterm/pull/632))
+
+#### 📌 Usage and Upgrade Notes
+
+- Auditing and session-output recording require explicit activation. Operation records and recordings have separate retention settings; turning auditing off preserves existing records.
+- Audit records describe operations and outcomes observable by OxideTerm. The local account identifies the operating-system session, and command completion depends on information available from the protocol or shell integration.
+- Exporting protected details creates a plaintext file. Session recordings remain encrypted on the device and are excluded from cloud sync.
+- Update Nix installations through Nix. Other installations continue to use their platform packages or the in-app updater.
+
 ## 2.1.0
 
 ### 中文

@@ -9,6 +9,7 @@ mod ssh_config_sync;
 mod ssh_keys;
 mod ssh_paths;
 mod store;
+pub mod totp;
 pub use connection_import::{
     ConnectionImportApplyRequest, ConnectionImportApplyResult, ConnectionImportDuplicateStrategy,
     ConnectionImportErrorInfo, ConnectionImportPreview, ConnectionImportSource,
@@ -49,11 +50,12 @@ pub use store::{
     DEFAULT_X11_UNTRUSTED_TIMEOUT_SECONDS, DeletedConnectionTombstone, FtpProfile,
     FtpProfilesSyncSnapshot, FtpSecurity, GLOBAL_UPSTREAM_PROXY_PASSWORD_KEYCHAIN_ID,
     LOCAL_SHELL_PRIVILEGE_CONNECTION_ID, LocalSyncMetadata, LocalTerminalProfile,
-    ManagedSshKeyInfo, ManagedSshKeyOrigin, ManagedSshKeyUsage, MoshIpFamily, MoshPredictionMode,
-    MoshProfile, MoshProfilesSyncSnapshot, MoshUdpPortSelection, PROFILE_CREDENTIAL_KIND,
-    PreparedProfileCredentials, PreparedSavedConnectionsSync, PrivilegeCredentialKind,
-    ProfileCredentialRestoreSummary, ProxyHopInfo, RemoteDesktopProfile,
-    RemoteDesktopProfilesSyncSnapshot, SaveConnectionRequest, SaveFtpProfileRequest,
+    ManagedSshKeyInfo, ManagedSshKeyOrigin, ManagedSshKeySyncRecord, ManagedSshKeyUsage,
+    MoshIpFamily, MoshPredictionMode, MoshProfile, MoshProfilesSyncSnapshot, MoshUdpPortSelection,
+    PROFILE_CREDENTIAL_KIND, PreparedProfileCredentials, PreparedSavedConnectionsSync,
+    PrivilegeCredentialKind, PrivilegeCredentialSyncRecord, ProfileCredentialRestoreSummary,
+    ProxyHopInfo, RemoteDesktopProfile, RemoteDesktopProfilesSyncSnapshot,
+    ResolvedConnectionConfiguration, SaveConnectionRequest, SaveFtpProfileRequest,
     SaveLocalTerminalProfileRequest, SaveMoshProfileRequest, SavePrivilegeCredentialRequest,
     SaveRemoteDesktopProfileRequest, SaveSerialProfileRequest, SaveStandaloneSftpProfileRequest,
     SaveTelnetProfileRequest, SavedAuth, SavedConnection, SavedConnectionRuntimeSecrets,
@@ -68,3 +70,4 @@ pub use store::{
     TelnetProfilesSyncSnapshot, default_telnet_upstream_proxy, is_profile_credential,
     validate_group_name,
 };
+pub use store::{SSH_COMMON_PRIVILEGE_SCOPE_ID, TotpBinding, TotpResolver};

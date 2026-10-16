@@ -1,5 +1,23 @@
 {
   "terminal": {
+    "history": {
+      "save": "Salvar histórico neste dispositivo",
+      "save_hint": "Salva os comandos completos das conexões SSH, Telnet, Mosh e seriais salvas em um arquivo local sem criptografia, incluindo senhas ou tokens nos argumentos. O salvamento começa ao ativar.",
+      "retention": "Retenção (dias)",
+      "retention_hint": "0 mantém o histórico indefinidamente. Até 10.000 registros são mantidos entre todas as conexões salvas.",
+      "current": "Conexão atual",
+      "all": "Todas as conexões",
+      "pause": "Pausar histórico desta conexão",
+      "resume": "Retomar histórico desta conexão",
+      "clear_current": "Limpar histórico desta conexão",
+      "clear_all": "Limpar o histórico de todas as conexões salvas",
+      "clear_confirm": "Excluir o histórico de comandos salvo e em memória de todas as conexões salvas? Os arquivos de histórico do shell não serão alterados.",
+      "clear_confirm_current": "Excluir o histórico salvo e em memória desta conexão? Os arquivos de histórico do shell não serão alterados.",
+      "delete": "Excluir do histórico",
+      "empty": "Nenhum comando correspondente",
+      "error": "Não foi possível carregar ou salvar o histórico. Os comandos recentes continuam disponíveis na memória."
+    },
+    "reconnect_hint": "Sessão desconectada · Pressione Enter para reconectar",
     "control_bar": {
       "show_controls": "Mostrar controles",
       "hide_controls": "Ocultar controles"
@@ -51,6 +69,11 @@
       "risk_configured": "configurado"
     },
     "paste": {
+      "edit": "Editar",
+      "edit_title": "Editar antes de colar",
+      "strip_fence": "Remover delimitadores do bloco de código",
+      "undo": "Desfazer",
+      "redo": "Refazer",
       "title": "Múltiplas linhas detectadas ({{count}} linhas)",
       "more_lines": "... {{count}} linhas a mais",
       "confirm": "Confirmar",
@@ -84,6 +107,12 @@
       "clear_screen": "Limpar tela"
     },
     "modem": {
+      "timeout": "O outro dispositivo não respondeu a tempo. Inicie o programa de transferência nele e tente novamente.",
+      "protocol_error": "O outro dispositivo enviou dados de transferência inválidos ou inesperados.",
+      "file_error": "Não foi possível ler ou gravar o arquivo. Verifique as permissões e o espaço disponível.",
+      "file_too_large": "O arquivo excede o limite de tamanho deste protocolo.",
+      "buffer_overflow": "O outro dispositivo enviou mais dados do que o buffer de transferência pode armazenar.",
+      "worker_stopped": "O processo de transferência parou inesperadamente. Tente novamente.",
       "binary_transfer": "Transferência binária",
       "xmodem_upload": "Enviar via XMODEM",
       "xmodem_receive": "Receber via XMODEM",
@@ -258,7 +287,12 @@
       "command_placeholder": "Command",
       "template_hint": "Use {{param.name}} or {{ctx.host}}; add |sh for POSIX shell quoting.",
       "description_placeholder": "Description",
-      "host_pattern_placeholder": "Host pattern, e.g. *.prod",
+      "match_field": "Comparar por",
+      "match_host": "Endereço do host",
+      "match_connection": "Nome da conexão",
+      "match_all": "Todos os campos",
+      "match_hint": "Deixe vazio para qualquer destino. Use * e separe as regras com vírgulas. Todos os campos inclui endereços, usuários, nomes de conexão e títulos de terminal.",
+      "host_pattern_placeholder": "Padrão, ex.: prod-*",
       "confirm_title": "Run quick command?",
       "confirm_description": "Run: {{command}}",
       "confirm_risky_description": "This command may be destructive or sensitive. Run: {{command}}",
@@ -266,7 +300,8 @@
       "add_group": "Add group",
       "edit_group": "Edit group",
       "delete_group": "Delete group",
-      "delete_group_description": "Os comandos em \"{{name}}\" serão movidos para o grupo padrão antes da exclusão.",
+      "delete_group_description": "Os comandos em \"{{name}}\" serão movidos para \"{{destination}}\" antes da exclusão deste grupo.",
+      "reorder_groups": "Arraste a alça para reordenar os grupos",
       "save_group": "Save group",
       "group_name_placeholder": "Group name",
       "icon_terminal": "Terminal",
@@ -538,6 +573,8 @@
     "typeLocal": "LOCAL",
     "typeSsh": "SSH",
     "privilege_helper": {
+      "choose_hint": "Pressione Enter para escolher uma credencial de elevação",
+      "choose_title": "Escolher credencial de elevação",
       "fill": "Preencher senha",
       "filling": "Preenchendo...",
       "fill_title": "Preencher {{label}}",

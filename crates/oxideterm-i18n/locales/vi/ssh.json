@@ -1,5 +1,36 @@
 {
   "ssh": {
+    "x11": {
+      "accepted": "Đã chấp nhận chuyển tiếp X11",
+      "accepted_description": "Máy chủ SSH đã chấp nhận chuyển tiếp X11 cho cửa sổ dòng lệnh này. Máy chủ cấp giá trị DISPLAY từ xa.",
+      "unavailable": "Không thể dùng chuyển tiếp X11",
+      "local_display_unavailable": "Không tìm thấy địa chỉ hiển thị cục bộ hợp lệ. Hãy khởi động máy chủ X cục bộ và đặt DISPLAY trước khi mở OxideTerm.",
+      "local_authorization_unavailable": "Không thể chuẩn bị xác thực X11 cục bộ. Hãy kiểm tra XAUTHORITY, tệp xác thực và khả năng sử dụng xauth.",
+      "server_rejected": "Máy chủ SSH đã từ chối chuyển tiếp X11. Hãy kiểm tra chính sách chuyển tiếp và việc cài đặt xauth trên máy chủ.",
+      "request_timed_out": "Máy chủ SSH không phản hồi yêu cầu chuyển tiếp X11 đúng hạn.",
+      "channel_unavailable": "Kênh SSH không thể hoàn tất thương lượng chuyển tiếp X11.",
+      "windows_requirement": "Windows cần một máy chủ X cục bộ đang chạy. Đặt DISPLAY thành địa chỉ của máy chủ đó trước khi mở OxideTerm. Máy chủ SSH cấp DISPLAY từ xa riêng biệt."
+    },
+    "fido": {
+      "touch_title": "Khóa bảo mật",
+      "touch_instructions": "Chạm vào khóa bảo mật hoặc hoàn tất xác minh trên thiết bị.",
+      "pin_title": "PIN của khóa bảo mật",
+      "pin_instructions": "Nhập PIN của khóa bảo mật. PIN sẽ không được lưu.",
+      "pin_retry": "PIN không đúng. Hãy kiểm tra trước khi thử lại.",
+      "pin_label": "PIN",
+      "errors": {
+        "unavailable": "Cài đặt và bật phần bổ trợ FIDO Security Key để sử dụng khóa SSH này.",
+        "cancelled": "Đã hủy xác thực bằng khóa bảo mật.",
+        "timeout": "Xác thực bằng khóa bảo mật đã hết thời gian chờ.",
+        "invalid_request": "Yêu cầu ký bằng khóa bảo mật không hợp lệ.",
+        "incompatible": "Giao thức của phần bổ trợ khóa bảo mật không tương thích.",
+        "no_device": "Không tìm thấy khóa bảo mật FIDO. Kết nối thiết bị rồi thử lại.",
+        "credential_not_found": "Không tìm thấy thông tin xác thực SSH này trên khóa bảo mật đã kết nối.",
+        "pin_blocked": "PIN đã bị khóa. Làm theo hướng dẫn khôi phục của nhà sản xuất.",
+        "device_failure": "Thao tác với khóa bảo mật thất bại.",
+        "invalid_signature": "Không thể xác minh chữ ký của khóa bảo mật."
+      }
+    },
     "form": {
       "title": "Kết nối mới",
       "subtitle": "Cấu hình một máy chủ SSH cho terminal, SFTP, chuyển tiếp cổng và chỉnh sửa tệp từ xa.",
@@ -20,6 +51,9 @@
       "password": "Mật khẩu",
       "use_empty_password": "Sử dụng mật khẩu trống",
       "save_password": "Lưu mật khẩu vào keychain",
+      "save_credentials_after_login": "Lưu thông tin xác thực sau khi đăng nhập thành công",
+      "credentials_saved": "Đã lưu thông tin xác thực",
+      "save_credentials_failed": "Không thể lưu thông tin xác thực",
       "group": "Nhóm",
       "notes": "Ghi chú",
       "notes_placeholder": "Thêm thông tin tùy chọn cho kết nối này",
@@ -207,6 +241,9 @@
       }
     },
     "kbi": {
+      "save_password_after_login": "Lưu mật khẩu sau khi đăng nhập thành công",
+      "password_saved": "Đã lưu mật khẩu SSH",
+      "save_password_failed": "Không thể lưu mật khẩu SSH. Kết nối vẫn được duy trì.",
       "title": "Xác thực tương tác bàn phím",
       "continue": "Tiếp tục",
       "cancelled": "Xác thực tương tác bàn phím đã bị hủy."

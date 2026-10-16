@@ -152,6 +152,15 @@ impl Render for DetachedTabWindow {
                     if session.app_lock.locked {
                         return false;
                     }
+                    if session
+                        .tab_host
+                        .read(cx)
+                        .panes()
+                        .values()
+                        .any(|pane| pane.read(cx).paste_editor_focused(window, cx))
+                    {
+                        return false;
+                    }
                     let page = session.tab_host.read(cx).focused_page_id(detached.tab_id);
                     let kind = session.tab_by_id(page, cx).map(|tab| tab.kind.clone());
                     let _sftp_scope = (kind == Some(TabKind::Sftp))
@@ -312,10 +321,7 @@ impl Render for DetachedTabWindow {
                         }
                         return session.handle_forwards_key(event, cx);
                     }
-                    let is_knowledge_window = session
-                        .tabs(cx)
-                        .iter()
-                        .any(|tab| tab.id == detached.tab_id && tab.kind == TabKind::Knowledge);
+                    let is_knowledge_window = kind == Some(TabKind::Knowledge);
                     if is_knowledge_window && session.knowledge_leave_confirmation_open(cx) {
                         session.handle_knowledge_leave_confirmation_key(event, window, cx)
                     } else {

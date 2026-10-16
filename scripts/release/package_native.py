@@ -17,6 +17,8 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from conpty_runtime import stage_runtime as stage_conpty_runtime
+
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 APP_MANIFEST = ROOT_DIR / "crates" / "oxideterm-gpui-app" / "Cargo.toml"
@@ -57,6 +59,22 @@ LINUX_PACKAGE_KIND_FILENAME = "PACKAGE_KIND"
 THIRD_PARTY_LICENSE_DIR = ROOT_DIR / "licenses" / "third-party"
 LINUX_DEB_GRAPHICS_RECOMMENDS = ("libegl1", "libvulkan1")
 LINUX_RPM_GRAPHICS_RECOMMENDS = ("libglvnd-egl", "vulkan-loader")
+LINUX_DEB_MEDIA_DEPENDENCIES = (
+    "gstreamer1.0-plugins-base", "gstreamer1.0-plugins-good",
+    "gstreamer1.0-plugins-bad", "gstreamer1.0-libav",
+    "gstreamer1.0-x", "gstreamer1.0-pulseaudio",
+)
+LINUX_RPM_MEDIA_DEPENDENCIES = (
+    "gstreamer1-plugins-base", "gstreamer1-plugins-good",
+    "gstreamer1-plugins-bad-free", "gstreamer1-plugin-openh264", "openh264",
+)
+LINUX_MEDIA_FACTORIES = (
+    "filesrc", "qtdemux", "decodebin", "playbin", "videoconvert", "videoflip",
+    "appsink", "h264parse", "avdec_h264", "typefindfunctions",
+    # Preserve native file-preview playback when the AppImage restricts plugin discovery.
+    "ximagesink", "autoaudiosink", "pulsesink", "videoscale", "audioconvert", "audioresample",
+    "matroskademux", "avidemux", "oggdemux", "flvdemux",
+)
 LINUX_APPIMAGE_SYSTEM_LIBRARY_PREFIXES = (
     "ld-linux",
     "libanl.so",
@@ -399,9 +417,8 @@ def copy_agent_resources(dst: Path, *, encode_binaries: bool) -> None:
 
 def copy_runtime_resources(dst: Path, target: str, *, encode_agent_binaries: bool = False) -> None:
     dst.mkdir(parents=True, exist_ok=True)
-    # Keep the app bundle layout aligned with Tauri's resource contract: agents
-    # the target-specific CLI, and protocol helpers live under resources instead
-    # of relying on PATH.
+    # Agents and the target-specific CLI retain their resource layout.
+    # Remote desktop executables are distributed through the plugin catalog.
     copy_agent_resources(dst / AGENT_RESOURCE_DIR, encode_binaries=encode_agent_binaries)
     copy_tree(RESOURCE_DIR / "icons", dst / "icons")
 
@@ -413,10 +430,8 @@ def copy_runtime_resources(dst: Path, target: str, *, encode_agent_binaries: boo
         raise FileNotFoundError(f"target CLI resource directory not found: {cli_source}")
     copy_tree(cli_source, dst / "cli-bin" / target)
 
-    helper_source = RESOURCE_DIR / HELPER_RESOURCE_DIR / target
-    if not helper_source.exists():
-        raise FileNotFoundError(f"target helper resource directory not found: {helper_source}")
-    copy_tree(helper_source, dst / HELPER_RESOURCE_DIR / target)
+    if "windows" in target:
+        stage_conpty_runtime(dst, target)
 
 
 def nsis_path(path: Path) -> str:
@@ -1012,7 +1027,8 @@ def create_windows_installer(
         installer_path=installer_path,
         icon_path=icon_path,
     )
-    script_path.write_text(script + "\n", encoding="utf-8")
+    # NSIS uses the Windows code page for unmarked scripts, even with Unicode true.
+    script_path.write_text(script + "\n", encoding="utf-8-sig")
     run([makensis, str(script_path)])
     sign_windows_file(installer_path)
     shutil.rmtree(installer_root)
@@ -1434,6 +1450,7 @@ def linux_dynamic_libraries(binary: Path) -> dict[str, Path]:
         check=True,
         capture_output=True,
         text=True,
+        env={**os.environ, "LC_ALL": "C"},
     )
     libraries = {}
     for line in result.stdout.splitlines():
@@ -1441,6 +1458,8 @@ def linux_dynamic_libraries(binary: Path) -> dict[str, Path]:
         if len(mapping) != 2:
             continue
         name, resolved = mapping
+        if resolved.strip() == "not found":
+            raise RuntimeError(f"Unresolved runtime dependency {name} in {binary}")
         path_text = resolved.split(" ", 1)[0]
         path = Path(path_text)
         if path.is_file():
@@ -1473,6 +1492,99 @@ def copy_linux_appimage_kerberos_libraries(binary: Path, appdir: Path) -> None:
         shutil.copy2(path, library_dir / name)
 
 
+def linux_gstreamer_plugin_scanner() -> Path:
+    scanner_dir = subprocess.run(
+        [require_tool("pkg-config"), "--variable=pluginscannerdir", "gstreamer-1.0"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    scanner = Path(scanner_dir) / "gst-plugin-scanner"
+    if scanner_dir and scanner.is_file():
+        return scanner
+
+    # Ubuntu's multiarch helper directory can differ from the path in GStreamer's .pc file.
+    # Query the installed package instead of guessing an architecture-specific lib directory.
+    listing = subprocess.run(
+        [require_tool("dpkg-query"), "-L", "libgstreamer1.0-0"],
+        check=True, capture_output=True, text=True,
+    ).stdout
+    scanners = {
+        Path(line) for line in listing.splitlines()
+        if Path(line).name == "gst-plugin-scanner" and Path(line).is_file()
+    }
+    if len(scanners) != 1:
+        raise RuntimeError("GStreamer plugin scanner could not be uniquely located in libgstreamer1.0-0")
+    return scanners.pop()
+
+
+def copy_linux_appimage_media_runtime(binary: Path, appdir: Path) -> None:
+    """Bundle the selected GStreamer plugins, scanner and their complete ELF closure."""
+    inspect = require_tool("gst-inspect-1.0")
+    plugin_files: set[Path] = set()
+    for factory in LINUX_MEDIA_FACTORIES:
+        result = subprocess.run(
+            [inspect, factory], check=True, capture_output=True, text=True,
+            env={**os.environ, "LC_ALL": "C"},
+        )
+        filenames = [line.split("Filename", 1)[1].strip() for line in result.stdout.splitlines()
+                     if line.strip().startswith("Filename")]
+        if len(filenames) != 1 or not Path(filenames[0]).is_file():
+            raise RuntimeError(f"GStreamer factory {factory} does not expose one plugin file")
+        plugin_files.add(Path(filenames[0]).resolve())
+
+    scanner = linux_gstreamer_plugin_scanner()
+    plugin_dir = appdir / "usr" / "lib" / "gstreamer-1.0"
+    plugin_dir.mkdir(parents=True, exist_ok=True)
+    scanner_destination = appdir / "usr" / "libexec" / "gst-plugin-scanner"
+    scanner_destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(scanner, scanner_destination)
+    make_executable(scanner_destination)
+    for plugin in sorted(plugin_files):
+        shutil.copy2(plugin, plugin_dir / plugin.name)
+
+    libraries: dict[str, Path] = {}
+    pending = [dependency for source in [binary, scanner, *plugin_files]
+               for dependency in linux_dynamic_libraries(source).items()]
+    while pending:
+        name, source = pending.pop()
+        if name in libraries or name.startswith(LINUX_APPIMAGE_SYSTEM_LIBRARY_PREFIXES):
+            continue
+        libraries[name] = source
+        pending.extend(linux_dynamic_libraries(source).items())
+    library_dir = appdir / "usr" / "lib"
+    library_dir.mkdir(parents=True, exist_ok=True)
+    for name, source in sorted(libraries.items()):
+        shutil.copy2(source, library_dir / name)
+
+    licenses = appdir / "usr" / "share" / "doc" / "gstreamer-runtime"
+    licenses.mkdir(parents=True, exist_ok=True)
+    owners: set[str] = set()
+    for source in [scanner, *plugin_files, *libraries.values()]:
+        # Ubuntu's merged /usr layout can use either spelling in the dpkg database.
+        candidates = [source, source.resolve()]
+        if str(source).startswith("/usr/lib/"):
+            candidates.append(Path(str(source).removeprefix("/usr")))
+        owner = None
+        for candidate in candidates:
+            result = subprocess.run(["dpkg-query", "-S", str(candidate)], capture_output=True, text=True)
+            if result.returncode == 0:
+                owner = result.stdout.split(": ", 1)[0].split(", ", 1)[0]
+                break
+        if not owner:
+            raise RuntimeError(f"No package license owner found for {source}")
+        owners.add(owner.split(":", 1)[0])
+    for owner in sorted(owners):
+        copyright_file = Path("/usr/share/doc") / owner / "copyright"
+        if not copyright_file.is_file():
+            raise RuntimeError(f"Missing redistribution license material for {owner}")
+        shutil.copy2(copyright_file, licenses / f"{owner}.copyright")
+    (licenses / "README.txt").write_text(
+        "GStreamer plugins and their runtime dependencies are included for native media decoding.\n"
+        "Package copyright files identify their authors, source distributions and licenses.\n",
+        encoding="utf-8",
+    )
+    shutil.copytree("/usr/share/common-licenses", licenses / "common-licenses", dirs_exist_ok=True)
+
+
 def create_linux_appimage(
     binary: Path, target: str, version: str, label: str, identity: ReleaseIdentity
 ) -> None:
@@ -1490,6 +1602,7 @@ def create_linux_appimage(
     shutil.copy2(binary, app_binary)
     make_executable(app_binary)
     copy_linux_appimage_kerberos_libraries(app_binary, appdir)
+    copy_linux_appimage_media_runtime(app_binary, appdir)
     copy_runtime_resources(usr_bin / "resources", target, encode_agent_binaries=True)
     document_root = appdir / "usr" / "share" / "doc" / identity.linux_package_name
     copy_release_documents(document_root)
@@ -1516,6 +1629,12 @@ def create_linux_appimage(
                 "#!/bin/sh",
                 'APPDIR="${APPDIR:-$(dirname "$(readlink -f "$0")")}"',
                 'export LD_LIBRARY_PATH="$APPDIR/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"',
+                'export GST_PLUGIN_PATH="" GST_PLUGIN_PATH_1_0=""',
+                'export GST_PLUGIN_SYSTEM_PATH="$APPDIR/usr/lib/gstreamer-1.0"',
+                'export GST_PLUGIN_SYSTEM_PATH_1_0="$APPDIR/usr/lib/gstreamer-1.0"',
+                'export GST_PLUGIN_SCANNER="$APPDIR/usr/libexec/gst-plugin-scanner"',
+                'export GST_PLUGIN_SCANNER_1_0="$APPDIR/usr/libexec/gst-plugin-scanner"',
+                'export GST_REGISTRY_1_0="${XDG_CACHE_HOME:-$HOME/.cache}/oxideterm/gstreamer-appimage.bin"',
                 f'exec "$APPDIR/usr/bin/{APP_BIN}" "$@"',
                 "",
             ]
@@ -1568,6 +1687,7 @@ def create_linux_deb(
     control_dir.mkdir(parents=True)
     shlibdeps_dir = deb_root / "shlibdeps"
     dependencies = linux_deb_dependencies(app_binary, shlibdeps_dir)
+    dependencies = ", ".join([dependencies, *LINUX_DEB_MEDIA_DEPENDENCIES])
     shutil.rmtree(shlibdeps_dir)
     control = f"""Package: {identity.linux_package_name}
 Version: {linux_deb_version(version)}
@@ -1631,6 +1751,7 @@ Summary: OxideTerm SSH workspace
 License: GPL-3.0-only
 URL: https://oxideterm.app
 BuildArch: {linux_rpm_arch(target)}
+Requires: {', '.join(LINUX_RPM_MEDIA_DEPENDENCIES)}
 {linux_rpm_graphics_recommends()}
 
 %description
@@ -1691,7 +1812,6 @@ def main() -> None:
         flush=True,
     )
     build_cli(target, target_was_explicit)
-    build_remote_desktop_helpers(target, target_was_explicit)
     app_binary = build_app(target, target_was_explicit)
     if "windows" in target:
         sign_windows_file(app_binary)

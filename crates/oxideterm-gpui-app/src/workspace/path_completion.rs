@@ -58,7 +58,7 @@ pub(super) struct PathCompletionState {
     loading_parent: Option<String>,
     entries: Vec<PathCompletionCandidate>,
     suggestions: Vec<PathCompletionCandidate>,
-    selected_index: usize,
+    selected_index: Option<usize>,
     generation: u64,
     scroll_handle: ScrollHandle,
 }
@@ -68,7 +68,7 @@ impl PathCompletionState {
     pub(super) fn request(&mut self, request: PathCompletionRequest) -> Option<(u64, String)> {
         let parent_path = request.parent_path.clone();
         self.request = Some(request);
-        self.selected_index = 0;
+        self.selected_index = None;
 
         if self.loaded_parent.as_deref() == Some(parent_path.as_str()) {
             self.rebuild_suggestions();
@@ -117,7 +117,7 @@ impl PathCompletionState {
         self.loading_parent = None;
         self.entries.clear();
         self.suggestions.clear();
-        self.selected_index = 0;
+        self.selected_index = None;
         self.scroll_handle = ScrollHandle::new();
     }
 
@@ -129,8 +129,17 @@ impl PathCompletionState {
         &self.suggestions
     }
 
-    pub(super) fn selected_index(&self) -> usize {
+    pub(super) fn selected_index(&self) -> Option<usize> {
         self.selected_index
+    }
+
+    pub(super) fn acceptance_index(&self, key: &str) -> Option<usize> {
+        match key {
+            // Suggestions arriving asynchronously must not change Enter's target.
+            "enter" => self.selected_index,
+            "tab" if self.is_visible() => Some(self.selected_index.unwrap_or(0)),
+            _ => None,
+        }
     }
 
     pub(super) fn candidate(&self, index: usize) -> Option<&PathCompletionCandidate> {
@@ -148,9 +157,14 @@ impl PathCompletionState {
             return false;
         }
         let max_index = self.suggestions.len().saturating_sub(1) as isize;
-        self.selected_index = (self.selected_index as isize + delta).clamp(0, max_index) as usize;
+        let index = match self.selected_index {
+            Some(index) => (index as isize + delta).clamp(0, max_index) as usize,
+            None if delta < 0 => max_index as usize,
+            None => 0,
+        };
+        self.selected_index = Some(index);
         // Keep keyboard navigation and the popup viewport owned by the same state.
-        self.scroll_handle.scroll_to_item(self.selected_index);
+        self.scroll_handle.scroll_to_item(index);
         true
     }
 
@@ -178,7 +192,7 @@ impl PathCompletionState {
         self.scroll_handle = ScrollHandle::new();
         self.selected_index = self
             .selected_index
-            .min(self.suggestions.len().saturating_sub(1));
+            .filter(|index| *index < self.suggestions.len());
     }
 }
 
@@ -312,7 +326,7 @@ impl WorkspaceApp {
                     .items_center()
                     .gap(px(6.0))
                     .cursor_pointer()
-                    .bg(if index == selected_index {
+                    .bg(if Some(index) == selected_index {
                         rgba((theme.bg_hover << 8) | PATH_COMPLETION_HOVER_ALPHA)
                     } else {
                         rgba(theme.bg_hover << 8)
@@ -370,7 +384,12 @@ impl WorkspaceApp {
         &self,
         owner: PathCompletionOwner,
         cx: &App,
-    ) -> (bool, usize, ScrollHandle, Vec<PathCompletionCandidate>) {
+    ) -> (
+        bool,
+        Option<usize>,
+        ScrollHandle,
+        Vec<PathCompletionCandidate>,
+    ) {
         match owner {
             PathCompletionOwner::FileManager => {
                 let state = &self.file_manager.read(cx).path_completion;
@@ -498,23 +517,68 @@ mod tests {
         let first = remote_path_completion_request("/root/a").unwrap();
         let (first_generation, first_parent) = state.request(first).unwrap();
         let second = remote_path_completion_request("/srv/b").unwrap();
-        let (_second_generation, _second_parent) = state.request(second).unwrap();
+        let (second_generation, second_parent) = state.request(second).unwrap();
+        assert!(state.apply_entries(
+            second_generation,
+            &second_parent,
+            vec![PathCompletionCandidate {
+                name: "beta".to_string(),
+                path: "/srv/beta".to_string(),
+                is_directory: true,
+            }],
+        ));
 
         assert!(!state.apply_entries(first_generation, &first_parent, vec![candidate("a", true)],));
-        assert!(state.suggestions().is_empty());
+        assert_eq!(
+            state
+                .suggestions()
+                .iter()
+                .map(|entry| (entry.name.as_str(), entry.path.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("beta", "/srv/beta")]
+        );
+        assert_eq!(state.parent_path(), Some("/srv"));
     }
 
     #[test]
-    fn completion_retains_more_matches_than_the_visible_viewport() {
+    fn completion_does_not_select_a_loaded_or_cached_candidate() {
         let mut state = PathCompletionState::default();
-        let request = remote_path_completion_request("/root/").unwrap();
-        let (generation, parent_path) = state.request(request).unwrap();
-        let entries = (0..12)
-            .map(|index| candidate(&format!("folder-{index:02}"), true))
-            .collect();
-
-        assert!(state.apply_entries(generation, &parent_path, entries));
-        assert_eq!(state.suggestions().len(), 12);
+        let (generation, parent_path) = state
+            .request(remote_path_completion_request("/root/").unwrap())
+            .unwrap();
+        assert_eq!(state.acceptance_index("enter"), None);
+        assert_eq!(state.acceptance_index("tab"), None);
+        state.apply_entries(
+            generation,
+            &parent_path,
+            vec![candidate("beta", true), candidate("alpha", true)],
+        );
+        assert_eq!(state.acceptance_index("enter"), None);
+        assert_eq!(
+            state
+                .acceptance_index("tab")
+                .and_then(|index| state.candidate(index))
+                .map(|entry| entry.path.as_str()),
+            Some("/root/alpha"),
+        );
+        state.move_selection(1);
+        assert_eq!(
+            state
+                .acceptance_index("enter")
+                .and_then(|index| state.candidate(index))
+                .map(|entry| entry.path.as_str()),
+            Some("/root/alpha"),
+        );
+        state.request(remote_path_completion_request("/root/b").unwrap());
+        assert_eq!(state.acceptance_index("enter"), None);
+        state.move_selection(-1);
+        assert_eq!(
+            state
+                .acceptance_index("enter")
+                .and_then(|index| state.candidate(index))
+                .map(|entry| entry.path.as_str()),
+            Some("/root/beta"),
+        );
     }
 
     #[test]
@@ -527,10 +591,13 @@ mod tests {
             .collect();
 
         assert!(state.apply_entries(generation, &parent_path, entries));
+        assert_eq!(state.suggestions().len(), 12);
+        assert!(state.move_selection(1));
+        assert_eq!(state.selected_index(), Some(0));
         for _ in 0..PATH_COMPLETION_VISIBLE_ROWS {
             assert!(state.move_selection(1));
         }
 
-        assert_eq!(state.selected_index(), PATH_COMPLETION_VISIBLE_ROWS);
+        assert_eq!(state.selected_index(), Some(PATH_COMPLETION_VISIBLE_ROWS));
     }
 }

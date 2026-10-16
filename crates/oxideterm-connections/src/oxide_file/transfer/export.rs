@@ -189,6 +189,27 @@ fn export_connections_to_oxide_inner(
     }
     report_progress("collecting_portable_secrets");
 
+    let credential_selection = crate::CredentialSyncSelection {
+        connection_ids: connection_ids.iter().cloned().collect(),
+        ..Default::default()
+    };
+    let selected_totp = store.totp_credentials().iter()
+        .filter(|p| store.totp_selected(&p.id, &credential_selection))
+        .collect::<Vec<_>>();
+    let totp_credentials = selected_totp.iter().map(|p| p.portable()).collect();
+    let mut portable_secrets = options.portable_secrets.clone();
+    if options.include_passwords {
+        for credential in selected_totp {
+            let already_exported = portable_secrets.iter().any(|secret| {
+                crate::is_profile_credential(secret) && serde_json::from_str::<crate::CredentialTarget>(&secret.id)
+                    .is_ok_and(|target| target.owner == crate::CredentialOwner::Totp(credential.id.clone()))
+            });
+            if !already_exported && let Some(secret) = store.export_totp_secret(credential)? {
+                portable_secrets.push(secret);
+            }
+        }
+    }
+
     let quick_command_counts =
         count_quick_commands_for_export(options.quick_commands_json.as_deref());
     let serial_profiles_count =
@@ -210,8 +231,9 @@ fn export_connections_to_oxide_inner(
         || standalone_sftp_profiles_json.is_some()
         || options.remote_desktop_profiles_json.is_some()
         || !options.plugin_settings.is_empty()
-        || !options.portable_secrets.is_empty();
+        || !portable_secrets.is_empty();
     let mut payload = EncryptedPayload {
+        totp_credentials,
         version: if has_extra_payload { 2 } else { 1 },
         connections: encrypted_connections,
         app_settings_json: options.app_settings_json,
@@ -222,7 +244,7 @@ fn export_connections_to_oxide_inner(
         standalone_sftp_profiles_json,
         remote_desktop_profiles_json: options.remote_desktop_profiles_json,
         plugin_settings: options.plugin_settings,
-        portable_secrets: options.portable_secrets,
+        portable_secrets,
         checksum: String::new(),
     };
     payload.checksum = compute_checksum(&payload)?;
@@ -388,25 +410,25 @@ fn export_privilege_credentials(
         return Ok(Vec::new());
     }
 
-    conn.privilege_credentials
-        .iter()
-        .map(|credential| {
-            let secret = if credential.keychain_id.is_some() {
-                store
-                    .get_privilege_credential_secret(&conn.id, &credential.id)
-                    .ok()
-                    .map(SecretString::into_zeroizing)
-            } else {
-                None
-            };
+    let owners = [conn.id.clone(), crate::SSH_COMMON_PRIVILEGE_SCOPE_ID.to_string()]
+        .into_iter().collect();
+    store.export_privilege_sync_records(&owners)?
+        .into_iter()
+        .map(|record| {
+            let credential = record.metadata;
             Ok(EncryptedPrivilegeCredential {
-                id: credential.id.clone(),
+                // A connection archive carries a scoped copy, never a new global default on import.
+                id: if credential.connection_id == crate::SSH_COMMON_PRIVILEGE_SCOPE_ID {
+                    format!("ssh-common:{}", credential.id)
+                } else {
+                    credential.id.clone()
+                },
                 connection_id: conn.id.clone(),
                 label: credential.label.clone(),
                 kind: credential.kind,
                 username_hint: credential.username_hint.clone(),
                 prompt_patterns: credential.prompt_patterns.clone(),
-                secret,
+                secret: record.secret.map(SecretString::into_zeroizing),
                 enabled: credential.enabled,
                 require_click_to_send: credential.require_click_to_send,
                 created_at: credential.created_at,
@@ -469,6 +491,7 @@ fn export_proxy_chain(
         ))
     })?;
     Ok(vec![EncryptedProxyHop {
+        totp_credential_id: jump.options.totp_credential_id.clone(),
         host: jump.host.clone(),
         port: jump.port,
         username: jump.username.clone(),
@@ -482,6 +505,7 @@ fn export_proxy_hop(
     options: &OxideExportOptions,
 ) -> Result<EncryptedProxyHop, OxideFileError> {
     Ok(EncryptedProxyHop {
+        totp_credential_id: hop.totp_credential_id.clone(),
         host: hop.host.clone(),
         port: hop.port,
         username: hop.username.clone(),
@@ -582,6 +606,7 @@ fn export_auth(
                     private_key.expose_secret().as_bytes(),
                 ))),
                 managed_key: Some(EncryptedManagedKeyMetadata {
+                    certificate: metadata.certificate,
                     key_id: metadata.id,
                     name: metadata.name,
                     fingerprint: Some(metadata.fingerprint),

@@ -85,11 +85,24 @@ impl CloudSyncPageRenderer {
         let cloud_sync_entity = self.cloud_sync.clone();
         cloud_sync_entity.update(cx, |cloud_sync, cx| {
             let state = cloud_sync.controller.store.state();
+            // Render from this borrow; reading the same entity through App would panic.
+            let local_file_mode = cloud_sync.view.local_file_mode;
+            if let Some(summary) = cloud_sync.view.causal_summary.as_ref() {
+                return self.render_causal_preview(
+                    summary,
+                    &cloud_sync.view.causal_conflicts,
+                    &cloud_sync.view.causal_choices,
+                    cloud_sync.controller.password_change.is_some(),
+                    busy,
+                    cx,
+                );
+            }
             if let Some(preview) = cloud_sync.view.pending_preview.as_ref() {
                 self.render_cloud_sync_preview(
                     preview,
                     state,
                     cloud_sync.view.preview_selection.as_ref(),
+                    local_file_mode,
                     busy,
                     cx,
                 )
@@ -98,6 +111,7 @@ impl CloudSyncPageRenderer {
                     preview,
                     state,
                     cloud_sync.view.upload_selection.as_ref(),
+                    local_file_mode,
                     busy,
                     cx,
                 )
@@ -112,6 +126,7 @@ impl CloudSyncPageRenderer {
         preview: &CloudSyncPendingPreview,
         state: &CloudSyncPersistedState,
         current_selection: Option<&CloudSyncPreviewSelection>,
+        local_file_mode: bool,
         busy: bool,
         cx: &mut App,
     ) -> AnyElement {
@@ -179,7 +194,7 @@ impl CloudSyncPageRenderer {
                 }
             });
         }
-        let force_upload_available = !self.cloud_sync.read(cx).view.local_file_mode
+        let force_upload_available = !local_file_mode
             && (state.auto_upload_blocked_by_conflict
                 || state.conflict_details.is_some()
                 || state.status == CloudSyncStatus::Conflict);
@@ -230,6 +245,7 @@ impl CloudSyncPageRenderer {
         remote_preview: &CloudSyncPendingPreview,
         state: &CloudSyncPersistedState,
         upload_selection: Option<&CloudSyncUploadSelection>,
+        local_file_mode: bool,
         busy: bool,
         cx: &mut App,
     ) -> AnyElement {
@@ -238,12 +254,11 @@ impl CloudSyncPageRenderer {
             SelectableTextRole::NonSelectable,
             "cloud-sync-upload-preview-title",
             "upload",
-            self.i18n
-                .t(if self.cloud_sync.read(cx).view.local_file_mode {
-                    "plugin.cloud_sync.sections.export_preview"
-                } else {
-                    "plugin.cloud_sync.sections.upload_preview"
-                }),
+            self.i18n.t(if local_file_mode {
+                "plugin.cloud_sync.sections.export_preview"
+            } else {
+                "plugin.cloud_sync.sections.upload_preview"
+            }),
             theme.text_heading,
             cx,
         );
@@ -293,12 +308,12 @@ impl CloudSyncPageRenderer {
                 ),
             ])]
         };
-        let force_upload_available = !self.cloud_sync.read(cx).view.local_file_mode
+        let force_upload_available = !local_file_mode
             && (state.auto_upload_blocked_by_conflict
                 || state.conflict_details.is_some()
                 || state.status == CloudSyncStatus::Conflict);
         let mut actions = vec![self.render_cloud_sync_action_button(
-            if self.cloud_sync.read(cx).view.local_file_mode {
+            if local_file_mode {
                 "plugin.cloud_sync.actions.export_local"
             } else {
                 "plugin.cloud_sync.actions.upload_now"
@@ -432,7 +447,8 @@ impl CloudSyncPageRenderer {
         for (index, (owner, (stored, cleared))) in owners.into_iter().enumerate() {
             use oxideterm_connections::CredentialOwner;
             let fallback = match &owner {
-                CredentialOwner::Connection(id)
+                CredentialOwner::Totp(id)
+                | CredentialOwner::Connection(id)
                 | CredentialOwner::StandaloneSftp(id)
                 | CredentialOwner::Mosh(id)
                 | CredentialOwner::RemoteDesktop(id)
@@ -442,6 +458,11 @@ impl CloudSyncPageRenderer {
             };
             let name = if let CloudSyncPendingPreview::Structured(preview) = preview {
                 match &owner {
+                    CredentialOwner::Totp(id) => preview
+                        .connections_snapshot
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.totp_credentials.iter().find(|p| &p.id == id))
+                        .map(|p| p.name.clone()),
                     CredentialOwner::Connection(id) => preview
                         .connections_snapshot
                         .as_ref()
@@ -715,7 +736,7 @@ impl WorkspaceApp {
             true,
             portable_secret_count,
         );
-        Some(self.i18n_replace(
+        let summary = self.i18n_replace(
             "plugin.cloud_sync.preview.sensitive_upload_summary",
             &[
                 (
@@ -733,7 +754,26 @@ impl WorkspaceApp {
                     preflight.portable_secret_count.to_string(),
                 ),
             ],
-        ))
+        );
+        let common_count = if selection.sync_connections
+            && selection.selected_connection_ids.is_none()
+        {
+            self.connection_store
+                .list_privilege_credentials(oxideterm_connections::SSH_COMMON_PRIVILEGE_SCOPE_ID)
+                .map(|credentials| credentials.len())
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        Some(if common_count > 0 {
+            format!(
+                "{summary}\n{}: {common_count}",
+                self.i18n
+                    .t("settings_view.privilege_credentials.ssh_common_scope")
+            )
+        } else {
+            summary
+        })
     }
 }
 

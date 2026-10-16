@@ -32,7 +32,7 @@ use oxideterm_cloud_sync::{
 use oxideterm_connections::{
     ConnectionStore,
     oxide_file::{
-        ImportConflictStrategy, OxideExportOptions, OxideFile, OxideForwardRecord,
+        ImportConflictStrategy, OxideExportOptions, OxideForwardRecord,
         preview_oxide_import_with_progress,
     },
 };
@@ -51,6 +51,11 @@ use crate::{
 
 #[derive(Debug)]
 pub enum CloudSyncDelivery {
+    CausalPrepared {
+        action: CloudSyncActionResult<oxideterm_cloud_sync::operation::PreparedSync>,
+        automatic: bool,
+    },
+    CausalFinished(CloudSyncActionResult<oxideterm_cloud_sync::operation::SyncOutcome>),
     Progress(CloudSyncProgress),
     RollbackBackupCreated(CloudSyncRollbackBackup),
     CheckFinished(CloudSyncActionResult<Option<oxideterm_cloud_sync::backend::RemoteMetadata>>),
@@ -68,6 +73,47 @@ pub enum CloudSyncDelivery {
     MicrosoftOauthFinished(CloudSyncActionResult<()>),
     GoogleOauthUrl(CloudSyncOauthBrowserPrompt),
     GoogleOauthFinished(CloudSyncActionResult<()>),
+}
+
+pub async fn deliver_causal_sync(
+    tx: impl CloudSyncDeliverySink,
+    service: CloudSyncOperationService,
+    mut connections: ConnectionStore,
+    forwards: ForwardingRegistry,
+    mut settings_store: SettingsStore,
+    settings: CloudSyncSettings,
+    hints: BTreeMap<String, bool>,
+    scope: oxideterm_cloud_sync::SyncScope,
+    filter: oxideterm_cloud_sync::operation::StructuredUploadItemFilter,
+    automatic: bool,
+    direction: oxideterm_cloud_sync::operation::SyncDirection,
+) {
+    let mut provider = CloudSyncKeychainSecretProvider::new(hints);
+    let result = service
+        .prepare_sync_with_direction(
+            &mut connections,
+            &forwards,
+            &mut settings_store,
+            &settings,
+            &mut provider,
+            scope,
+            filter,
+            // The GUI offers directional previews, so it needs the complete remote view.
+            oxideterm_cloud_sync::operation::SyncDirection::Download,
+        )
+        .await
+        .map(|mut prepared| {
+            prepared.set_direction(direction);
+            prepared
+        })
+        .map_err(|error| error.to_string());
+    let _ = tx.send(CloudSyncDelivery::CausalPrepared {
+        action: CloudSyncActionResult {
+            result,
+            secret_hints: provider.hints().clone(),
+        },
+        automatic,
+    });
 }
 
 /// Sends Cloud Sync worker results without prescribing how the UI is woken.
@@ -1132,6 +1178,7 @@ mod tests {
             remote_metadata: Default::default(),
             manifest,
             connections_snapshot: Some(SavedConnectionsSyncSnapshot {
+                totp_credentials: Vec::new(),
                 local_terminal_profiles: Vec::new(),
                 local_terminal_tombstones: Vec::new(),
                 revision: "empty-connections".to_string(),
@@ -1224,9 +1271,6 @@ fn preview_cloud_sync_rollback_backup(
     progress: Option<&mut dyn CloudSyncProgressSink>,
 ) -> anyhow::Result<LegacyPreview> {
     let bytes = BASE64.decode(backup.bytes_base64.as_bytes())?;
-    let metadata = OxideFile::from_bytes(&bytes)
-        .map_err(|error| anyhow::anyhow!(error.to_string()))?
-        .metadata;
     let mut noop = |_| {};
     let progress = progress.unwrap_or(&mut noop);
     let preview = preview_oxide_import_with_progress(
@@ -1249,6 +1293,7 @@ fn preview_cloud_sync_rollback_backup(
         },
     )
     .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let metadata = preview.metadata.clone();
     Ok(LegacyPreview {
         remote_metadata: oxideterm_cloud_sync::backend::RemoteMetadata::default(),
         bytes,
@@ -1338,9 +1383,6 @@ fn create_cloud_sync_rollback_backup(
             MAX_ROLLBACK_BACKUP_BYTES
         );
     }
-    let metadata = OxideFile::from_bytes(&bytes)
-        .map_err(|error| anyhow::anyhow!(error.to_string()))?
-        .metadata;
     let preview = preview_oxide_import_with_progress(
         connection_store,
         &bytes,
@@ -1349,6 +1391,7 @@ fn create_cloud_sync_rollback_backup(
         |_stage, _current, _total| {},
     )
     .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let metadata = preview.metadata.clone();
     Ok(Some(CloudSyncRollbackBackup {
         id: uuid::Uuid::new_v4().to_string(),
         created_at: Utc::now().to_rfc3339(),

@@ -91,6 +91,8 @@ bitflags! {
         const REPORT_ALTERNATE_KEYS   = 1 << 20;
         const REPORT_ALL_KEYS_AS_ESC  = 1 << 21;
         const REPORT_ASSOCIATED_TEXT  = 1 << 22;
+        const REPORT_COLOR_SCHEME     = 1 << 23;
+        const WIN32_INPUT             = 1 << 24;
         const MOUSE_MODE              = Self::MOUSE_REPORT_CLICK.bits() | Self::MOUSE_MOTION.bits() | Self::MOUSE_DRAG.bits();
         const KITTY_KEYBOARD_PROTOCOL = Self::DISAMBIGUATE_ESC_CODES.bits()
                                       | Self::REPORT_EVENT_TYPES.bits()
@@ -530,8 +532,9 @@ impl<T> Term<T> {
         self.damage.reset(self.columns());
     }
 
+    /// Forces the next damage query to report the full viewport, e.g. after palette changes.
     #[inline]
-    fn mark_fully_damaged(&mut self) {
+    pub fn mark_fully_damaged(&mut self) {
         self.damage.full = true;
     }
 
@@ -698,6 +701,29 @@ impl<T> Term<T> {
     /// Mutable access to the raw grid data structure.
     pub fn grid_mut(&mut self) -> &mut Grid<Cell> {
         &mut self.grid
+    }
+
+    /// Start a new shell's modes without erasing the preceding session's output.
+    pub fn reset_session_preserving_history(&mut self)
+    where
+        T: EventListener,
+    {
+        if self.mode.contains(TermMode::ALT_SCREEN) {
+            self.swap_alt();
+        }
+        let empty = Grid::new(self.screen_lines(), self.columns(), 0);
+        let mut grid = mem::replace(&mut self.grid, empty);
+        self.reset_state();
+        grid.cursor.template = Cell::default();
+        grid.cursor.charsets = Default::default();
+        grid.cursor.input_needs_wrap = false;
+        grid.saved_cursor = grid.cursor.clone();
+        self.grid = grid;
+        // Login screens may move to the origin before drawing. Archive the old viewport first.
+        self.grid.clear_viewport();
+        self.grid.cursor.point = Point::default();
+        self.grid.saved_cursor = self.grid.cursor.clone();
+        self.mark_fully_damaged();
     }
 
     /// Resize terminal to new dimensions.
@@ -1092,6 +1118,15 @@ impl<T> Term<T> {
         };
         trace!("Setting keyboard mode to {new_mode:?}");
         self.mode |= new_mode;
+    }
+}
+
+impl<T: EventListener> Term<T> {
+    /// Only host palette changes notify subscribers; application OSC changes do not.
+    pub fn notify_palette_changed(&mut self) {
+        if self.mode.contains(TermMode::REPORT_COLOR_SCHEME) {
+            self.private_device_status(996);
+        }
     }
 }
 
@@ -1550,6 +1585,13 @@ impl<T: EventListener> Handler for Term<T> {
             },
             _ => debug!("unknown device status query: {arg}"),
         };
+    }
+
+    #[inline]
+    fn private_device_status(&mut self, arg: usize) {
+        if arg == 996 {
+            self.event_proxy.send_event(Event::ColorSchemeRequest);
+        }
     }
 
     #[inline]
@@ -2175,6 +2217,8 @@ impl<T: EventListener> Handler for Term<T> {
             },
             NamedPrivateMode::ReportFocusInOut => self.mode.insert(TermMode::FOCUS_IN_OUT),
             NamedPrivateMode::BracketedPaste => self.mode.insert(TermMode::BRACKETED_PASTE),
+            NamedPrivateMode::ReportColorScheme => self.mode.insert(TermMode::REPORT_COLOR_SCHEME),
+            NamedPrivateMode::Win32Input => self.mode.insert(TermMode::WIN32_INPUT),
             // Mouse encodings are mutually exclusive.
             NamedPrivateMode::SgrMouse => {
                 self.mode.remove(TermMode::UTF8_MOUSE);
@@ -2234,6 +2278,8 @@ impl<T: EventListener> Handler for Term<T> {
             },
             NamedPrivateMode::ReportFocusInOut => self.mode.remove(TermMode::FOCUS_IN_OUT),
             NamedPrivateMode::BracketedPaste => self.mode.remove(TermMode::BRACKETED_PASTE),
+            NamedPrivateMode::ReportColorScheme => self.mode.remove(TermMode::REPORT_COLOR_SCHEME),
+            NamedPrivateMode::Win32Input => self.mode.remove(TermMode::WIN32_INPUT),
             NamedPrivateMode::SgrMouse => self.mode.remove(TermMode::SGR_MOUSE),
             NamedPrivateMode::Utf8Mouse => self.mode.remove(TermMode::UTF8_MOUSE),
             NamedPrivateMode::AlternateScroll => self.mode.remove(TermMode::ALTERNATE_SCROLL),
@@ -2289,7 +2335,11 @@ impl<T: EventListener> Handler for Term<T> {
                     self.mode.contains(TermMode::BRACKETED_PASTE).into()
                 },
                 NamedPrivateMode::SyncUpdate => ModeState::Reset,
+                NamedPrivateMode::ReportColorScheme => {
+                    self.mode.contains(TermMode::REPORT_COLOR_SCHEME).into()
+                },
                 NamedPrivateMode::ColumnMode => ModeState::NotSupported,
+                NamedPrivateMode::Win32Input => self.mode.contains(TermMode::WIN32_INPUT).into(),
             },
             PrivateMode::Unknown(_) => ModeState::NotSupported,
         };
@@ -2724,6 +2774,27 @@ mod tests {
     use crate::term::cell::{Cell, Flags};
     use crate::term::test::TermSize;
     use crate::vte::ansi::{self, CharsetIndex, Handler, StandardCharset};
+
+    #[test]
+    fn win32_input_mode_negotiates_reports_and_resets() {
+        struct Replies(std::cell::RefCell<Vec<String>>);
+        impl EventListener for Replies {
+            fn send_event(&self, event: Event) {
+                if let Event::PtyWrite(reply) = event {
+                    self.0.borrow_mut().push(reply);
+                }
+            }
+        }
+        let mut term = Term::new(Config::default(), &TermSize::new(80, 24), Replies(Default::default()));
+        let mut parser = ansi::Processor::<ansi::StdSyncHandler>::new();
+        parser.advance(&mut term, b"\x1b[?9001$p\x1b[?9001h\x1b[?9001$p");
+        assert!(term.mode().contains(TermMode::WIN32_INPUT));
+        parser.advance(&mut term, b"\x1b[?9001l\x1b[?9001$p");
+        assert!(!term.mode().contains(TermMode::WIN32_INPUT));
+        parser.advance(&mut term, b"\x1b[?9001h\x1bc\x1b[?9001$p");
+        assert!(!term.mode().contains(TermMode::WIN32_INPUT));
+        assert_eq!(*term.event_proxy.0.borrow(), ["\x1b[?9001;2$y", "\x1b[?9001;1$y", "\x1b[?9001;2$y", "\x1b[?9001;2$y"]);
+    }
 
     fn assert_batch_input_matches_scalar(
         size: &TermSize,

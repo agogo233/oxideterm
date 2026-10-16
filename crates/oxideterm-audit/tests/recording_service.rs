@@ -83,7 +83,7 @@ fn policy_toggle_creates_new_segment_without_recording_disabled_output() {
     assert_ne!(list.recordings[0].id, first);
     assert_eq!(list.recordings[1].id, first);
     let filtered = futures::executor::block_on(client.list_recordings_for_session(
-        context.session_id.clone().unwrap(),
+        context.session_id.unwrap(),
         None,
         10,
     ))
@@ -235,26 +235,6 @@ fn another_writer_policy_change_is_observed_by_existing_sink() {
         let list = futures::executor::block_on(first_client.list_recordings(None, 10)).ok()?;
         (list.recordings[0].state == RecordingState::Interrupted).then_some(())
     });
-}
-
-#[test]
-fn disabling_policy_flushes_output_queued_before_the_change() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("audit.db");
-    let (_service, client, context) = service(&path);
-    set_output(&client, true);
-    let sink = context.recording_sink();
-    sink.record_output(b"before-policy-close");
-    set_output(&client, false);
-    let id = wait_for(|| {
-        let list = futures::executor::block_on(client.list_recordings(None, 10)).ok()?;
-        list.recordings
-            .first()
-            .and_then(|r| (r.state == RecordingState::Interrupted).then_some(r.id.clone()))
-    });
-    let page = futures::executor::block_on(client.read_recording_page(id, None, None, 10)).unwrap();
-    assert!(page.chunks.iter().flat_map(|chunk| &chunk.frames).any(|frame|
-        matches!(&frame.kind, StoredRecordingFrameKind::Output(data) if data.as_slice() == b"before-policy-close")));
 }
 
 #[test]

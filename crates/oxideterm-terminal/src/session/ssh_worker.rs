@@ -654,6 +654,31 @@ fn event_bytes(event: &TerminalEvent) -> usize {
 }
 
 impl TerminalSessionBackend for SshPtySession {
+    fn reconnect_ssh(&mut self, config: SshSessionConfig) -> Result<()> {
+        let shared = Arc::downgrade(&self.shared);
+        self.enqueue(0, move |core| {
+            core.reconnect(config)?;
+            if let Some(shared) = shared.upgrade() {
+                // Output sequence numbers start over for the new channel. Queued UI controls
+                // must not wait for an output boundary belonging to the preceding shell.
+                shared
+                    .output_boundary
+                    .lock()
+                    .expect("SSH output boundary")
+                    .take();
+                shared
+                    .output_cancel
+                    .lock()
+                    .expect("SSH output cancellation")
+                    .take();
+                for control in &mut shared.controls.lock().expect("SSH parser controls").queue {
+                    control.boundary = 0;
+                }
+            }
+            Ok(())
+        })
+    }
+
     fn kind(&self) -> TerminalSessionKind {
         self.shared.core.lock().kind()
     }
@@ -714,6 +739,15 @@ impl TerminalSessionBackend for SshPtySession {
     fn set_encoding(&mut self, encoding: TerminalEncoding) {
         self.enqueue_control(0, move |core| {
             core.set_encoding(encoding);
+            Ok(())
+        });
+    }
+
+    fn set_palette(&mut self, palette: TerminalPalette) {
+        // The worker publishes damage and wakes the UI after applying the palette;
+        // the UI must remain free to draw its previous snapshot while parsing is busy.
+        self.enqueue_control(0, move |core| {
+            core.set_palette(palette);
             Ok(())
         });
     }

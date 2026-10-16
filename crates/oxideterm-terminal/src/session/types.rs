@@ -137,10 +137,15 @@ pub trait TerminalSessionBackend: Send {
     fn activity_receiver(&self) -> TerminalActivityReceiver;
     fn take_events(&mut self) -> Vec<TerminalEvent>;
     fn write_input(&mut self, bytes: &[u8]) -> Result<()>;
+    fn reconnect_ssh(&mut self, _config: SshSessionConfig) -> Result<()> {
+        bail!("Only SSH terminals support this reconnect operation")
+    }
     fn write_protocol_bytes(&mut self, bytes: &[u8]) -> Result<()>;
     fn write_text(&mut self, text: &str) -> Result<()>;
     fn paste_text(&mut self, text: &str) -> Result<()>;
     fn set_encoding(&mut self, encoding: TerminalEncoding);
+    /// Replaces the colors used for ANSI/default cells and color-query replies.
+    fn set_palette(&mut self, palette: TerminalPalette);
     fn set_output_processor(&mut self, _processor: Option<TerminalOutputProcessor>) {}
     fn set_output_events_enabled(&mut self, _enabled: bool) {}
     fn set_trigger_rules(

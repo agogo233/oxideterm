@@ -21,6 +21,35 @@ const BACKGROUND_SCOPE_OPTIONS: [(BackgroundScope, &str); 2] = [
     ),
 ];
 
+// Persisted opacity keeps 0.1% steps so the slider's expanded near-opaque
+// range is not collapsed back into whole-percent jumps.
+const WINDOW_OPACITY_STEPS_PER_UNIT: f64 = 1000.0;
+
+/// Maps window opacity to slider travel in `0.0..=1.0`.
+///
+/// Compositors blend window alpha linearly, but on a dark theme over bright
+/// content the first few percent of transparency are already very visible.
+/// Travel is quadratic in transparency so most of the slider covers the
+/// near-opaque range.
+fn window_opacity_slider_position(opacity: f64) -> f32 {
+    let transparency = ((MAX_WINDOW_OPACITY - opacity) / (MAX_WINDOW_OPACITY - MIN_WINDOW_OPACITY))
+        .clamp(0.0, 1.0);
+    (1.0 - transparency.sqrt()) as f32
+}
+
+pub(super) fn window_opacity_from_slider_position(position: f32) -> f64 {
+    let travel_from_opaque = 1.0 - f64::from(position.clamp(0.0, 1.0));
+    let opacity =
+        MAX_WINDOW_OPACITY - (MAX_WINDOW_OPACITY - MIN_WINDOW_OPACITY) * travel_from_opaque.powi(2);
+    (opacity * WINDOW_OPACITY_STEPS_PER_UNIT).round() / WINDOW_OPACITY_STEPS_PER_UNIT
+}
+
+fn window_opacity_label(opacity: f64) -> String {
+    let percent = format!("{:.1}", opacity * SETTINGS_PERCENT_SCALE);
+    let percent = percent.strip_suffix(".0").unwrap_or(&percent);
+    format!("{percent}%")
+}
+
 fn background_scope_index(scope: BackgroundScope) -> usize {
     BACKGROUND_SCOPE_OPTIONS
         .iter()
@@ -72,7 +101,7 @@ impl WorkspaceApp {
             0 => self.appearance_theme_card(settings, cx),
             1 => self.appearance_layout_card(settings, cx),
             2 => self.appearance_effects_card(settings, cx),
-            3 => self.appearance_background_card(settings, cx),
+            3 => self.appearance_background_card(&self.background_settings_for_controls(cx), cx),
             4 => self.appearance_app_icon_card(settings, cx),
             _ => div().into_any_element(),
         }
@@ -83,57 +112,225 @@ impl WorkspaceApp {
         settings: &PersistedSettings,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        self.appearance_card(
-            self.i18n.t("settings_view.appearance.theme"),
-            Some(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(8.0))
-                    .child(self.appearance_action_button(
-                        LucideIcon::Upload,
-                        self.i18n.t("settings_view.appearance.theme_import"),
-                        cx.listener(|this, _event, _window, cx| {
-                            this.import_theme_from_file(cx);
-                            cx.stop_propagation();
-                        }),
-                    ))
-                    .when(is_custom_theme_id(&settings.terminal.theme), |actions| {
-                        actions.child(self.appearance_action_button(
-                            LucideIcon::Pencil,
-                            self.i18n.t("settings_view.custom_theme.edit"),
-                            cx.listener(|this, _event, _window, cx| {
-                                let theme_id =
-                                    this.settings_store.settings().terminal.theme.clone();
-                                this.open_theme_editor(Some(theme_id), cx);
-                                cx.stop_propagation();
-                            }),
-                        ))
-                    })
-                    .child(self.appearance_action_button(
-                        LucideIcon::Plus,
-                        self.i18n.t("settings_view.custom_theme.create"),
-                        cx.listener(|this, _event, _window, cx| {
-                            this.open_theme_editor(None, cx);
-                            cx.stop_propagation();
-                        }),
-                    ))
-                    .into_any_element(),
-            ),
-            vec![
-                self.appearance_row(
-                    "settings_view.appearance.color_theme",
-                    "settings_view.appearance.color_theme_hint",
-                    self.appearance_select_control(
-                        SettingsSelect::AppearanceTheme,
-                        custom_theme_display_name(settings, &settings.terminal.theme),
-                        self.tokens.metrics.settings_select_width,
-                        cx,
+        let mut rows = self.appearance_theme_controls(settings, cx);
+        rows.push(self.appearance_theme_preview(settings, cx));
+        self.appearance_card(self.i18n.t("settings_view.appearance.theme"), None, rows)
+    }
+
+    pub(in crate::workspace) fn appearance_theme_controls(
+        &self,
+        settings: &PersistedSettings,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let follow = settings.appearance.follow_system_appearance;
+        let mut rows = vec![
+            div()
+                .w_full()
+                .flex()
+                .flex_col()
+                .child(
+                    self.appearance_row(
+                        "settings_view.appearance.follow_system",
+                        "settings_view.appearance.follow_system_hint",
+                        checkbox(&self.tokens, String::new(), follow)
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, _, cx| {
+                                    this.close_settings_select();
+                                    this.blur_text_inputs(cx);
+                                    this.finish_settings_slider_drag(cx);
+                                    this.settings_workspace.update(cx, |settings, cx| {
+                                        settings.finish_background_blur_drag(cx)
+                                    });
+                                    this.appearance_edit_dark =
+                                        (!follow).then_some(this.system_dark);
+                                    this.edit_settings(
+                                        |settings| {
+                                            if !follow {
+                                                let style = settings.terminal.background_style();
+                                                settings
+                                                    .terminal
+                                                    .system_backgrounds
+                                                    .light
+                                                    .get_or_insert_with(|| style.clone());
+                                                settings
+                                                    .terminal
+                                                    .system_backgrounds
+                                                    .dark
+                                                    .get_or_insert(style);
+                                            }
+                                            settings.appearance.follow_system_appearance = !follow;
+                                        },
+                                        cx,
+                                    );
+                                    cx.stop_propagation();
+                                }),
+                            )
+                            .into_any_element(),
                     ),
+                )
+                .child(oxideterm_gpui_ui::motion::auto_height(
+                    &self.tokens,
+                    "theme-scheme-reveal",
+                    follow.then(|| {
+                        div()
+                            .pt(px(self.tokens.spacing.three))
+                            .child(self.appearance_scheme_control("theme-scheme", cx))
+                            .into_any_element()
+                    }),
+                ))
+                .into_any_element(),
+        ];
+        rows.extend([
+            self.appearance_theme_target_row(settings, ThemeTarget::Application, cx),
+            self.appearance_theme_target_row(settings, ThemeTarget::Terminal, cx),
+        ]);
+        rows
+    }
+
+    fn appearance_scheme_control(&self, id: &'static str, cx: &mut Context<Self>) -> AnyElement {
+        let selected = self.appearance_edit_scheme().unwrap_or(self.system_dark);
+        let system_key = if self.system_dark {
+            "settings_view.appearance.system_dark"
+        } else {
+            "settings_view.appearance.system_light"
+        };
+        div()
+            .id(id)
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(px(self.tokens.spacing.two))
+            .child(
+                div()
+                    .text_size(px(self.tokens.metrics.ui_text_xs))
+                    .text_color(rgb(self.tokens.ui.text_muted))
+                    .child(
+                        self.i18n
+                            .t("settings_view.appearance.system_current_scheme")
+                            .replace("{{scheme}}", &self.i18n.t(system_key)),
+                    ),
+            )
+            .child(
+                div().flex().gap(px(self.tokens.spacing.two)).children(
+                    [
+                        (false, "settings_view.appearance.system_light"),
+                        (true, "settings_view.appearance.system_dark"),
+                    ]
+                    .map(|(dark, key)| {
+                        oxideterm_gpui_ui::tabs::tabs_trigger(
+                            &self.tokens,
+                            self.i18n.t(key),
+                            selected == dark,
+                        )
+                        .id(("appearance-scheme", u64::from(dark)))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.close_settings_select();
+                            this.blur_text_inputs(cx);
+                            this.finish_settings_slider_drag(cx);
+                            this.appearance_edit_dark = Some(dark);
+                            cx.notify();
+                            cx.stop_propagation();
+                        }))
+                    }),
                 ),
-                self.appearance_theme_preview(settings),
-            ],
+            )
+            .child(
+                div()
+                    .text_size(px(self.tokens.metrics.ui_text_xs))
+                    .text_color(rgb(self.tokens.ui.text_muted))
+                    .child(self.i18n.t("settings_view.appearance.scheme_edit_hint")),
+            )
+            .into_any_element()
+    }
+
+    fn appearance_theme_target_row(
+        &self,
+        settings: &PersistedSettings,
+        target: ThemeTarget,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (title_key, hint_key, select) = match target {
+            ThemeTarget::Application => (
+                "settings_view.appearance.application_theme",
+                "settings_view.appearance.application_theme_hint",
+                SettingsSelect::AppearanceTheme,
+            ),
+            ThemeTarget::Terminal => (
+                "settings_view.appearance.terminal_theme",
+                "settings_view.appearance.color_theme_hint",
+                SettingsSelect::AppearanceTerminalTheme,
+            ),
+        };
+        let scheme = self.appearance_edit_scheme();
+        let selected_id = target.resolved_id(settings, scheme.unwrap_or(self.system_dark));
+        let select = match (target, scheme) {
+            (ThemeTarget::Application, Some(false)) => SettingsSelect::AppearanceThemeLight,
+            (ThemeTarget::Application, Some(true)) => SettingsSelect::AppearanceThemeDark,
+            (ThemeTarget::Terminal, Some(false)) => SettingsSelect::AppearanceTerminalThemeLight,
+            (ThemeTarget::Terminal, Some(true)) => SettingsSelect::AppearanceTerminalThemeDark,
+            (_, None) => select,
+        };
+        self.appearance_row(
+            title_key,
+            hint_key,
+            div()
+                .w(px(self.tokens.metrics.settings_select_width))
+                .flex_none()
+                .flex()
+                .flex_col()
+                .items_end()
+                .gap(px(self.tokens.spacing.two))
+                .child(self.appearance_select_control(
+                    select,
+                    custom_theme_display_name(settings, selected_id),
+                    self.tokens.metrics.settings_select_width,
+                    cx,
+                ))
+                .when(!self.onboarding.open, |control| {
+                    control.child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .flex_wrap()
+                            .justify_end()
+                            .items_center()
+                            .gap(px(self.tokens.spacing.two))
+                            .child(self.appearance_action_button(
+                                LucideIcon::Upload,
+                                self.i18n.t("settings_view.appearance.theme_import"),
+                                cx.listener(move |this, _, _, cx| {
+                                    this.import_theme_from_file(target, cx);
+                                    cx.stop_propagation();
+                                }),
+                            ))
+                            .when(is_custom_theme_id(selected_id), |actions| {
+                                actions.child(self.appearance_action_button(
+                                    LucideIcon::Pencil,
+                                    self.i18n.t("settings_view.custom_theme.edit"),
+                                    cx.listener(move |this, _, _, cx| {
+                                        let dark = this
+                                            .appearance_edit_scheme()
+                                            .unwrap_or(this.system_dark);
+                                        let id = target
+                                            .resolved_id(this.settings_store.settings(), dark)
+                                            .to_string();
+                                        this.open_theme_editor(target, Some(id), cx);
+                                        cx.stop_propagation();
+                                    }),
+                                ))
+                            })
+                            .child(self.appearance_action_button(
+                                LucideIcon::Plus,
+                                self.i18n.t("settings_view.custom_theme.create"),
+                                cx.listener(move |this, _, _, cx| {
+                                    this.open_theme_editor(target, None, cx);
+                                    cx.stop_propagation();
+                                }),
+                            )),
+                    )
+                })
+                .into_any_element(),
         )
     }
 
@@ -206,14 +403,13 @@ impl WorkspaceApp {
                 self.appearance_row(
                     "settings_view.appearance.window_opacity",
                     "settings_view.appearance.window_opacity_hint",
-                    self.appearance_slider_value_control(
+                    self.appearance_slider_labeled_control(
                         SettingsSlider::AppearanceWindowOpacity,
                         SelectAnchorId::SettingsAppearanceWindowOpacitySlider,
-                        (MIN_WINDOW_OPACITY * SETTINGS_PERCENT_SCALE) as f32,
-                        (MAX_WINDOW_OPACITY * SETTINGS_PERCENT_SCALE) as f32,
-                        (settings.appearance.window_opacity * SETTINGS_PERCENT_SCALE).round()
-                            as f32,
-                        "%",
+                        0.0,
+                        1.0,
+                        window_opacity_slider_position(settings.appearance.window_opacity),
+                        window_opacity_label(settings.appearance.window_opacity),
                         cx,
                     ),
                 ),
@@ -335,14 +531,13 @@ impl WorkspaceApp {
         selected: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let icon_path = crate::app_icon::app_icon_variant_resource_path(variant);
         let border_color = if selected {
             self.tokens.ui.accent
         } else {
             self.tokens.ui.border
         };
-        let image = img(icon_path)
-            .size(px(42.0))
+        let image = img(crate::app_icon::app_icon_preview_source(variant))
+            .size(px(crate::app_icon::APP_ICON_PREVIEW_SIZE))
             .object_fit(ObjectFit::Contain)
             .rounded(px(self.tokens.radii.md));
 
@@ -394,32 +589,46 @@ impl WorkspaceApp {
         settings: &PersistedSettings,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let background_blur = self
-            .settings_workspace
-            .read(cx)
-            .background_blur_preview()
-            .unwrap_or(settings.terminal.background_blur);
-        let has_background_image = settings.terminal.background_image.is_some();
+        let terminal = &settings.terminal;
+        let editor_open = self.settings_workspace.read(cx).theme_editor().is_some();
+        let has_background =
+            terminal.background_image.is_some() || terminal.background_effect.is_some();
+        let animated_media = self.settings_workspace.update(cx, |entity, cx| {
+            entity.background_media_is_animated(terminal.background_image.as_deref(), cx)
+        });
         let mut rows = Vec::new();
-        if has_background_image {
-            // Tauri only shows the master enable checkbox after an image exists.
-            // Keep the same conditional layout so the empty gallery card does not
-            // reserve controls that the browser version hides.
-            rows.push(self.appearance_checkbox_row(
-                "settings_view.terminal.bg_enabled",
-                "settings_view.terminal.bg_enabled_hint",
-                settings.terminal.background_enabled,
-                set_terminal_background_enabled,
-                cx,
-            ));
+        if !editor_open {
+            if settings.appearance.follow_system_appearance {
+                rows.push(self.appearance_scheme_control("background-scheme", cx));
+            }
+            let preview = self.settings_workspace.read(cx).background_preview.clone();
+            rows.push(self.appearance_preview(self.settings_store.settings(), preview, cx));
+        }
+        if has_background {
+            let enabled = terminal.background_enabled;
+            rows.push(
+                self.appearance_row(
+                    "settings_view.terminal.bg_enabled",
+                    "settings_view.terminal.bg_enabled_hint",
+                    checkbox(&self.tokens, String::new(), enabled)
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, _, cx| {
+                                this.edit_background_style(|style| style.enabled = !enabled, cx);
+                                cx.stop_propagation();
+                            }),
+                        )
+                        .into_any_element(),
+                ),
+            );
         }
         rows.push(self.appearance_background_image_slot(settings, cx));
-        if has_background_image {
-            rows.push(self.appearance_row(
-                "settings_view.terminal.bg_scope",
-                "settings_view.terminal.bg_scope_hint",
-                self.appearance_background_scope_control(settings.terminal.background_scope, cx),
-            ));
+        if terminal.background_image.is_some() {
+            let blur = self
+                .settings_workspace
+                .read(cx)
+                .background_blur_preview(self.appearance_edit_scheme())
+                .unwrap_or(terminal.background_blur);
             rows.extend([
                 self.appearance_row(
                     "settings_view.terminal.bg_opacity",
@@ -429,8 +638,7 @@ impl WorkspaceApp {
                         SelectAnchorId::SettingsAppearanceBackgroundOpacitySlider,
                         (MIN_TERMINAL_BACKGROUND_OPACITY * SETTINGS_PERCENT_SCALE) as f32,
                         (MAX_TERMINAL_BACKGROUND_OPACITY * SETTINGS_PERCENT_SCALE) as f32,
-                        (settings.terminal.background_opacity * SETTINGS_PERCENT_SCALE).round()
-                            as f32,
+                        (terminal.background_opacity * SETTINGS_PERCENT_SCALE).round() as f32,
                         "%",
                         cx,
                     ),
@@ -443,7 +651,7 @@ impl WorkspaceApp {
                         SelectAnchorId::SettingsAppearanceBackgroundBlurSlider,
                         0.0,
                         20.0,
-                        background_blur as f32,
+                        blur as f32,
                         "px",
                         cx,
                     ),
@@ -453,13 +661,151 @@ impl WorkspaceApp {
                     "settings_view.terminal.bg_fit_hint",
                     self.appearance_select_control(
                         SettingsSelect::AppearanceBackgroundFit,
-                        background_fit_label(settings.terminal.background_fit, &self.i18n),
+                        background_fit_label(terminal.background_fit, &self.i18n),
                         self.tokens.metrics.settings_appearance_fit_select_width,
                         cx,
                     ),
                 ),
+                self.appearance_background_alignment_control(terminal.background_alignment, cx),
             ]);
-            if settings.terminal.background_scope == BackgroundScope::Content {
+            for (input, key, hint, value) in [
+                (
+                    SettingsInput::BackgroundMaxWidth,
+                    "bg_max_width",
+                    "bg_dimensions_hint",
+                    terminal.background_max_width,
+                ),
+                (
+                    SettingsInput::BackgroundMaxHeight,
+                    "bg_max_height",
+                    "bg_dimensions_hint",
+                    terminal.background_max_height,
+                ),
+                (
+                    SettingsInput::BackgroundMaxFps,
+                    "bg_max_fps",
+                    "bg_media_fps_hint",
+                    terminal.background_max_fps,
+                ),
+            ]
+            .into_iter()
+            .filter(|(input, _, _, _)| animated_media || *input != SettingsInput::BackgroundMaxFps)
+            {
+                rows.push(self.appearance_row(
+                    &format!("settings_view.terminal.{key}"),
+                    &format!("settings_view.terminal.{hint}"),
+                    self.appearance_text_input_control(
+                        input,
+                        value.map(|value| value.to_string()).unwrap_or_default(),
+                        self.i18n.t("settings_view.terminal.bg_auto"),
+                        112.0,
+                        cx,
+                    ),
+                ));
+            }
+        }
+        rows.push(separator(&self.tokens, SeparatorOrientation::Horizontal).into_any_element());
+        rows.push(settings_appearance_card_title(
+            &self.tokens,
+            self.i18n.t("settings_view.terminal.bg_effects"),
+            None,
+        ));
+        use oxideterm_settings::GeneratedBackgroundKind;
+        rows.push(
+            div()
+                .flex()
+                .flex_wrap()
+                .gap(px(self.tokens.spacing.two))
+                .children(
+                    [
+                        (None, "settings_view.terminal.bg_effect_none"),
+                        (
+                            Some(GeneratedBackgroundKind::Mineral),
+                            "settings_view.terminal.bg_source_mineral",
+                        ),
+                        (
+                            Some(GeneratedBackgroundKind::Fog),
+                            "settings_view.terminal.bg_source_fog",
+                        ),
+                        (
+                            Some(GeneratedBackgroundKind::Tide),
+                            "settings_view.terminal.bg_source_tide",
+                        ),
+                        (
+                            Some(GeneratedBackgroundKind::TideParticles),
+                            "settings_view.terminal.bg_source_tide_particles",
+                        ),
+                        (
+                            Some(GeneratedBackgroundKind::Meteor),
+                            "settings_view.terminal.bg_source_meteor",
+                        ),
+                        (
+                            Some(GeneratedBackgroundKind::Particles),
+                            "settings_view.terminal.bg_source_particles",
+                        ),
+                        (
+                            Some(GeneratedBackgroundKind::Caustics),
+                            "settings_view.terminal.bg_source_caustics",
+                        ),
+                    ]
+                    .map(|(kind, key)| {
+                        self.appearance_action_button(
+                            LucideIcon::Sparkles,
+                            self.i18n.t(key),
+                            cx.listener(move |this, _, _, cx| {
+                                this.edit_background_style(
+                                    |style| {
+                                        if let Some(kind) = kind {
+                                            style
+                                                .effect
+                                                .get_or_insert_with(Default::default)
+                                                .kind = kind;
+                                        } else {
+                                            style.effect = None;
+                                        }
+                                    },
+                                    cx,
+                                );
+                                cx.stop_propagation();
+                            }),
+                        )
+                        .when(
+                            kind == terminal
+                                .background_effect
+                                .as_ref()
+                                .map(|effect| effect.kind),
+                            |button| button.border_color(rgb(self.tokens.ui.accent)),
+                        )
+                    }),
+                )
+                .into_any_element(),
+        );
+        if let Some(effect) = &terminal.background_effect {
+            rows.extend(self.appearance_background_effect_rows(effect, cx));
+        }
+        if has_background {
+            rows.push(separator(&self.tokens, SeparatorOrientation::Horizontal).into_any_element());
+            rows.extend(self.appearance_background_interaction_rows(settings, animated_media, cx));
+            rows.push(separator(&self.tokens, SeparatorOrientation::Horizontal).into_any_element());
+            rows.push(self.appearance_row(
+                "settings_view.terminal.bg_readability",
+                "settings_view.terminal.bg_readability_hint",
+                self.appearance_slider_value_control(
+                    SettingsSlider::BackgroundReadability,
+                    SelectAnchorId::SettingsBackgroundReadability,
+                    0.0,
+                    100.0,
+                    terminal.background_readability * 100.0,
+                    "%",
+                    cx,
+                ),
+            ));
+            rows.push(self.appearance_row(
+                "settings_view.terminal.bg_scope",
+                "settings_view.terminal.bg_scope_hint",
+                self.appearance_background_scope_control(terminal.background_scope, cx),
+            ));
+            if terminal.background_scope == BackgroundScope::Content {
                 rows.push(self.appearance_background_tabs(settings, cx));
             }
         }
@@ -468,6 +814,190 @@ impl WorkspaceApp {
             self.i18n.t("settings_view.terminal.bg_title"),
             rows,
         )
+    }
+
+    fn appearance_background_effect_rows(
+        &self,
+        effect: &oxideterm_settings::GeneratedBackgroundSettings,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        use oxideterm_settings::GeneratedBackgroundKind;
+        let (size_key, brightness_key, hint_key) = match effect.kind {
+            GeneratedBackgroundKind::Mineral => {
+                ("bg_mineral_scale", "bg_mineral_sheen", "bg_mineral_hint")
+            }
+            GeneratedBackgroundKind::Fog => ("bg_fog_size", "bg_fog_concentration", "bg_fog_hint"),
+            GeneratedBackgroundKind::Tide => ("bg_tide_width", "bg_fog_brightness", "bg_tide_hint"),
+            GeneratedBackgroundKind::TideParticles => (
+                "bg_tide_particles_size",
+                "bg_fog_brightness",
+                "bg_tide_particles_hint",
+            ),
+            GeneratedBackgroundKind::Meteor => {
+                ("bg_meteor_length", "bg_fog_brightness", "bg_meteor_hint")
+            }
+            GeneratedBackgroundKind::Particles => (
+                "bg_particles_size",
+                "bg_fog_brightness",
+                "bg_particles_hint",
+            ),
+            GeneratedBackgroundKind::Caustics => {
+                ("bg_caustics_scale", "bg_fog_brightness", "bg_caustics_hint")
+            }
+        };
+        let mut rows = vec![self.appearance_row(
+            "settings_view.terminal.bg_effect_strength",
+            "settings_view.terminal.bg_effect_strength_hint",
+            self.appearance_slider_value_control(
+                SettingsSlider::BackgroundEffectStrength,
+                SelectAnchorId::SettingsBackgroundEffectStrength,
+                0.0,
+                100.0,
+                effect.strength * 100.0,
+                "%",
+                cx,
+            ),
+        )];
+        let brightness_slider = if effect.kind == GeneratedBackgroundKind::Mineral {
+            SettingsSlider::BackgroundEffectSheen
+        } else {
+            SettingsSlider::BackgroundEffectBrightness
+        };
+        for (slider, key, min, max, value) in [
+            (
+                SettingsSlider::BackgroundEffectSize,
+                size_key,
+                30.0,
+                200.0,
+                effect.size * 100.0,
+            ),
+            (
+                brightness_slider,
+                brightness_key,
+                0.0,
+                100.0,
+                if effect.kind == GeneratedBackgroundKind::Mineral {
+                    effect.sheen
+                } else {
+                    effect.brightness
+                } * 100.0,
+            ),
+            (
+                SettingsSlider::BackgroundEffectSpeed,
+                "bg_fog_speed",
+                0.0,
+                300.0,
+                effect.speed * 100.0,
+            ),
+        ]
+        .into_iter()
+        .filter(|(slider, _, _, _, _)| {
+            effect.has_motion() || *slider != SettingsSlider::BackgroundEffectSpeed
+        }) {
+            rows.push(self.appearance_row(
+                &format!("settings_view.terminal.{key}"),
+                &format!("settings_view.terminal.{hint_key}"),
+                self.appearance_slider_value_control(
+                    slider,
+                    settings_slider_anchor_id(slider),
+                    min,
+                    max,
+                    value,
+                    "%",
+                    cx,
+                ),
+            ));
+        }
+        let detail = match effect.kind {
+            GeneratedBackgroundKind::Mineral => Some((
+                SettingsSlider::BackgroundEffectRoughness,
+                "bg_mineral_roughness",
+                0.0,
+                100.0,
+                effect.roughness * 100.0,
+                "%",
+            )),
+            GeneratedBackgroundKind::Tide
+            | GeneratedBackgroundKind::TideParticles
+            | GeneratedBackgroundKind::Meteor => Some((
+                SettingsSlider::BackgroundEffectDirection,
+                "bg_tide_direction",
+                0.0,
+                360.0,
+                effect.direction,
+                "°",
+            )),
+            GeneratedBackgroundKind::Fog
+            | GeneratedBackgroundKind::Caustics
+            | GeneratedBackgroundKind::Particles => None,
+        };
+        if let Some((slider, key, min, max, value, unit)) = detail {
+            rows.push(self.appearance_row(
+                &format!("settings_view.terminal.{key}"),
+                &format!("settings_view.terminal.{hint_key}"),
+                self.appearance_slider_value_control(
+                    slider,
+                    settings_slider_anchor_id(slider),
+                    min,
+                    max,
+                    value,
+                    unit,
+                    cx,
+                ),
+            ));
+        }
+        if effect.kind != GeneratedBackgroundKind::Mineral {
+            rows.push(self.appearance_row(
+                "settings_view.terminal.bg_field_density",
+                "settings_view.terminal.bg_field_density_hint",
+                self.appearance_slider_value_control(
+                    SettingsSlider::BackgroundParticleCount,
+                    SelectAnchorId::SettingsBackgroundParticleCount,
+                    oxideterm_gpui_background::MIN_EFFECT_DENSITY as f32,
+                    oxideterm_gpui_background::MAX_EFFECT_DENSITY as f32,
+                    effect.particle_count as f32,
+                    "",
+                    cx,
+                ),
+            ));
+        }
+        for index in 0..2 {
+            rows.push(
+                self.appearance_row(
+                    &format!("settings_view.terminal.bg_fog_color_{}", index + 1),
+                    "settings_view.terminal.bg_fog_colors_hint",
+                    self.appearance_text_input_control(
+                        SettingsInput::BackgroundEffectColor(index),
+                        effect
+                            .colors
+                            .map(|colors| format!("#{:06x}", colors[index]))
+                            .unwrap_or_default(),
+                        self.i18n.t("settings_view.terminal.bg_auto"),
+                        112.0,
+                        cx,
+                    ),
+                ),
+            );
+        }
+        if effect.has_motion() {
+            rows.push(
+                self.appearance_row(
+                    "settings_view.terminal.bg_effect_max_fps",
+                    "settings_view.terminal.bg_effect_fps_hint",
+                    self.appearance_text_input_control(
+                        SettingsInput::BackgroundEffectMaxFps,
+                        effect
+                            .max_fps
+                            .map(|value| value.to_string())
+                            .unwrap_or_default(),
+                        self.i18n.t("settings_view.terminal.bg_auto"),
+                        112.0,
+                        cx,
+                    ),
+                ),
+            );
+        }
+        rows
     }
 
     pub(in crate::workspace) fn appearance_background_scope_control(
@@ -562,10 +1092,7 @@ impl WorkspaceApp {
                         MouseButton::Left,
                         cx.listener(move |this, _event, _window, cx| {
                             if target_index != active_index {
-                                this.edit_settings(
-                                    |settings| settings.terminal.background_scope = scope,
-                                    cx,
-                                );
+                                this.edit_background_style(|style| style.scope = scope, cx);
                                 this.begin_user_segmented_control_transition_from(
                                     control_id,
                                     active_index,
@@ -775,28 +1302,6 @@ impl WorkspaceApp {
             .into_any_element()
     }
 
-    pub(in crate::workspace) fn appearance_checkbox_row(
-        &self,
-        label_key: &str,
-        hint_key: &str,
-        checked: bool,
-        setter: fn(&mut PersistedSettings, bool),
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        self.appearance_row(
-            label_key,
-            hint_key,
-            checkbox(&self.tokens, String::new(), checked)
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _event, _window, cx| {
-                        this.edit_settings(|settings| setter(settings, !checked), cx);
-                    }),
-                )
-                .into_any_element(),
-        )
-    }
-
     fn appearance_window_titlebar_row(&self, checked: bool, cx: &mut Context<Self>) -> AnyElement {
         self.appearance_row(
             "settings_view.appearance.show_window_titlebar",
@@ -902,6 +1407,28 @@ impl WorkspaceApp {
         unit: &'static str,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        self.appearance_slider_labeled_control(
+            slider,
+            anchor_id,
+            min,
+            max,
+            value,
+            format!("{}{}", value.round() as i64, unit),
+            cx,
+        )
+    }
+
+    /// Slider whose track position and displayed value use different scales.
+    pub(in crate::workspace) fn appearance_slider_labeled_control(
+        &self,
+        slider: SettingsSlider,
+        anchor_id: SelectAnchorId,
+        min: f32,
+        max: f32,
+        value: f32,
+        label: String,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         div()
             .flex()
             .flex_row()
@@ -914,7 +1441,7 @@ impl WorkspaceApp {
                     .text_align(gpui::TextAlign::Right)
                     .text_size(px(self.tokens.metrics.ui_text_xs))
                     .text_color(rgb(self.tokens.ui.text_muted))
-                    .child(format!("{}{}", value.round() as i64, unit)),
+                    .child(label),
             )
             .into_any_element()
     }
@@ -981,26 +1508,102 @@ impl WorkspaceApp {
     pub(in crate::workspace) fn appearance_theme_preview(
         &self,
         settings: &PersistedSettings,
+        cx: &mut Context<Self>,
     ) -> AnyElement {
-        let previewing = self.open_settings_select == Some(SettingsSelect::AppearanceTheme);
-        let id = if previewing {
-            self.settings_theme_preview
-                .as_deref()
-                .unwrap_or(&settings.terminal.theme)
-        } else {
-            &settings.terminal.theme
+        let preview = self
+            .settings_workspace
+            .read(cx)
+            .theme_background_preview
+            .clone();
+        self.appearance_preview(settings, preview, cx)
+    }
+
+    fn appearance_preview(
+        &self,
+        settings: &PersistedSettings,
+        preview: Entity<oxideterm_gpui_background::BackgroundPreview>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let preview_target = self
+            .open_settings_select
+            .and_then(SettingsSelect::theme_target);
+        let preview_dark = self
+            .open_settings_select
+            .and_then(SettingsSelect::theme_system_dark)
+            .unwrap_or(self.appearance_edit_scheme().unwrap_or(self.system_dark));
+        let preview_id = |target: ThemeTarget| {
+            if preview_target == Some(target) {
+                self.settings_theme_preview
+                    .as_deref()
+                    .unwrap_or(target.resolved_id(settings, preview_dark))
+            } else {
+                target.resolved_id(settings, preview_dark)
+            }
         };
+        let application_id = preview_id(ThemeTarget::Application);
+        let terminal_id = preview_id(ThemeTarget::Terminal);
+        // Resolve both halves locally so hovering never applies draft colors to the workspace.
+        let mut preview_tokens = ThemeTokens {
+            ui: oxideterm_settings_model::theme_ui_colors(settings, application_id),
+            terminal: appearance_theme_palette(settings, terminal_id),
+            ..self.tokens
+        };
+        preview_tokens.refresh_palette_metrics();
+        let page = self.settings_workspace.read(cx).theme_preview_page;
+        let mut style = settings.resolved_background(preview_dark);
+        if let Some(blur) = self
+            .settings_workspace
+            .read(cx)
+            .background_blur_preview(self.appearance_edit_scheme())
+        {
+            style.blur = blur;
+        }
+        let page_key = match page {
+            ThemePreviewPage::Terminal => "terminal",
+            ThemePreviewPage::Sftp => "sftp",
+            _ => "session_manager",
+        };
+        let background = if style.scope == BackgroundScope::Window
+            || style.enabled_tabs.iter().any(|tab| tab == page_key)
+        {
+            background_preferences_for_style(&style, &preview_tokens)
+        } else {
+            None
+        };
+        let has_background = background.is_some();
+        preview.update(cx, |preview, cx| preview.set_preferences(background, cx));
         div()
+            .id(("appearance-preview", preview.entity_id()))
             .flex()
             .flex_col()
             .gap(px(self.tokens.spacing.two))
             .child(settings_appearance_theme_preview(
-                &self.tokens,
+                &preview_tokens,
                 settings,
-                appearance_theme_palette(settings, id),
-                custom_theme_display_name(settings, id),
+                custom_theme_display_name(settings, application_id),
+                custom_theme_display_name(settings, terminal_id),
+                oxideterm_gpui_settings_view::application_theme_description(
+                    application_id,
+                    preview_tokens.ui,
+                    &self.i18n,
+                ),
                 &self.i18n,
+                page,
+                has_background.then(|| preview.clone().into_any_element()),
+                style.scope,
+                {
+                    let workspace = self.settings_workspace.downgrade();
+                    move |page, _window, cx| {
+                        let _ = workspace.update(cx, |settings, cx| {
+                            settings.theme_preview_page = page;
+                            cx.notify();
+                        });
+                    }
+                },
             ))
+            .when(style.day_cycle && has_background, |view| {
+                view.child(self.appearance_daylight_preview_control(preview.clone(), cx))
+            })
             .child(
                 div()
                     .text_size(px(self.tokens.metrics.ui_text_xs))
@@ -1087,9 +1690,16 @@ impl WorkspaceApp {
                     .flex_col()
                     .gap(px(THEME_EDITOR_BODY_GAP))
                     .child(self.theme_editor_name_duplicate_row(&editor, cx))
-                    .child(self.theme_editor_preview(&editor, terminal, ui))
+                    .child(self.theme_editor_preview(&editor, terminal, ui, cx))
                     .child(self.theme_editor_section_tabs(&editor, cx))
-                    .child(self.theme_editor_color_grid(&editor, cx)),
+                    .child(if editor.active_section == ThemeEditorSection::Background {
+                        self.appearance_background_card(
+                            &self.background_settings_for_controls(cx),
+                            cx,
+                        )
+                    } else {
+                        self.theme_editor_color_grid(&editor, cx)
+                    }),
             )
             .child(
                 div()
@@ -1266,14 +1876,38 @@ impl WorkspaceApp {
         editor: &ThemeEditorState,
         terminal: TerminalTheme,
         ui: AppUiColors,
+        cx: &mut Context<Self>,
     ) -> AnyElement {
-        settings_theme_editor_preview(
-            &self.tokens,
-            &editor.name,
-            terminal,
-            ui,
-            settings_mono_font_family(self.settings_store.settings()),
-        )
+        let mut tokens = self.tokens;
+        tokens.ui = ui;
+        tokens.terminal = terminal;
+        tokens.refresh_palette_metrics();
+        let background = background_preferences_for_style(&editor.background, &tokens);
+        let preview = self
+            .settings_workspace
+            .read(cx)
+            .editor_background_preview
+            .clone();
+        let has_background = background.is_some();
+        preview.update(cx, |preview, cx| preview.set_preferences(background, cx));
+        div()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .gap(px(self.tokens.spacing.two))
+            .child(settings_theme_editor_preview(
+                &tokens,
+                &editor.name,
+                terminal,
+                ui,
+                settings_mono_font_family(self.settings_store.settings()),
+                has_background.then(|| preview.clone().into_any_element()),
+                editor.background.scope,
+            ))
+            .when(editor.background.day_cycle && has_background, |view| {
+                view.child(self.appearance_daylight_preview_control(preview, cx))
+            })
+            .into_any_element()
     }
 
     pub(in crate::workspace) fn theme_editor_section_tabs(
@@ -1289,6 +1923,12 @@ impl WorkspaceApp {
             .child(self.theme_editor_section_tab(
                 ThemeEditorSection::Terminal,
                 "settings_view.custom_theme.terminal_colors",
+                editor.active_section,
+                cx,
+            ))
+            .child(self.theme_editor_section_tab(
+                ThemeEditorSection::Background,
+                "settings_view.terminal.bg_title",
                 editor.active_section,
                 cx,
             ))
@@ -1335,6 +1975,8 @@ impl WorkspaceApp {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _event, _window, cx| {
+                    this.blur_text_inputs(cx);
+                    this.finish_settings_slider_drag(cx);
                     this.settings_workspace.update(cx, |settings, cx| {
                         settings.select_theme_editor_section(section, cx);
                     });
@@ -1360,7 +2002,9 @@ impl WorkspaceApp {
                 editor.terminal_colors.as_slice(),
                 ThemeEditorSection::Terminal,
             ),
-            ThemeEditorSection::Ui => unreachable!("UI colors render grouped sections"),
+            ThemeEditorSection::Ui | ThemeEditorSection::Background => {
+                unreachable!("non-terminal sections render separately")
+            }
         };
         self.theme_editor_color_grid_for_fields(fields, colors, section, cx)
     }
@@ -1493,6 +2137,7 @@ impl WorkspaceApp {
             let input = match section {
                 ThemeEditorSection::Terminal => SettingsInput::CustomThemeTerminalColor(index),
                 ThemeEditorSection::Ui => SettingsInput::CustomThemeUiColor(index),
+                ThemeEditorSection::Background => unreachable!("background has no palette fields"),
             };
             cells.push(self.theme_editor_color_cell(field, color, input, cx));
         }
@@ -1656,14 +2301,32 @@ impl WorkspaceApp {
 
     pub(in crate::workspace) fn open_theme_editor(
         &mut self,
+        target: ThemeTarget,
         edit_theme_id: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        let editor = theme_editor_from_settings(
-            self.settings_store.settings(),
-            edit_theme_id,
+        let settings = self.settings_store.settings();
+        let scheme = self.appearance_edit_scheme();
+        let mut initial = settings.clone();
+        target.apply(
+            &mut initial,
+            target
+                .resolved_id(settings, scheme.unwrap_or(self.system_dark))
+                .to_string(),
+        );
+        let mut editor = theme_editor_from_settings(
+            &initial,
+            target,
+            edit_theme_id.clone(),
             self.i18n.t("settings_view.custom_theme.new_theme_name"),
         );
+        editor.system_dark = scheme;
+        editor.background = edit_theme_id
+            .as_deref()
+            .and_then(|id| settings.custom_themes.get(id))
+            .and_then(|theme| theme.get("background"))
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+            .unwrap_or_else(|| settings.terminal.background_for_scheme(scheme));
         self.settings_workspace.update(cx, |settings, cx| {
             settings.open_theme_editor(editor, cx);
         });
@@ -1707,7 +2370,11 @@ impl WorkspaceApp {
         });
     }
 
-    pub(in crate::workspace) fn import_theme_from_file(&mut self, cx: &mut Context<Self>) {
+    pub(in crate::workspace) fn import_theme_from_file(
+        &mut self,
+        target: ThemeTarget,
+        cx: &mut Context<Self>,
+    ) {
         let receiver = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
@@ -1723,8 +2390,9 @@ impl WorkspaceApp {
             paths.into_iter().next()
         };
         let runtime = self.forwarding_runtime.handle().clone();
+        let system_dark = self.appearance_edit_scheme();
         self.settings_workspace.update(cx, |settings, cx| {
-            settings.start_theme_import(selection, runtime, cx);
+            settings.start_theme_import(target, system_dark, selection, runtime, cx);
         });
     }
 
@@ -1755,22 +2423,35 @@ impl WorkspaceApp {
             .settings_workspace
             .read(cx)
             .background_images_snapshot();
-        let has_removable_gallery_images = background_images.iter().any(|image_path| {
-            !is_bundled_workspace_background(self.settings_store.path(), Path::new(image_path))
-        });
+        let editor_open = self.settings_workspace.read(cx).theme_editor().is_some();
+        let has_removable_gallery_images = !editor_open
+            && background_images.iter().any(|image_path| {
+                !is_bundled_workspace_background(self.settings_store.path(), Path::new(image_path))
+            });
         let actions = div()
             .flex()
             .flex_row()
             .items_center()
             .gap(px(8.0))
-            .child(self.appearance_action_button(
-                LucideIcon::Plus,
-                self.i18n.t("settings_view.terminal.bg_add"),
-                cx.listener(|this, _event, _window, cx| {
-                    this.pick_background_image(cx);
-                    cx.stop_propagation();
-                }),
-            ))
+            .when(!editor_open, |actions| {
+                actions
+                    .child(self.appearance_action_button(
+                        LucideIcon::Download,
+                        self.i18n.t("settings_view.terminal.bg_get_more"),
+                        cx.listener(|this, _event, window, cx| {
+                            this.open_background_plugin_marketplace(window, cx);
+                            cx.stop_propagation();
+                        }),
+                    ))
+                    .child(self.appearance_action_button(
+                        LucideIcon::Plus,
+                        self.i18n.t("settings_view.terminal.bg_add"),
+                        cx.listener(|this, _event, _window, cx| {
+                            this.pick_background_image(cx);
+                            cx.stop_propagation();
+                        }),
+                    ))
+            })
             .when(has_removable_gallery_images, |actions| {
                 actions.child(
                     settings_background_clear_all_button(
@@ -1836,9 +2517,9 @@ impl WorkspaceApp {
             )),
         });
         let settings_path = self.settings_store.path().to_path_buf();
-        let current_path = self
-            .settings_store
-            .settings()
+        let control_settings = self.background_settings_for_controls(cx);
+        let system_dark = self.appearance_edit_scheme();
+        let current_path = control_settings
             .terminal
             .background_image
             .as_ref()
@@ -1855,6 +2536,7 @@ impl WorkspaceApp {
                 selection,
                 settings_path,
                 current_path,
+                system_dark,
                 runtime,
                 cx,
             );
@@ -1869,14 +2551,34 @@ impl WorkspaceApp {
     ) -> AnyElement {
         let image_path = image_path.to_string();
         let remove_path = image_path.clone();
-        let is_built_in =
-            is_bundled_workspace_background(self.settings_store.path(), Path::new(&image_path));
+        let is_built_in = self.settings_workspace.read(cx).theme_editor().is_some()
+            || is_bundled_workspace_background(self.settings_store.path(), Path::new(&image_path));
         let fallback_icon_color = self.tokens.ui.text_muted;
         let thumbnail = settings_background_thumbnail_frame(
             &self.tokens,
             &image_path,
+            oxideterm_gpui_background::poster_source(PathBuf::from(&image_path)),
             active,
             self.i18n.t("settings_view.terminal.bg_active"),
+            self.i18n.t(&format!(
+                "settings_view.terminal.bg_format_{}",
+                match Path::new(&image_path)
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .unwrap_or_default()
+                    .to_ascii_lowercase()
+                    .as_str()
+                {
+                    "jpg" | "jpeg" => "jpeg",
+                    "png" => "png",
+                    "webp" => "webp",
+                    "gif" => "gif",
+                    "bmp" => "bmp",
+                    "mp4" => "mp4",
+                    "m4v" => "m4v",
+                    _ => "unknown",
+                }
+            )),
             move || {
                 WorkspaceApp::render_lucide_icon(LucideIcon::Image, 20.0, rgb(fallback_icon_color))
             },
@@ -1901,9 +2603,9 @@ impl WorkspaceApp {
                 MouseButton::Left,
                 cx.listener(move |this, _event, _window, cx| {
                     let selected_path = image_path.clone();
-                    this.edit_settings(
-                        move |settings| {
-                            settings.terminal.background_image = Some(selected_path);
+                    this.edit_background_style(
+                        move |style| {
+                            style.image = Some(selected_path);
                         },
                         cx,
                     );
@@ -1921,13 +2623,19 @@ impl WorkspaceApp {
         let settings_path = self.settings_store.path().to_path_buf();
         let runtime = self.forwarding_runtime.handle().clone();
         let current_path = self
-            .settings_store
-            .settings()
+            .background_settings_for_controls(cx)
             .terminal
-            .background_image
-            .clone();
+            .background_image;
+        let system_dark = self.appearance_edit_scheme();
         self.settings_workspace.update(cx, |settings, cx| {
-            settings.remove_background_image(settings_path, image_path, current_path, runtime, cx);
+            settings.remove_background_image(
+                settings_path,
+                image_path,
+                current_path,
+                system_dark,
+                runtime,
+                cx,
+            );
         });
     }
 
@@ -1935,13 +2643,18 @@ impl WorkspaceApp {
         let settings_path = self.settings_store.path().to_path_buf();
         let runtime = self.forwarding_runtime.handle().clone();
         let current_path = self
-            .settings_store
-            .settings()
+            .background_settings_for_controls(cx)
             .terminal
-            .background_image
-            .clone();
+            .background_image;
+        let system_dark = self.appearance_edit_scheme();
         self.settings_workspace.update(cx, |settings, cx| {
-            settings.clear_background_image_gallery(settings_path, current_path, runtime, cx);
+            settings.clear_background_image_gallery(
+                settings_path,
+                current_path,
+                system_dark,
+                runtime,
+                cx,
+            );
         });
     }
 
@@ -2012,20 +2725,12 @@ impl WorkspaceApp {
         key: &str,
         cx: &mut Context<Self>,
     ) {
-        self.edit_settings(
-            |settings| {
-                if let Some(index) = settings
-                    .terminal
-                    .background_enabled_tabs
-                    .iter()
-                    .position(|tab| tab == key)
-                {
-                    settings.terminal.background_enabled_tabs.remove(index);
+        self.edit_background_style(
+            |style| {
+                if let Some(index) = style.enabled_tabs.iter().position(|tab| tab == key) {
+                    style.enabled_tabs.remove(index);
                 } else {
-                    settings
-                        .terminal
-                        .background_enabled_tabs
-                        .push(key.to_string());
+                    style.enabled_tabs.push(key.to_string());
                 }
             },
             cx,
@@ -2036,6 +2741,205 @@ impl WorkspaceApp {
 #[cfg(test)]
 mod theme_preview_tests {
     use super::*;
+
+    struct Preview {
+        page: ThemePreviewPage,
+        window_background: bool,
+    }
+
+    impl Render for Preview {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let mut tokens = oxideterm_theme::default_tokens();
+            tokens.ui.bg = 0x102030;
+            tokens.terminal.background = 0x203010;
+            tokens.radii.md = 12.0;
+            let view = cx.entity().downgrade();
+            settings_appearance_theme_preview(
+                &tokens,
+                &PersistedSettings::default(),
+                "Application".into(),
+                "Terminal".into(),
+                String::new(),
+                &I18n::new(oxideterm_i18n::Locale::En),
+                self.page,
+                self.window_background.then(|| {
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .bg(rgb(0x406080))
+                        .into_any_element()
+                }),
+                BackgroundScope::Window,
+                move |page, _, cx| {
+                    view.update(cx, |view, cx| {
+                        view.page = page;
+                        cx.notify();
+                    })
+                    .unwrap();
+                },
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn theme_preview_navigation_switches_samples_and_preserves_rounded_edges(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (view, cx) = cx.add_window_view(|_, _| Preview {
+            page: ThemePreviewPage::Terminal,
+            window_background: false,
+        });
+        cx.simulate_resize(gpui::size(px(800.0), px(500.0)));
+        for (control, page, content, background) in [
+            (
+                "theme-preview-connections",
+                ThemePreviewPage::Connections,
+                "theme-preview-connections-sample",
+                0x102030,
+            ),
+            (
+                "theme-preview-new-connection",
+                ThemePreviewPage::NewConnection,
+                "theme-preview-new-connection-sample",
+                0x102030,
+            ),
+            (
+                "theme-preview-sftp",
+                ThemePreviewPage::Sftp,
+                "theme-preview-sftp-sample",
+                0x102030,
+            ),
+            (
+                "theme-preview-terminal-tab",
+                ThemePreviewPage::Terminal,
+                "theme-preview-terminal-sample",
+                0x203010,
+            ),
+            (
+                "theme-preview-sftp-tab",
+                ThemePreviewPage::Sftp,
+                "theme-preview-sftp-sample",
+                0x102030,
+            ),
+            (
+                "theme-preview-terminal",
+                ThemePreviewPage::Terminal,
+                "theme-preview-terminal-sample",
+                0x203010,
+            ),
+        ] {
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            let bounds = cx.debug_bounds(control).unwrap();
+            cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+            assert_eq!(view.read_with(cx, |view, _| view.page), page, "{control}");
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            assert!(cx.debug_bounds(content).is_some(), "{content}");
+            cx.update(|window, _| {
+                let quads = window.painted_quads();
+                let color: gpui::Hsla = rgb(background).into();
+                let sample = quads
+                    .iter()
+                    .filter(|quad| quad.background.as_solid() == Some(color))
+                    .max_by(|a, b| {
+                        a.bounds
+                            .size
+                            .height
+                            .partial_cmp(&b.bounds.size.height)
+                            .unwrap()
+                    })
+                    .unwrap();
+                assert!(sample.corner_radii.bottom_right.0 > 0.0, "{content}");
+                assert!(
+                    quads
+                        .iter()
+                        .all(|quad| quad.border_widths.bottom.0 < 2.0 * window.scale_factor()),
+                    "preview tabs must use the shared filled selection style"
+                );
+            });
+        }
+    }
+
+    #[gpui::test]
+    fn window_background_is_visible_through_every_preview_page(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, _| Preview {
+            page: ThemePreviewPage::Terminal,
+            window_background: true,
+        });
+        cx.simulate_resize(gpui::size(px(800.), px(500.)));
+        for (page, selector) in [
+            (ThemePreviewPage::Terminal, "theme-preview-terminal-sample"),
+            (
+                ThemePreviewPage::Connections,
+                "theme-preview-connections-sample",
+            ),
+            (ThemePreviewPage::Sftp, "theme-preview-sftp-sample"),
+            (
+                ThemePreviewPage::NewConnection,
+                "theme-preview-new-connection-sample",
+            ),
+        ] {
+            view.update(cx, |view, cx| {
+                view.page = page;
+                cx.notify();
+            });
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            let sample = cx.debug_bounds(selector).unwrap();
+            cx.update(|window, _| {
+                let point = sample.bottom_right() - gpui::point(px(24.), px(24.));
+                let point = point.map(|value| value.scale(window.scale_factor()));
+                let covering = window
+                    .painted_quads()
+                    .into_iter()
+                    .filter(|quad| quad.bounds.contains(&point))
+                    .filter_map(|quad| quad.background.as_solid())
+                    .filter(|color| color.a > 0.)
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    covering.last(),
+                    Some(&gpui::Hsla::from(rgb(0x406080))),
+                    "{page:?} must not tint the already composed window background again"
+                );
+            });
+            if matches!(page, ThemePreviewPage::Terminal | ThemePreviewPage::Sftp) {
+                for (selector, target) in [
+                    ("theme-preview-terminal-tab", ThemePreviewPage::Terminal),
+                    ("theme-preview-sftp-tab", ThemePreviewPage::Sftp),
+                ] {
+                    let bounds = cx.debug_bounds(selector).unwrap();
+                    cx.update(|window, _| {
+                        let point = (bounds.origin + gpui::point(px(20.), bounds.size.height / 2.))
+                            .map(|value| value.scale(window.scale_factor()));
+                        let colors = window
+                            .painted_quads()
+                            .into_iter()
+                            .filter(|quad| quad.bounds.contains(&point))
+                            .filter_map(|quad| quad.background.as_solid())
+                            .filter(|color| color.a > 0.)
+                            .collect::<Vec<_>>();
+                        let background = gpui::Hsla::from(rgb(0x406080));
+                        let background_index = colors
+                            .iter()
+                            .position(|color| *color == background)
+                            .unwrap();
+                        let overlays = &colors[background_index + 1..];
+                        if page == target {
+                            assert_eq!(
+                                overlays,
+                                &[gpui::Hsla::from(rgba(0x10203066))],
+                                "selected tab keeps a translucent highlight"
+                            );
+                        } else {
+                            assert_eq!(
+                                overlays,
+                                &[],
+                                "inactive tab and tab strip must reveal the window background"
+                            );
+                        }
+                    });
+                }
+            }
+        }
+    }
 
     #[test]
     fn custom_theme_preview_reads_all_displayed_colors() {
@@ -2069,5 +2973,34 @@ mod theme_preview_tests {
                 0x00ffff
             ],
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn window_opacity_slider_spends_most_travel_near_opaque() {
+        // Linear travel would put 98% at 0.96 and 87.5% at 0.75; the curve
+        // must leave the top fifth of the track for the 100%..98% range.
+        for (position, opacity, label) in [
+            (1.0, 1.0, "100%"),
+            (0.9, 0.995, "99.5%"),
+            (0.8, 0.98, "98%"),
+            (0.5, 0.875, "87.5%"),
+            (0.0, 0.5, "50%"),
+        ] {
+            assert_eq!(
+                window_opacity_from_slider_position(position),
+                opacity,
+                "position={position}"
+            );
+            assert!(
+                (window_opacity_slider_position(opacity) - position).abs() < 1e-6,
+                "opacity={opacity}"
+            );
+            assert_eq!(window_opacity_label(opacity), label);
+        }
     }
 }

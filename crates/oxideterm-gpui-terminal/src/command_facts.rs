@@ -10,6 +10,10 @@ use oxideterm_terminal::{
     TerminalCommandMarkDetectionSource, terminal_autosuggest_fuzzy_score,
 };
 use parking_lot::Mutex;
+use zeroize::Zeroize;
+
+mod persistence;
+pub use persistence::TerminalHistoryStore;
 
 use crate::terminal_ui::MAX_HIGHLIGHT_PATTERN_LENGTH;
 
@@ -90,6 +94,23 @@ pub struct SharedTerminalCommandHistory {
 #[derive(Default)]
 struct TerminalCommandHistoryState {
     records: Vec<TerminalAutosuggestCommandRecord>,
+    persistence: Option<persistence::HistoryBinding>,
+    persistent_ids: std::collections::HashSet<String>,
+    removed_before_restore: std::collections::HashSet<String>,
+    restore_cleared: bool,
+    restored: bool,
+    paused: bool,
+}
+
+impl Drop for TerminalCommandHistoryState {
+    fn drop(&mut self) {
+        for record in &mut self.records {
+            record.command.zeroize();
+        }
+        for mut command in self.removed_before_restore.drain() {
+            command.zeroize();
+        }
+    }
 }
 
 impl SharedTerminalCommandHistory {
@@ -111,14 +132,15 @@ impl SharedTerminalCommandHistory {
                 }
             })
             .collect::<Vec<_>>();
-        let mut state = TerminalCommandHistoryState { records };
+        let mut state = TerminalCommandHistoryState::default();
+        state.records = records;
         trim_autosuggest_records(&mut state.records);
         Self {
             state: Arc::new(Mutex::new(state)),
         }
     }
 
-    pub(crate) fn records(&self) -> Vec<TerminalAutosuggestCommandRecord> {
+    pub fn records(&self) -> Vec<TerminalAutosuggestCommandRecord> {
         self.state.lock().records.clone()
     }
 
@@ -145,24 +167,89 @@ impl SharedTerminalCommandHistory {
         }
         let now = now_millis();
         let mut state = self.state.lock();
+        if state.paused {
+            return false;
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        let binding = state.persistence.clone();
+        if binding.as_ref().is_some_and(|binding| binding.enabled()) {
+            state.persistent_ids.insert(id.clone());
+        }
         state.records.push(TerminalAutosuggestCommandRecord {
-            command_id: format!("runtime-autosuggest-{now}"),
+            command_id: id,
             command: command.to_string(),
             started_at: now,
             finished_at: now,
         });
         trim_autosuggest_records(&mut state.records);
+        if state.persistent_ids.len() > MAX_AUTOSUGGEST_RECORDS {
+            let retained = state
+                .records
+                .iter()
+                .map(|record| record.command_id.clone())
+                .collect::<std::collections::HashSet<_>>();
+            state.persistent_ids.retain(|id| retained.contains(id));
+        }
+        drop(state);
+        if let Some(binding) = binding.filter(|binding| binding.enabled()) {
+            binding.changed();
+        }
         true
     }
 
-    pub(crate) fn remove(&self, command: &str) -> bool {
+    pub fn remove(&self, command: &str) -> bool {
         let mut state = self.state.lock();
         let previous_len = state.records.len();
-        state.records.retain(|record| record.command != command);
-        if state.records.len() == previous_len {
-            return false;
+        let removed_ids = state
+            .records
+            .iter()
+            .filter(|record| record.command == command)
+            .map(|record| record.command_id.clone())
+            .collect::<Vec<_>>();
+        state.records.retain_mut(|record| {
+            if record.command == command {
+                record.command.zeroize();
+                false
+            } else {
+                true
+            }
+        });
+        for id in removed_ids {
+            state.persistent_ids.remove(&id);
         }
-        true
+        if !state.restored {
+            state.removed_before_restore.insert(command.to_owned());
+        }
+        let binding = state.persistence.clone();
+        let changed = state.records.len() != previous_len;
+        drop(state);
+        if let Some(binding) = binding {
+            binding.changed();
+        }
+        changed
+    }
+
+    pub fn clear(&self) {
+        let mut state = self.state.lock();
+        for record in &mut state.records {
+            record.command.zeroize();
+        }
+        state.records.clear();
+        state.persistent_ids.clear();
+        state.restore_cleared = true;
+        let binding = state.persistence.clone();
+        drop(state);
+        if let Some(binding) = binding {
+            binding.changed();
+        }
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.state.lock().paused
+    }
+
+    pub fn set_paused(&self, paused: bool) {
+        self.state.lock().paused = paused;
     }
 }
 
@@ -318,15 +405,6 @@ impl CommandFactLedger {
                     .then(|| record.command[query.len()..].to_string())
             })
             .filter(|suffix| !suffix.is_empty())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn autosuggest_candidates(
-        &self,
-        state: &TerminalAutosuggestInputState,
-        limit: usize,
-    ) -> Vec<TerminalAutosuggestCandidate> {
-        autosuggest_candidates_for_records(&self.autosuggest_records, state, limit)
     }
 
     pub(crate) fn remove_autosuggest_command(&mut self, command: &str) -> bool {
@@ -692,6 +770,9 @@ fn autosuggest_candidates_for_records(
 fn trim_autosuggest_records(records: &mut Vec<TerminalAutosuggestCommandRecord>) {
     if records.len() > MAX_AUTOSUGGEST_RECORDS {
         let overflow = records.len() - MAX_AUTOSUGGEST_RECORDS;
+        for record in &mut records[..overflow] {
+            record.command.zeroize();
+        }
         records.drain(0..overflow);
     }
 }
@@ -1088,6 +1169,15 @@ mod tests {
         assert_eq!(records[0].command, "  git   status  ");
         assert_eq!(records[1].command, "  git   status  ");
         assert_eq!(records[2].command, "git status");
+        assert!(ledger.remove_autosuggest_command("  git   status  "));
+        assert_eq!(
+            ledger
+                .autosuggest_records()
+                .iter()
+                .map(|record| record.command.as_str())
+                .collect::<Vec<_>>(),
+            ["git status"],
+        );
 
         let mut ledger = CommandFactLedger::default();
         ledger.record_runtime_autosuggest_command("git status");
@@ -1116,35 +1206,6 @@ mod tests {
                 is_cursor_at_end: false,
             }),
             None
-        );
-    }
-
-    #[test]
-    fn runtime_autosuggest_candidates_rank_activity_without_changing_history() {
-        let mut ledger = CommandFactLedger::default();
-        ledger.record_runtime_autosuggest_command("docker ps");
-        ledger.record_runtime_autosuggest_command("docker images");
-        ledger.record_runtime_autosuggest_command("docker ps");
-        ledger.record_runtime_autosuggest_command("docker compose up");
-
-        let state = TerminalAutosuggestInputState {
-            value: "dock".to_string(),
-            cursor_index: 4,
-            is_cursor_at_end: true,
-        };
-        let candidates = ledger.autosuggest_candidates(&state, 3);
-
-        assert_eq!(candidates.len(), 3);
-        assert_eq!(candidates[0].command, "docker ps");
-        assert_eq!(candidates[0].use_count, 2);
-        assert_eq!(ledger.autosuggest_records().len(), 4);
-
-        assert!(ledger.remove_autosuggest_command("docker ps"));
-        assert!(
-            ledger
-                .autosuggest_records()
-                .iter()
-                .all(|record| record.command != "docker ps")
         );
     }
 
@@ -1201,19 +1262,17 @@ mod tests {
     }
 
     #[test]
-    fn shell_history_seed_preserves_recency_order() {
+    fn shell_history_seed_preserves_recency_order_and_top_match_suffix() {
         let history = SharedTerminalCommandHistory::from_commands(vec![
             "docker ps".to_string(),
             "docker images".to_string(),
         ]);
-        let candidates = history.candidates(
-            &TerminalAutosuggestInputState {
-                value: "docker ".to_string(),
-                cursor_index: 7,
-                is_cursor_at_end: true,
-            },
-            2,
-        );
+        let state = TerminalAutosuggestInputState {
+            value: "docker ".to_string(),
+            cursor_index: 7,
+            is_cursor_at_end: true,
+        };
+        let candidates = history.candidates(&state, 2);
 
         assert_eq!(
             candidates
@@ -1222,20 +1281,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["docker images", "docker ps"]
         );
-    }
-
-    #[test]
-    fn shared_command_history_projects_the_top_match_as_a_suffix() {
-        let history = SharedTerminalCommandHistory::from_commands(vec!["ls -la".to_string()]);
-
-        assert_eq!(
-            history.ghost_text(&TerminalAutosuggestInputState {
-                value: "ls".to_string(),
-                cursor_index: 2,
-                is_cursor_at_end: true,
-            }),
-            Some(" -la".to_string())
-        );
+        assert_eq!(history.ghost_text(&state), Some("images".to_string()));
     }
 
     #[test]

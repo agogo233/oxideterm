@@ -1,3 +1,4 @@
+use super::super::password_prompt::SavedPasswordLoadError;
 use super::*;
 use gpui::{Animation, AnimationExt, App, CursorStyle};
 use oxideterm_connections::{ConnectionTerminalSessionLogPolicy, SavedAuth, SshChannelStrategy};
@@ -521,6 +522,8 @@ impl WorkspaceApp {
         select_id: NewConnectionSelect,
     ) -> SelectAnchorId {
         match select_id {
+            NewConnectionSelect::Totp => SelectAnchorId::NewConnectionTotp,
+            NewConnectionSelect::JumpTotp => SelectAnchorId::NewConnectionJumpTotp,
             NewConnectionSelect::Group => SelectAnchorId::NewConnectionGroup,
             NewConnectionSelect::KeyAuthSource => SelectAnchorId::NewConnectionKeyAuthSource,
             NewConnectionSelect::ManagedKey => SelectAnchorId::NewConnectionManagedKey,
@@ -1038,7 +1041,7 @@ impl WorkspaceApp {
             return div().into_any_element();
         };
         let loading = form.password_load_id.is_some();
-        let failed = form.password_load_failed;
+        let error = form.password_load_error;
         let button = if loading {
             oxideterm_gpui_ui::button::icon_button(
                 &self.tokens,
@@ -1090,14 +1093,11 @@ impl WorkspaceApp {
                 self.i18n.t("sessionManager.edit_properties.saved_password"),
                 control,
             ))
-            .when(failed, |this| {
-                this.child(
-                    self.render_connection_hint_with_color(
-                        self.i18n
-                            .t("sessionManager.edit_properties.password_load_failed"),
-                        self.tokens.ui.error,
-                    ),
-                )
+            .when_some(error, |this, error| {
+                this.child(self.render_connection_hint_with_color(
+                    self.i18n.t(error.message_key()),
+                    self.tokens.ui.error,
+                ))
             })
             .into_any_element()
     }
@@ -1120,13 +1120,16 @@ impl WorkspaceApp {
                         .spawn(async move {
                             // Native credential access may prompt or block; never run it on the UI thread.
                             store
-                                .get_saved_auth_password(&SavedAuth::Password {
+                                .get_saved_auth_password_optional(&SavedAuth::Password {
                                     empty_password: false,
 
                                     keychain_id: Some(keychain_id),
                                     plaintext_password: None,
                                 })
-                                .map_err(|_| ())
+                                .map_err(|error| SavedPasswordLoadError::from_store_error(&error))
+                                .and_then(|password| {
+                                    password.ok_or(SavedPasswordLoadError::NotFound)
+                                })
                         })
                         .await
                 },
@@ -1251,6 +1254,76 @@ impl WorkspaceApp {
             NewConnectionSelect::ManagedKey
         };
         self.render_managed_key_select_for_target(label, selected_id, select_id, cx)
+    }
+
+    pub(super) fn render_connection_totp_select(
+        &self,
+        jump: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if self
+            .connection_form_state(cx)
+            .form
+            .as_ref()
+            .is_none_or(|form| form.transport != NewConnectionTransport::Ssh)
+        {
+            return div().into_any_element();
+        }
+        let select = if jump {
+            NewConnectionSelect::JumpTotp
+        } else {
+            NewConnectionSelect::Totp
+        };
+        let id = self
+            .connection_form_state(cx)
+            .form
+            .as_ref()
+            .and_then(|form| {
+                if jump {
+                    form.jump_server_form
+                        .as_ref()
+                        .and_then(|hop| hop.totp_credential_id.as_deref())
+                } else {
+                    form.totp_credential_id.as_deref()
+                }
+            });
+        let label = id
+            .map(|id| {
+                self.connection_store
+                    .totp_credentials()
+                    .iter()
+                    .find(|entry| entry.id == id)
+                    .map(|entry| entry.name.clone())
+                    .unwrap_or_else(|| self.i18n.t("settings_view.totp.unavailable"))
+            })
+            .unwrap_or_else(|| self.i18n.t("settings_view.totp.none"));
+        let trigger = self
+            .new_connection_select_trigger(select, label, id.is_none(), false, cx)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    this.update_connection_form_state(cx, |state| {
+                        if let Some(form) = &mut state.form {
+                            form.field_focused = false;
+                            form.selected_field = None;
+                        }
+                    });
+                    this.open_new_connection_select_from_pointer(select, cx);
+                    window.focus(&this.focus_handle, cx);
+                    cx.stop_propagation();
+                }),
+            );
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(form_field(
+                &self.tokens,
+                self.i18n.t("settings_view.totp.connection_label"),
+                self.track_new_connection_select_anchor(select, trigger, cx),
+            ))
+            .child(self.render_connection_hint(self.i18n.t("settings_view.totp.connection_hint")))
+            .into_any_element()
     }
 
     pub(super) fn render_standalone_sftp_secondary_managed_key_select(
@@ -1480,6 +1553,8 @@ impl WorkspaceApp {
                         form.focused_field = NewConnectionField::JumpManagedKeyId;
                     }
                     NewConnectionSelect::Group
+                    | NewConnectionSelect::Totp
+                    | NewConnectionSelect::JumpTotp
                     | NewConnectionSelect::KeyAuthSource
                     | NewConnectionSelect::StandaloneSftpSecondaryKeyAuthSource
                     | NewConnectionSelect::JumpSavedConnection
@@ -3138,6 +3213,39 @@ impl WorkspaceApp {
             .into_any_element()
     }
 
+    pub(super) fn render_mosh_plugin_status(&self, cx: &mut Context<Self>) -> AnyElement {
+        let available = self.plugin_entity.read(cx).mosh_executable().is_some();
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_3()
+            .child(self.render_connection_hint_with_color(
+                if available {
+                    self.i18n.t("mosh_plugin.ready")
+                } else {
+                    self.plugin_requirement_message("com.oxideterm.terminal.mosh", "Mosh", cx)
+                },
+                if available {
+                    self.tokens.ui.success
+                } else {
+                    self.tokens.ui.warning
+                },
+            ))
+            .when(!available, |row| {
+                row.child(self.workspace_toolbar_action_button(
+                    self.i18n.t("remote_desktop.manage_plugin"),
+                    None,
+                    ToolbarButtonOptions::default(),
+                    cx.listener(|this, _event, window, cx| {
+                        this.close_new_connection_form(window, cx);
+                        this.open_mosh_plugin(window, cx);
+                    }),
+                ))
+            })
+            .into_any_element()
+    }
+
     pub(super) fn render_mosh_advanced_fields(
         &self,
         server_executable: &str,
@@ -3399,6 +3507,44 @@ impl WorkspaceApp {
             .flex()
             .flex_col()
             .gap(px(self.tokens.metrics.modal_section_gap))
+            .child({
+                let available = self
+                    .plugin_entity
+                    .read(cx)
+                    .remote_desktop_plugin_enabled(protocol);
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .child(self.render_connection_hint_with_color(
+                        if available {
+                            self.i18n.t("remote_desktop.plugin_ready")
+                        } else {
+                            self.plugin_requirement_message(
+                                &format!("com.oxideterm.remote-desktop.{}", protocol.provider_id()),
+                                &protocol.provider_id().to_uppercase(),
+                                cx,
+                            )
+                        },
+                        if available {
+                            self.tokens.ui.success
+                        } else {
+                            self.tokens.ui.warning
+                        },
+                    ))
+                    .when(!available, |row| {
+                        row.child(self.workspace_toolbar_action_button(
+                            self.i18n.t("remote_desktop.manage_plugin"),
+                            None,
+                            ToolbarButtonOptions::default(),
+                            cx.listener(move |this, _event, window, cx| {
+                                this.close_new_connection_form(window, cx);
+                                this.open_remote_desktop_plugin(protocol, window, cx);
+                            }),
+                        ))
+                    })
+            })
             .child(self.render_connection_form_section(ConnectionFormSection::Basic, basic, cx))
             .child(self.render_connection_form_section(
                 ConnectionFormSection::Authentication,
@@ -4617,6 +4763,14 @@ impl WorkspaceApp {
                 |form| form.x11_forwarding.enabled = !form.x11_forwarding.enabled,
                 cx,
             ))
+            .when(
+                cfg!(target_os = "windows") && x11_forwarding.enabled,
+                |content| {
+                    content.child(
+                        self.render_connection_hint(self.i18n.t("ssh.x11.windows_requirement")),
+                    )
+                },
+            )
             .when(
                 x11_forwarding.enabled && !ssh_channel_strategy.requires_dedicated_consumers(),
                 |content| {

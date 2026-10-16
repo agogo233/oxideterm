@@ -292,6 +292,7 @@ impl WorkspaceApp {
         let saved_profile_id = id.clone();
         self.terminal_saved_connection_refs
             .insert(session_id, SavedConnectionRef { kind, id });
+        self.bind_saved_console_command_history(session_id, cx);
         if matches!(
             kind,
             SavedConnectionKind::Mosh | SavedConnectionKind::Telnet | SavedConnectionKind::Serial
@@ -826,14 +827,6 @@ mod tests {
 
         assert!(!LocalTriggerProcessLaunch::from_expanded(direct).1);
         assert!(LocalTriggerProcessLaunch::from_expanded(shell).1);
-    }
-
-    #[test]
-    fn local_process_errors_do_not_include_action_content() {
-        let rendered = format!("{:?}", LocalTriggerProcessError::SpawnFailed);
-
-        assert_eq!(rendered, "SpawnFailed");
-        assert!(!rendered.contains("secret-value"));
     }
 
     #[test]

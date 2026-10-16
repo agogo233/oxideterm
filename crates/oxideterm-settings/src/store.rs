@@ -82,6 +82,7 @@ pub struct SettingsStore {
     writes_blocked: bool,
 }
 
+#[derive(Serialize, Deserialize)]
 enum SettingsFileCheckpoint {
     Missing,
     Present(Vec<u8>),
@@ -89,6 +90,7 @@ enum SettingsFileCheckpoint {
 
 /// Opaque rollback state for the exact settings file and in-memory envelope.
 #[must_use = "settings checkpoints should be restored or deliberately discarded"]
+#[derive(Serialize, Deserialize)]
 pub struct SettingsStoreCheckpoint {
     path: PathBuf,
     settings: PersistedSettings,
@@ -744,10 +746,15 @@ mod tests {
         let path = tempdir.path().join("settings.json");
         let mut store = SettingsStore::load_from_path(&path).unwrap();
         store.settings_mut().terminal.font_size = 18;
+        store.settings_mut().plugin_marketplace_sort = crate::PluginMarketplaceSort::NewestListings;
         store.save().unwrap();
 
         let reloaded = SettingsStore::load_from_path(&path).unwrap();
         assert_eq!(reloaded.settings().terminal.font_size, 18);
+        assert_eq!(
+            reloaded.settings().plugin_marketplace_sort,
+            crate::PluginMarketplaceSort::NewestListings
+        );
         let raw: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
         assert_eq!(raw["version"], SETTINGS_SCHEMA_VERSION);

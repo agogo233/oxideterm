@@ -67,6 +67,7 @@ enum PaletteAction {
     Keybinding(&'static str),
     ActivateTab(TabId),
     OpenSavedConnection(String),
+    OpenSavedLocalTerminal(String),
     QuickConnectHost {
         username: String,
         host: String,
@@ -516,6 +517,9 @@ impl WorkspaceApp {
             PaletteAction::OpenSavedConnection(connection_id) => {
                 self.open_saved_connection_from_palette(connection_id, window, cx);
             }
+            PaletteAction::OpenSavedLocalTerminal(profile_id) => {
+                self.open_saved_local_terminal_profile(&profile_id, window, cx);
+            }
             PaletteAction::QuickConnectHost {
                 username,
                 host,
@@ -702,6 +706,16 @@ impl WorkspaceApp {
         if matches!(effect, Some(WorkspaceOverlayConfirmEffect::ResetSettings)) {
             self.edit_settings(|settings| *settings = PersistedSettings::default(), cx);
         }
+        if let Some(WorkspaceOverlayConfirmEffect::ClearCommandHistory { all }) = effect {
+            if all {
+                self.terminal_history_store.clear();
+                for history in self.ssh_terminal_command_histories.values() {
+                    history.clear();
+                }
+            } else if let Some(history) = self.active_command_history(cx) {
+                history.clear();
+            }
+        }
         started
     }
 
@@ -712,7 +726,22 @@ impl WorkspaceApp {
         let Some(snapshot) = self.overlay.read(cx).confirm_snapshot() else {
             return div().into_any_element();
         };
-        if !matches!(snapshot.kind, WorkspaceOverlayConfirmKind::SettingsReset) {
+        let clear_history = matches!(
+            snapshot.kind,
+            WorkspaceOverlayConfirmKind::CommandHistoryClear { .. }
+        );
+        let clear_current = matches!(
+            snapshot.kind,
+            WorkspaceOverlayConfirmKind::CommandHistoryClear { all: false }
+        );
+        let title_key = if clear_current {
+            "terminal.history.clear_current"
+        } else if clear_history {
+            "terminal.history.clear_all"
+        } else {
+            "command_palette.cmd_reset_settings"
+        };
+        if !clear_history && !matches!(snapshot.kind, WorkspaceOverlayConfirmKind::SettingsReset) {
             return div().into_any_element();
         }
         oxideterm_gpui_ui::confirm::confirm_dialog_with_focus_motion(
@@ -721,20 +750,22 @@ impl WorkspaceApp {
             snapshot.phase,
             ConfirmDialogView {
                 variant: ConfirmDialogVariant::Danger,
-                title: div()
-                    .child(self.i18n.t("command_palette.cmd_reset_settings"))
-                    .into_any_element(),
+                title: div().child(self.i18n.t(title_key)).into_any_element(),
                 description: Some(
                     div()
-                        .child(self.i18n.t("command_palette.confirm_reset_settings"))
+                        .child(self.i18n.t(if clear_current {
+                            "terminal.history.clear_confirm_current"
+                        } else if clear_history {
+                            "terminal.history.clear_confirm"
+                        } else {
+                            "command_palette.confirm_reset_settings"
+                        }))
                         .into_any_element(),
                 ),
                 cancel_label: div()
                     .child(self.i18n.t("common.actions.cancel"))
                     .into_any_element(),
-                confirm_label: div()
-                    .child(self.i18n.t("command_palette.cmd_reset_settings"))
-                    .into_any_element(),
+                confirm_label: div().child(self.i18n.t(title_key)).into_any_element(),
             },
             snapshot.focused_action,
             cx.listener(|this, _event, _window, cx| {
@@ -783,7 +814,7 @@ impl WorkspaceApp {
         let tab_ids = self
             .tabs(cx)
             .iter()
-            .filter(|tab| tab.id != active_tab_id)
+            .filter(|tab| self.tab_host.read(cx).container_tab_id(tab.id) != active_tab_id)
             .map(|tab| tab.id)
             .collect::<Vec<_>>();
         for tab_id in tab_ids {
@@ -941,7 +972,7 @@ impl WorkspaceApp {
 
         let command_items = self.command_palette_command_items();
         let session_items = self.command_palette_session_items(cx);
-        let mut connection_items = self.command_palette_connection_items();
+        let mut connection_items = Self::command_palette_connection_items(&self.connection_store);
         connection_items.extend(self.command_palette_ssh_config_items(&ssh_config_hosts));
         let plugin_items = self.command_palette_plugin_items(cx);
         let help_items = self.command_palette_help_items();
@@ -1114,8 +1145,8 @@ impl WorkspaceApp {
             .collect()
     }
 
-    fn command_palette_connection_items(&self) -> Vec<PaletteItem> {
-        self.connection_store
+    fn command_palette_connection_items(store: &ConnectionStore) -> Vec<PaletteItem> {
+        store
             .connection_infos()
             .into_iter()
             .map(|conn| {
@@ -1139,6 +1170,22 @@ impl WorkspaceApp {
                     disabled: false,
                 }
             })
+            .chain(store.local_terminal_profiles().iter().map(|profile| {
+                let shell = profile.shell_id.as_deref().unwrap_or_default();
+                let cwd = profile.cwd.as_deref().unwrap_or_default();
+                let group = profile.group.as_deref().unwrap_or_default();
+                PaletteItem {
+                    id: format!("local-profile:{}", profile.id),
+                    label: profile.name.clone(),
+                    section: PaletteSection::Connections,
+                    icon: LucideIcon::Terminal,
+                    detail: Some(format!("{shell} {cwd}").trim().to_string()),
+                    shortcut: None,
+                    value: format!("{} {shell} {cwd} {group}", profile.name),
+                    action: PaletteAction::OpenSavedLocalTerminal(profile.id.clone()),
+                    disabled: false,
+                }
+            }))
             .collect()
     }
 
@@ -2787,6 +2834,46 @@ fn shortcut_reference_rows() -> Vec<(
 mod panel_layout_tests {
     use super::*;
     use gpui::{Render, ScrollHandle, TestAppContext, size};
+
+    #[test]
+    fn saved_local_profiles_are_searchable_without_running_tabs() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = ConnectionStore::load(dir.path().join("connections.json")).unwrap();
+        for (id, name, shell_id, cwd) in [
+            ("linux", "wsl", "wsl-ubuntu", "~/work"),
+            ("ps", "PowerShell", "pwsh", "C:/work"),
+            ("cmd", "Command Prompt", "cmd", "C:/work"),
+        ] {
+            store
+                .upsert_local_terminal_profile(
+                    oxideterm_connections::SaveLocalTerminalProfileRequest {
+                        id: Some(id.into()),
+                        name: name.into(),
+                        shell_id: Some(shell_id.into()),
+                        cwd: Some(cwd.into()),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+        }
+        for (query, expected) in [("wsl", vec!["wsl", "PowerShell"]), ("ubuntu", vec!["wsl"])] {
+            let results = rank_palette_section(
+                WorkspaceApp::command_palette_connection_items(&store),
+                query,
+            );
+            assert_eq!(
+                results
+                    .iter()
+                    .map(|r| r.item.label.as_str())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            assert!(
+                matches!(&results[0].item.action, PaletteAction::OpenSavedLocalTerminal(id) if id == "linux")
+            );
+            assert_eq!(results[0].item.detail.as_deref(), Some("wsl-ubuntu ~/work"));
+        }
+    }
 
     struct PalettePreviewLayout {
         scroll: ScrollHandle,

@@ -544,16 +544,14 @@ impl WorkspaceApp {
         let entering = !settings.sidebar_ui.zen_mode;
         settings.sidebar_ui.zen_mode = entering;
         if entering {
+            // Zen mode hides chrome without changing the user's sidebar visibility choices.
             self.sidebar_motion.settle(0.0);
             self.context_sidebar_motion.settle(0.0);
-            self.sidebar_collapsed = true;
             self.sidebar_motion_generation = self.sidebar_motion_generation.wrapping_add(1);
             self.context_sidebar_motion_generation =
                 self.context_sidebar_motion_generation.wrapping_add(1);
             self.sidebar_rendered = false;
             self.context_sidebar_rendered = false;
-            settings.sidebar_ui.collapsed = true;
-            settings.sidebar_ui.ai_sidebar_collapsed = true;
             self.clear_ai_sidebar_keyboard_focus(cx);
             const ZEN_HINT_TTL: Duration = Duration::from_millis(2500);
             self.apply_workspace_overlay_intent(
@@ -561,10 +559,11 @@ impl WorkspaceApp {
                 cx,
             );
         } else {
-            self.sidebar_collapsed = false;
             self.sidebar_motion_generation = self.sidebar_motion_generation.wrapping_add(1);
-            self.sidebar_rendered = true;
-            settings.sidebar_ui.collapsed = false;
+            self.context_sidebar_motion_generation =
+                self.context_sidebar_motion_generation.wrapping_add(1);
+            self.sidebar_rendered = !self.sidebar_collapsed;
+            self.context_sidebar_rendered = self.context_sidebar_visible();
             self.apply_workspace_overlay_intent(WorkspaceOverlayIntent::ClearZenHint, cx);
         }
         cx.notify();
@@ -1085,7 +1084,10 @@ impl WorkspaceApp {
         }
 
         if self.active_surface == ActiveSurface::Settings && self.open_settings_select.is_some() {
-            if self.open_settings_select == Some(SettingsSelect::AppearanceTheme)
+            if self
+                .open_settings_select
+                .and_then(SettingsSelect::theme_target)
+                .is_some()
                 && self.handle_appearance_theme_select_key(event, cx)
             {
                 window.prevent_default();
@@ -1161,7 +1163,7 @@ impl WorkspaceApp {
         if self.sftp_view().read(cx).focused_input().is_some()
             || self.sftp_view().read(cx).dialog_is_open()
             || self
-                .active_tab(cx)
+                .active_content_tab(cx)
                 .is_some_and(|tab| tab.kind == TabKind::Sftp)
         {
             // Embedded SFTP inputs and window-root dialogs keep their keyboard
@@ -1171,7 +1173,7 @@ impl WorkspaceApp {
         }
 
         if self
-            .active_tab(cx)
+            .active_content_tab(cx)
             .is_some_and(|tab| tab.kind == TabKind::Graphics)
             && self.graphics.read(cx).focused_input().is_some()
         {
@@ -2082,6 +2084,21 @@ impl WorkspaceApp {
         };
         if pane.is_tmux_control_mode() {
             protocol = QuickCommandTargetProtocol::Tmux;
+        }
+        if let Some(node) = self
+            .session_id_for_pane(pane_id, cx)
+            .and_then(|session_id| {
+                self.workspace_runtime
+                    .read(cx)
+                    .ssh_terminal_node_id(session_id)
+            })
+            .and_then(|node_id| self.ssh_nodes.get(&node_id))
+        {
+            // Temporary SSH sessions have endpoint metadata even before the shell reports a cwd.
+            values.host = Some(Zeroizing::new(node.endpoint.host.clone()));
+            values.username = Some(Zeroizing::new(node.endpoint.username.clone()));
+            values.port = Some(node.endpoint.port);
+            values.connection = Some(Zeroizing::new(node.title.clone()));
         }
         if let Some(saved) = entry
             .as_ref()

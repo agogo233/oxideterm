@@ -1,4 +1,5 @@
 use super::super::*;
+use oxideterm_terminal::TerminalSessionKind;
 
 impl WorkspaceApp {
     const WORKSPACE_ASYNC_RUNTIME_WORKER_THREADS: usize = 2;
@@ -23,13 +24,24 @@ impl WorkspaceApp {
         let window_button_layout_subscription =
             cx.observe_button_layout_changed(window, |_workspace, _window, cx| cx.notify());
         let mut settings_store = SettingsStore::load_default()?;
+        let mut connection_store = ConnectionStore::load(default_connections_path())?;
+        oxideterm_cloud_sync::sync_v3::RecoveryJournal::recover_pending(
+            &mut connection_store,
+            &mut settings_store,
+            &default_saved_forwards_path(),
+            &mut oxideterm_cloud_sync::secrets::CloudSyncKeychainSecretProvider::new(
+                Default::default(),
+            ),
+        )?;
         settings_store.settings_mut().sidebar_ui.zen_mode = false;
         if let Err(error) = ensure_bundled_workspace_backgrounds(settings_store.path()) {
             // A background-gallery failure must not prevent the workspace from opening.
             eprintln!("failed to install built-in workspace backgrounds: {error}");
         }
-        let version_migration = VersionMigrationState::from_settings_path(settings_store.path())?;
-        let connection_store = ConnectionStore::load(default_connections_path())?;
+        let version_migration = VersionMigrationState::from_settings_path(
+            settings_store.path(),
+            settings_store.settings().onboarding_completed,
+        )?;
         let audit = audit::AuditState::new(settings_store.path().with_file_name("audit.sqlite3"));
         let settings = settings_store.settings().clone();
         let i18n = I18n::new(locale_from_settings(settings.general.language));
@@ -37,6 +49,22 @@ impl WorkspaceApp {
         // process-owned index and never copies the document into credential storage.
         let local_terminal_command_history =
             SharedTerminalCommandHistory::from_commands(load_local_shell_history_commands());
+        let (terminal_history_store, history_updates) = TerminalHistoryStore::new(
+            settings_store
+                .path()
+                .with_file_name("command-history.sqlite"),
+        )?;
+        terminal_history_store.configure(
+            settings.terminal.autosuggest.save_history,
+            settings.terminal.autosuggest.history_retention_days,
+        );
+        let terminal_history_updates = cx.spawn(async move |workspace, cx| {
+            while history_updates.recv().await.is_ok() {
+                if workspace.update(cx, |_, cx| cx.notify()).is_err() {
+                    break;
+                }
+            }
+        });
         let session_log_directory = settings::terminal_session_log_root_directory(
             settings_store.path(),
             settings.terminal.session_log.directory.as_deref(),
@@ -90,7 +118,11 @@ impl WorkspaceApp {
             });
         let skill_registry = std::sync::Arc::new(parking_lot::RwLock::new(skill_registry));
         let local_shells = scan_shells();
-        let tokens = tokens_from_settings(&settings);
+        let system_dark = matches!(
+            window.appearance(),
+            gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark
+        );
+        let tokens = tokens_from_settings(&settings, system_dark);
         let initial_viewport_width = current_window_size(window).0;
         let initial_sidebar_width = sidebar::clamp_responsive_sidebar_width(
             settings.sidebar_ui.width as f32,
@@ -324,6 +356,9 @@ impl WorkspaceApp {
                     ConnectionFlowEvent::ConnectionFormClosed => {
                         // Apply runtime cleanup after the Entity has already cleared ownership.
                         workspace.cleanup_cancelled_proxy_connect_runs(cx);
+                        if workspace.active_pane(cx).is_some() {
+                            workspace.needs_active_pane_focus = true;
+                        }
                     }
                     ConnectionFlowEvent::WorkerResultsReady => {
                         workspace.enqueue_connection_flow_window_effect(cx);
@@ -496,6 +531,13 @@ impl WorkspaceApp {
             ai_runtime_context::AiRuntimeContextEntity::new()
         });
         let plugin_task_runtime = forwarding_runtime.clone();
+        oxideterm_gpui_editor::EditorLanguagePlugins::set_labels(
+            i18n.t("plugin.language_missing"),
+            i18n.t("plugin.load_failed_default"),
+            i18n.t("plugin.language_manage"),
+            i18n.t("plugin.language_dismiss"),
+            cx,
+        );
         let plugin_entity = cx.new(move |cx| {
             plugin_entity::PluginWorkspaceEntity::new(plugin_task_runtime, plugin_registry, cx)
         });
@@ -505,6 +547,7 @@ impl WorkspaceApp {
                 workspace.enqueue_plugin_window_effect(event, cx);
             },
         );
+        plugin_entity.update(cx, |plugins, _cx| plugins.start_compatibility_refresh());
         let tab_host = cx.new(|_| tabs::WorkspaceTabHostEntity::new());
         let tab_host_subscription = cx.subscribe(
             &tab_host,
@@ -564,6 +607,7 @@ impl WorkspaceApp {
             _tab_host_subscription: tab_host_subscription,
             search: actions::TerminalSearchState::default(),
             terminal_recording_menu_open: false,
+            privilege_credential_picker: None,
             terminal_highlight_popover_open: false,
             terminal_trigger_settings_pane: None,
             terminal_trigger_shell_confirmation_pending: false,
@@ -578,6 +622,9 @@ impl WorkspaceApp {
             terminal_command_sender,
             _terminal_command_sender_observation: terminal_command_sender_observation,
             local_terminal_command_history,
+            terminal_history_store,
+            _terminal_history_updates: terminal_history_updates,
+            terminal_history_all_connections: false,
             ssh_terminal_command_histories: HashMap::new(),
             detached_local_terminals: HashMap::new(),
             detached_local_terminal_order: Vec::new(),
@@ -652,6 +699,7 @@ impl WorkspaceApp {
             ),
             ai_entity,
             acp_entity,
+            mosh_plugin_sessions: Arc::new(oxideterm_mosh::MoshPluginSessions::default()),
             skill_registry,
             skill_workspace_root,
             loaded_conversation_skills: HashMap::new(),
@@ -822,6 +870,12 @@ impl WorkspaceApp {
             _cloud_sync_subscription: cloud_sync_subscription,
             i18n,
             tokens,
+            system_dark,
+            appearance_edit_dark: settings
+                .appearance
+                .follow_system_appearance
+                .then_some(system_dark),
+            active_background: settings.resolved_background(system_dark),
             detected_graphics,
             render_profile_override,
             render_policy,
@@ -884,6 +938,7 @@ impl WorkspaceApp {
         workspace.sync_active_privilege_prompt_inline_hint(cx);
         workspace.refresh_terminal_trigger_runtime(cx);
         cx.on_release(|workspace, cx| {
+            workspace.mosh_plugin_sessions.set_available(false);
             workspace.flush_main_window_state(cx);
             workspace.shutdown_terminal_trigger_runtime();
             // Shutdown ordering is security-sensitive: late broker callbacks
@@ -950,6 +1005,25 @@ impl WorkspaceApp {
             })
             .unwrap_or(("local_terminal", None, TabKind::LocalTerminal));
         let mut preferences = self.terminal_preferences_for_background_key(key, cx);
+        if let Some(history) = self
+            .tab_host
+            .read(cx)
+            .panes()
+            .get(&pane_id)
+            .map(|pane| pane.read(cx))
+            .filter(|pane| {
+                matches!(
+                    pane.session_kind(),
+                    TerminalSessionKind::Telnet
+                        | TerminalSessionKind::Serial
+                        | TerminalSessionKind::Mosh
+                )
+            })
+            .map(|pane| pane.command_history())
+        {
+            preferences.command_history = history;
+            return preferences;
+        }
         preferences.command_history = match kind {
             TabKind::LocalTerminal => self.local_terminal_command_history.clone(),
             TabKind::SshTerminal => session_id
@@ -958,7 +1032,7 @@ impl WorkspaceApp {
                         .read(cx)
                         .ssh_terminal_node_id(session_id)
                 })
-                .and_then(|node_id| self.ssh_terminal_command_histories.get(&node_id).cloned())
+                .and_then(|node_id| self.ssh_command_history(&node_id))
                 .unwrap_or_default(),
             _ => SharedTerminalCommandHistory::default(),
         };
@@ -1124,6 +1198,9 @@ impl WorkspaceApp {
         );
         TerminalUiPreferences {
             processing_failed_message: self.i18n.t("terminal.processing_failed"),
+            reconnect_label: self.i18n.t("sessions.actions.reconnect"),
+            reconnect_hint: self.i18n.t("terminal.reconnect_hint"),
+            reconnecting_label: self.i18n.t("connections.monitor.reconnecting"),
             font_family: terminal
                 .font_family
                 .terminal_family_name(&terminal.custom_font_family),
@@ -1173,9 +1250,25 @@ impl WorkspaceApp {
             terminal_encoding: session_terminal_encoding(terminal.terminal_encoding),
             show_performance_overlay: terminal.show_fps_overlay,
             render_policy: self.render_policy,
-            background: self.terminal_background_preferences(background_key),
+            background: self.terminal_background_preferences(background_key).map(
+                |mut background| {
+                    background.on_failure = Some(self.background_failure_handler(cx));
+                    background
+                },
+            ),
             transparent_background: self.window_background_preferences().is_some(),
             paste_labels: TerminalPasteLabels {
+                edit: self.i18n.t("terminal.paste.edit"),
+                edit_title: self.i18n.t("terminal.paste.edit_title"),
+                strip_fence: self.i18n.t("terminal.paste.strip_fence"),
+                undo: self.i18n.t("terminal.paste.undo"),
+                redo: self.i18n.t("terminal.paste.redo"),
+                editor_menu: oxideterm_gpui_editor::EditorContextMenuLabels {
+                    copy: self.i18n.t("menu.copy"),
+                    cut: self.i18n.t("fileManager.cut"),
+                    paste: self.i18n.t("menu.paste"),
+                    select_all: self.i18n.t("fileManager.selectAll"),
+                },
                 title_template: self.i18n.t("terminal.paste.title"),
                 more_lines_template: self.i18n.t("terminal.paste.more_lines"),
                 confirm: self.i18n.t("terminal.paste.confirm"),
@@ -1233,6 +1326,12 @@ impl WorkspaceApp {
                 ymodem_receive: self.i18n.t("terminal.modem.ymodem_receive"),
                 zmodem_upload: self.i18n.t("terminal.modem.zmodem_upload"),
                 zmodem_receive: self.i18n.t("terminal.modem.zmodem_receive"),
+                timeout: self.i18n.t("terminal.modem.timeout"),
+                protocol_error: self.i18n.t("terminal.modem.protocol_error"),
+                file_error: self.i18n.t("terminal.modem.file_error"),
+                file_too_large: self.i18n.t("terminal.modem.file_too_large"),
+                buffer_overflow: self.i18n.t("terminal.modem.buffer_overflow"),
+                worker_stopped: self.i18n.t("terminal.modem.worker_stopped"),
             },
             control_bar_expand_label: self.i18n.t("terminal.control_bar.show_controls"),
             control_bar_collapse_label: self.i18n.t("terminal.control_bar.hide_controls"),
@@ -1394,10 +1493,10 @@ impl WorkspaceApp {
         &self,
         background_key: &str,
     ) -> Option<TerminalBackgroundPreferences> {
-        let terminal = &self.settings_store.settings().terminal;
+        let terminal = &self.active_background;
         if !background_scope_includes_content(
-            terminal.background_scope,
-            &terminal.background_enabled_tabs,
+            terminal.scope,
+            &terminal.enabled_tabs,
             background_key,
         ) {
             return None;
@@ -1408,9 +1507,7 @@ impl WorkspaceApp {
     pub(in crate::workspace) fn window_background_preferences(
         &self,
     ) -> Option<TerminalBackgroundPreferences> {
-        if !background_scope_includes_window(
-            self.settings_store.settings().terminal.background_scope,
-        ) {
+        if !background_scope_includes_window(self.active_background.scope) {
             return None;
         }
         self.background_image_preferences()
@@ -1424,8 +1521,26 @@ impl WorkspaceApp {
     }
 
     pub(in crate::workspace) fn workspace_chrome_divider(&self) -> Rgba {
-        // Long workspace seams need less contrast than control outlines.
-        rgba((self.tokens.ui.border << 8) | 0x66)
+        self.workspace_divider_color(self.tokens.ui.border, 0x66)
+    }
+
+    pub(in crate::workspace) fn workspace_divider_color(
+        &self,
+        color: u32,
+        opaque_alpha: u32,
+    ) -> Rgba {
+        let appearance = &self.settings_store.settings().appearance;
+        let background = &self.active_background;
+        let translucent = appearance.window_opacity < 1.0
+            || appearance.frosted_glass != FrostedGlassMode::Off
+            || (background.enabled && (background.image.is_some() || background.effect.is_some()));
+        // Decorative seams should not cut through translucent surfaces like control outlines.
+        let alpha = if translucent {
+            opaque_alpha.min(0x26)
+        } else {
+            opaque_alpha
+        };
+        rgba((color << 8) | alpha)
     }
 
     pub(in crate::workspace) fn workspace_chrome_background(&self, color: u32) -> Rgba {
@@ -1453,25 +1568,36 @@ impl WorkspaceApp {
         )
     }
 
+    pub(in crate::workspace) fn background_failure_handler(
+        &self,
+        cx: &App,
+    ) -> Arc<dyn Fn(oxideterm_gpui_background::BackgroundFailure) + Send + Sync> {
+        let tx = self.overlay.read(cx).notice_sender();
+        let i18n = self.i18n.clone();
+        Arc::new(move |failure| {
+            let key = match failure {
+                oxideterm_gpui_background::BackgroundFailure::Unsupported => "bg_unsupported",
+                oxideterm_gpui_background::BackgroundFailure::Decode => "bg_decode_failed",
+                oxideterm_gpui_background::BackgroundFailure::ResourceExhausted => {
+                    "bg_resource_exhausted"
+                }
+                oxideterm_gpui_background::BackgroundFailure::InvalidOutput => "bg_limits_hint",
+            };
+            let _ = tx.send(TerminalNotice {
+                title: i18n.t(&format!("settings_view.terminal.{key}")),
+                description: None,
+                status_text: None,
+                progress: None,
+                variant: TerminalNoticeVariant::Error,
+            });
+        })
+    }
+
     fn background_image_preferences(&self) -> Option<TerminalBackgroundPreferences> {
         if !self.render_policy.allow_background_images {
             return None;
         }
-        let terminal = &self.settings_store.settings().terminal;
-        if !terminal.background_enabled {
-            return None;
-        }
-        let path = PathBuf::from(terminal.background_image.as_deref()?);
-        // Keep render-time background checks off the filesystem hot path.
-        // GPUI image fallback and the blurred-image loader already handle
-        // missing files; doing path.exists() here made settings pages with many
-        // translucent cards stat the same image repeatedly while scrolling.
-        Some(TerminalBackgroundPreferences {
-            path,
-            opacity: terminal.background_opacity.clamp(0.0, 1.0) as f32,
-            blur: terminal.background_blur.clamp(0, 20) as f32,
-            fit: terminal_background_fit(terminal.background_fit),
-        })
+        background_preferences_for_style(&self.active_background, &self.tokens)
     }
 }
 

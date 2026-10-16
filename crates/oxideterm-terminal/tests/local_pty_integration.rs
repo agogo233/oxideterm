@@ -121,27 +121,39 @@ printf '\033[2J\033[HFINAL-OUTPUT'
 
 #[test]
 fn concurrent_local_ptys_keep_output_and_shutdown_independent() {
-    let mut sessions: Vec<_> = (0..4).map(|index| {
-        let config = LocalPtyConfig {
-            shell: Some(ShellInfo::new("test-sh", "Test sh", "/bin/sh").with_args(vec![
-                "-c".into(),
-                r#"
+    let mut sessions: Vec<_> = (0..4)
+        .map(|index| {
+            let config = LocalPtyConfig {
+                shell: Some(
+                    ShellInfo::new("test-sh", "Test sh", "/bin/sh").with_args(vec![
+                        "-c".into(),
+                        r#"
 n=0
 while [ "$n" -lt 2000 ]; do
     printf 'bulk output %s\r\n' "$n"
     n=$((n+1))
 done
 printf '\033[2J\033[Hsession-%s' "$1"
-"#.into(),
-                "pty-isolation-test".into(), index.to_string(),
-            ])),
-            load_profile: false,
-            ..Default::default()
-        };
-        LocalPtySession::spawn_with_config_graphics_and_encoding(
-            80, 24, config, GraphicsOptions::default(), TerminalEncoding::Utf8, 100,
-        ).unwrap()
-    }).collect();
+"#
+                        .into(),
+                        "pty-isolation-test".into(),
+                        index.to_string(),
+                    ]),
+                ),
+                load_profile: false,
+                ..Default::default()
+            };
+            LocalPtySession::spawn_with_config_graphics_and_encoding(
+                80,
+                24,
+                config,
+                GraphicsOptions::default(),
+                TerminalEncoding::Utf8,
+                100,
+            )
+            .unwrap()
+        })
+        .collect();
     assert_eventually(
         Duration::from_secs(10),
         || {
@@ -217,24 +229,12 @@ fn integrated_zsh_loads_history_from_user_config_in_a_real_pty() {
     session.drain_output();
     session.take_events();
     session
-        .write_text("print -r -- OXIDETERM_HISTORY_COUNT=${#history[@]}\n")
-        .expect("query Zsh history count");
+        .write_text("fc -l 1 -1\n")
+        .expect("query Zsh history");
 
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let mut screen = String::new();
-    let parse_history_count = |output: &str| {
-        output.rsplit("OXIDETERM_HISTORY_COUNT=").find_map(|value| {
-            let digits = value
-                .trim_start()
-                .chars()
-                .take_while(char::is_ascii_digit)
-                .collect::<String>();
-            (!digits.is_empty())
-                .then(|| digits.parse::<usize>().ok())
-                .flatten()
-        })
-    };
-    while std::time::Instant::now() < deadline && parse_history_count(&screen).is_none() {
+    while std::time::Instant::now() < deadline && !screen.contains("oxideterm-history-probe") {
         session.drain_output();
         screen = session
             .snapshot()
@@ -247,9 +247,8 @@ fn integrated_zsh_loads_history_from_user_config_in_a_real_pty() {
     }
     session.shutdown();
 
-    let count = parse_history_count(&screen).expect("history count response");
     assert!(
-        count > 0,
+        screen.contains("oxideterm-history-probe"),
         "integrated Zsh PTY did not load configured history"
     );
 }
