@@ -362,14 +362,14 @@ def verify_windows_installer(path: Path, expected_version: str, target: str) -> 
         if not versions or all(item.read_text(encoding="utf-8").strip() != expected_version for item in versions):
             raise RuntimeError(f"{path.name} does not contain version {expected_version}")
 
-        # NSIS includes separate normal-install and staged-update payloads.
-        for root in (Path(directory), Path(directory) / "install"):
-            for name, (_, digest) in conpty_runtime_files(target).items():
-                runtime = root / "resources" / "conpty" / name
-                relative = runtime.relative_to(directory).as_posix()
-                if not runtime.is_file():
-                    raise RuntimeError(f"{path.name} must contain {relative}")
-                verify_digest(runtime.read_bytes(), digest, relative)
+        # NSIS carries only the normal-install payload; the native updater
+        # was removed, so no staged-update payload is produced.
+        for name, (_, digest) in conpty_runtime_files(target).items():
+            runtime = Path(directory) / "resources" / "conpty" / name
+            relative = runtime.relative_to(directory).as_posix()
+            if not runtime.is_file():
+                raise RuntimeError(f"{path.name} must contain {relative}")
+            verify_digest(runtime.read_bytes(), digest, relative)
 
 
 def verify_release(dist: Path, target: str, version: str) -> dict[str, object]:
