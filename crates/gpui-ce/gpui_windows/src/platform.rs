@@ -519,6 +519,8 @@ impl Platform for WindowsPlatform {
             .detach();
     }
 
+const RESTART_WAIT_ARGUMENT: &str = "--gpui-restart-wait-pid";
+
     fn restart(&self, binary_path: Option<PathBuf>, arguments: Vec<OsString>) {
         let pid = std::process::id();
         let Some(app_path) = binary_path.or(self.app_path().log_err()) else {
