@@ -360,8 +360,6 @@ impl Render for TerminalPane {
                     self.background_image_cache
                         .render_background_image(background, background_display)
                 },
-                window,
-                cx,
             )
         });
         self.ensure_background_image_completion_poll(cx);
