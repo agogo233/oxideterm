@@ -237,13 +237,57 @@ impl WorkspaceApp {
                 self.push_workspace_notice(x11_forwarding_notice(status, &self.i18n), cx);
             }
             TerminalPaneEvent::InputActivity => {
+                if self.active_pane_id(cx) == Some(pane_id) {
+                    self.cancel_pending_privilege_totp();
+                }
                 oxideterm_gpui_background::note_input_activity(window_handle.window_id(), cx);
             }
             TerminalPaneEvent::Exited { .. } => {
                 self.queue_auto_close_terminal_session(session_id, cx);
             }
             // TabHost consumes this signal before ordinary pane delivery.
-            TerminalPaneEvent::OutputActivity => {}
+            TerminalPaneEvent::OutputActivity => {
+                if self.active_pane_id(cx) == Some(pane_id) {
+                    self.schedule_privilege_prompt_sync(cx);
+                }
+            }
+            TerminalPaneEvent::HoverTooltipChanged => {
+                let id = format!("terminal-timestamp-{}", pane_id.0);
+                let tooltip = self
+                    .tab_host
+                    .read(cx)
+                    .panes()
+                    .get(&pane_id)
+                    .and_then(|pane| {
+                        pane.read(cx)
+                            .hover_tooltip()
+                            .map(|(label, position)| (label.to_string(), position))
+                    });
+                // Discard pending text before replacing the target; IDs isolate split panes.
+                self.clear_workspace_tooltip(&id, cx);
+                if let Some((label, position)) = tooltip {
+                    self.queue_workspace_tooltip(
+                        id,
+                        label,
+                        f32::from(position.x) + 12.0,
+                        f32::from(position.y) + 16.0,
+                        cx,
+                    );
+                }
+            }
+            TerminalPaneEvent::TriggerInteractionRequested => {
+                let Some(pane) = self.tab_host.read(cx).panes().get(&pane_id).cloned() else {
+                    return;
+                };
+                let owner = pane.downgrade();
+                if let Some((matched, item)) =
+                    pane.update(cx, |pane, _| pane.take_trigger_interaction())
+                {
+                    self.handle_terminal_trigger_interaction(
+                        pane_id, session_id, owner, matched, item, cx,
+                    );
+                }
+            }
             TerminalPaneEvent::TriggerMatchesAvailable => {
                 let Some(pane) = self.tab_host.read(cx).panes().get(&pane_id).cloned() else {
                     return;
@@ -252,9 +296,26 @@ impl WorkspaceApp {
                 let matches = pane.update(cx, |pane, _cx| pane.take_trigger_matches());
                 self.handle_terminal_trigger_matches(pane_id, session_id, pane_owner, matches, cx);
             }
+            TerminalPaneEvent::ExternalPathsDropped => {
+                let Some(pane) = self.tab_host.read(cx).panes().get(&pane_id).cloned() else {
+                    return;
+                };
+                let paths = pane.update(cx, |pane, _cx| pane.take_dropped_external_paths());
+                self.handle_sftp_terminal_drop(pane_id, session_id, paths, cx);
+            }
             TerminalPaneEvent::CurrentDirectoryChanged => {
                 if self.active_pane_id(cx) == Some(pane_id) {
                     self.sync_active_terminal_metadata_context(cx);
+                }
+                if self
+                    .terminal
+                    .read(cx)
+                    .last_ssh_terminal_panes
+                    .values()
+                    .any(|pane| *pane == pane_id)
+                    && (!self.sftp_pages.is_empty() || self.embedded_sftp_node_id.is_some())
+                {
+                    cx.notify();
                 }
             }
             TerminalPaneEvent::RecordingStatusChanged => {
@@ -279,6 +340,9 @@ impl WorkspaceApp {
             TerminalPaneEvent::SerialLineEndingsChanged { input, output } => {
                 self.persist_serial_line_endings(session_id, input, output, cx);
             }
+            TerminalPaneEvent::TelnetLineEndingsChanged { input, output } => {
+                self.persist_telnet_line_endings(session_id, input, output, cx);
+            }
             TerminalPaneEvent::PrivilegePromptStateChanged => {
                 if self.active_pane_id(cx) == Some(pane_id)
                     && self.sync_active_privilege_prompt_inline_hint(cx)
@@ -299,6 +363,36 @@ impl WorkspaceApp {
                 TerminalPaneInteraction::ContextAction,
                 cx,
             ),
+        }
+    }
+
+    fn persist_telnet_line_endings(
+        &mut self,
+        session_id: TerminalSessionId,
+        input: Option<oxideterm_terminal::SerialLineEnding>,
+        output: Option<oxideterm_terminal::SerialLineEnding>,
+        cx: &mut Context<Self>,
+    ) {
+        self.standalone_connections
+            .set_telnet_line_endings(session_id, input, output);
+        let Some(saved) = self
+            .terminal_saved_connection_refs
+            .get(&session_id)
+            .filter(|saved| saved.kind == SavedConnectionKind::Telnet)
+        else {
+            return;
+        };
+        let profile_id = saved.id.clone();
+        match self.connection_store.set_telnet_profile_line_endings(
+            &profile_id,
+            input.map(serial_profile_line_ending),
+            output.map(serial_profile_line_ending),
+        ) {
+            Ok(true) => self.queue_cloud_sync_dirty_refresh(cx),
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(%profile_id, %error, "failed to persist Telnet line endings")
+            }
         }
     }
 
@@ -353,6 +447,7 @@ impl WorkspaceApp {
                                 }
                                 TerminalPaneInteraction::ContextAction => {
                                     pane.take_context_action_request();
+                                    pane.take_archive_path_request();
                                 }
                             });
                         }
@@ -416,6 +511,17 @@ impl WorkspaceApp {
         pane_id: &PaneId,
         cx: &mut Context<Self>,
     ) -> Option<gpui::Entity<TerminalPane>> {
+        self.release_shell_ide_for_pane(*pane_id, cx);
+        self.clear_workspace_tooltip(&format!("terminal-timestamp-{}", pane_id.0), cx);
+        if let Some(terminal) = self
+            .tab_host
+            .read(cx)
+            .panes()
+            .get(pane_id)
+            .map(|pane| pane.read(cx).shared_session())
+        {
+            self.close_plugin_connection_terminal(&terminal, cx);
+        }
         if self
             .ai_entity
             .read(cx)
@@ -432,7 +538,10 @@ impl WorkspaceApp {
         }
         self.search.remove(*pane_id);
         self.terminal.update(cx, |terminal, _| {
-            terminal.sync_groups_mut().remove(*pane_id)
+            terminal.sync_groups_mut().remove(*pane_id);
+            terminal
+                .last_ssh_terminal_panes
+                .retain(|_, pane| pane != pane_id);
         });
         self.tab_host
             .update(cx, |tab_host, _cx| tab_host.remove_terminal_pane(*pane_id))
@@ -710,6 +819,14 @@ impl WorkspaceApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some((_, surface)) = self
+            .ide_workspace
+            .read(cx)
+            .shell_surface_for_pane(active_pane_id)
+        {
+            surface.update(cx, |surface, cx| surface.request_shell_return(cx));
+            return;
+        }
         let Some(root) = self
             .tab_by_id(tab_id, cx)
             .and_then(|tab| tab.root_pane.as_ref())
@@ -1110,6 +1227,42 @@ impl WorkspaceApp {
             }
             PaneNode::Leaf { pane_id, .. } => {
                 let active = Some(*pane_id) == active_pane_id;
+                let shell_surface = self.ide_workspace.read(cx).shell_surface_for_pane(*pane_id);
+                if let Some((_, surface)) = shell_surface {
+                    let pane_id = *pane_id;
+                    return div()
+                        .id(("workspace-pane", pane_id.0))
+                        .size_full()
+                        .flex()
+                        .flex_col()
+                        .overflow_hidden()
+                        .capture_any_mouse_down(cx.listener(
+                            move |this, _: &MouseDownEvent, _, cx| {
+                                if let Some(tab_id) = tab_id {
+                                    let changed = this.tab_host.update(cx, |host, _| {
+                                        host.set_active_pane(Some(tab_id), pane_id)
+                                    });
+                                    if changed {
+                                        this.blur_text_inputs(cx);
+                                        if !this.tab_host.read(cx).is_outside_main_window(tab_id) {
+                                            this.sync_active_tab_surface(cx);
+                                        }
+                                    }
+                                }
+                                cx.notify();
+                            },
+                        ))
+                        .when(split, |frame| {
+                            frame.child(self.render_terminal_pane_header(
+                                tab_id.unwrap(),
+                                pane_id,
+                                active,
+                                cx,
+                            ))
+                        })
+                        .child(div().flex_1().min_h_0().relative().child(surface))
+                        .into_any_element();
+                }
                 let Some(pane) = self.tab_host.read(cx).panes().get(pane_id).cloned() else {
                     return div().size_full().into_any_element();
                 };
@@ -1167,6 +1320,8 @@ impl WorkspaceApp {
                                     this.sync_active_terminal_metadata_context(cx);
                                     this.sync_active_terminal_recording_elapsed_tick(cx);
                                     this.sync_active_privilege_prompt_inline_hint(cx);
+                                } else {
+                                    this.remember_ssh_terminal_pane(pane_id, cx);
                                 }
                                 if let Some(pane) =
                                     this.tab_host.read(cx).panes().get(&pane_id).cloned()

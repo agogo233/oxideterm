@@ -55,7 +55,7 @@ impl WorkspaceApp {
                 self.appearance_row(
                     &format!("settings_view.terminal.{key}"),
                     &format!("settings_view.terminal.{key}_hint"),
-                    checkbox(&self.tokens, String::new(), enabled)
+                    checkbox(&self.tokens, key, String::new(), enabled)
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, _, _, cx| {
@@ -198,11 +198,7 @@ impl WorkspaceApp {
     }
 
     pub(super) fn appearance_edit_scheme(&self) -> Option<bool> {
-        self.settings_store
-            .settings()
-            .appearance
-            .follow_system_appearance
-            .then_some(self.appearance_edit_dark.unwrap_or(self.system_dark))
+        Some(self.appearance_edit_dark.unwrap_or(false))
     }
     pub(in crate::workspace) fn background_settings_for_controls(
         &self,
@@ -215,7 +211,9 @@ impl WorkspaceApp {
             .theme_editor()
             .map(|editor| editor.background.clone())
             .unwrap_or_else(|| {
-                settings.resolved_background(self.appearance_edit_dark.unwrap_or(self.system_dark))
+                settings
+                    .terminal
+                    .background_for_scheme(self.appearance_edit_scheme())
             });
         settings.terminal.apply_background_style(style);
         settings

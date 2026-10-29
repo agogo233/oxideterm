@@ -43,7 +43,6 @@
       "loading": "載入統計資料...",
       "idle_timeout": "閒置：{{min}} 分鐘",
       "idle_timeout_never": "閒置：永不逾時",
-      "capacity": "容量：{{capacity}}",
       "active": "使用中",
       "idle": "閒置",
       "reconnecting": "重新連線中",
@@ -60,7 +59,8 @@
       "overview_error": "錯誤",
       "overview_refresh_interval": "每 {{seconds}} 秒更新",
       "topology_nodes_edges": "Nodes: {{nodes}} • Edges: {{edges}}",
-      "topology_roots_children": "{{roots}} roots / {{children}} children"
+      "topology_roots_children": "{{roots}} roots / {{children}} children",
+      "ide": "IDE"
     },
     "status": {
       "reconnecting_title": "連線重新連接中",

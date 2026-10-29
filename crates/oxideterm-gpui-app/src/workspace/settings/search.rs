@@ -163,6 +163,8 @@ fn settings_search_specs() -> Vec<SettingsSearchEntrySpec> {
             "settings_view.terminal.command_marks",
             &[
                 "settings_view.terminal.command_marks_hint",
+                "settings_view.terminal.command_folding",
+                "settings_view.terminal.command_folding_hint",
                 "settings_view.terminal.command_marks_hover_actions",
             ],
         ),
@@ -207,6 +209,8 @@ fn settings_search_specs() -> Vec<SettingsSearchEntrySpec> {
                 "settings_view.terminal.open_links_with_modifier_hint",
                 "settings_view.terminal.detect_file_paths_as_links",
                 "settings_view.terminal.detect_file_paths_as_links_hint",
+                "settings_view.terminal.timestamp_hover",
+                "settings_view.terminal.timestamp_hover_hint",
             ],
         ),
         terminal_search_entry(
@@ -231,6 +235,8 @@ fn settings_search_specs() -> Vec<SettingsSearchEntrySpec> {
             &[
                 "settings_view.local_terminal.default_shell",
                 "settings_view.local_terminal.default_cwd",
+                "settings_view.local_terminal.shell_path",
+                "settings_view.local_terminal.shell_scheme",
             ],
         ),
         terminal_search_entry(
@@ -244,12 +250,6 @@ fn settings_search_specs() -> Vec<SettingsSearchEntrySpec> {
             3,
             "settings_view.local_terminal.privilege_credentials",
             &["settings_view.local_terminal.privilege_credentials_hint"],
-        ),
-        terminal_search_entry(
-            TerminalSettingsPage::Local,
-            4,
-            "settings_view.local_terminal.available_shells",
-            &["settings_view.local_terminal.select_shell"],
         ),
         terminal_search_entry(
             TerminalSettingsPage::CommandBar,
@@ -323,6 +323,15 @@ fn settings_search_specs() -> Vec<SettingsSearchEntrySpec> {
             ],
         ),
         terminal_search_entry(
+            TerminalSettingsPage::Transfer,
+            2,
+            "settings_view.terminal.xmodem.title",
+            &[
+                "settings_view.terminal.xmodem.block_size",
+                "settings_view.terminal.xmodem.block_size_hint",
+            ],
+        ),
+        terminal_search_entry(
             TerminalSettingsPage::Logging,
             1,
             "settings_view.terminal.session_log_title",
@@ -371,6 +380,8 @@ fn settings_search_specs() -> Vec<SettingsSearchEntrySpec> {
                 "settings_view.appearance.application_theme_hint",
                 "settings_view.appearance.terminal_theme",
                 "settings_view.appearance.follow_system",
+                "settings_view.appearance.mode",
+                "settings_view.appearance.edit_scheme",
                 "settings_view.appearance.system_light",
                 "settings_view.appearance.system_dark",
                 "settings_view.custom_theme.create",
@@ -587,11 +598,17 @@ fn settings_search_specs() -> Vec<SettingsSearchEntrySpec> {
                 "settings_view.ide.line_height",
             ],
         ),
+        ai_search_entry(
+            AiSettingsPage::Tools,
+            1,
+            "settings_view.ide.agent_mode_label",
+            &["settings_view.ide.agent_mode_hint"],
+        ),
         settings_search_entry(
             SettingsTab::Ide,
             2,
             "settings_view.ide.agent_title",
-            &["settings_view.ide.agent_mode_label"],
+            &["settings_view.ide.agent_description"],
         ),
         settings_search_entry(
             SettingsTab::Ide,
@@ -666,7 +683,7 @@ fn settings_search_specs() -> Vec<SettingsSearchEntrySpec> {
             &[
                 "settings_view.ai.tool_use_enabled",
                 "settings_view.ai.tool_use_max_rounds",
-                "ai.agents.concurrency",
+                "settings_view.ai.tool_auto_approval_title",
             ],
         ),
         ai_search_entry(
@@ -677,6 +694,7 @@ fn settings_search_specs() -> Vec<SettingsSearchEntrySpec> {
                 "settings_view.ai.conversation_agents_hint",
                 "ai.agents.allow",
                 "ai.agents.model",
+                "ai.agents.concurrency",
             ],
         ),
         ai_search_entry(
@@ -813,10 +831,7 @@ fn settings_search_specs() -> Vec<SettingsSearchEntrySpec> {
         TerminalSettingsPage::Local,
         1,
         "settings_view.local_terminal.shell",
-        &[
-            "settings_view.local_terminal.git_bash_path",
-            "settings_view.local_terminal.oh_my_posh",
-        ],
+        &["settings_view.local_terminal.oh_my_posh"],
     ));
     #[cfg(target_os = "linux")]
     specs.push(settings_search_entry(
@@ -1061,8 +1076,8 @@ impl WorkspaceApp {
             .child(
                 self.text_input_with_workspace_ime(
                     target,
-                    text_input(
-                        &self.tokens,
+                    self.workspace_text_input(
+                        target,
                         TextInputView {
                             value: query,
                             placeholder: self.i18n.t("settings_view.search.placeholder"),

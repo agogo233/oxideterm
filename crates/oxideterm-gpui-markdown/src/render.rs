@@ -13,7 +13,7 @@ use gpui::{
     Image, InteractiveElement, IntoElement, MouseButton, ParentElement, SharedString,
     StatefulInteractiveElement, StrikethroughStyle, Styled, StyledImage, StyledText, TextAlign,
     TextRun, UnderlineStyle, Window, div, image_cache, img, prelude::FluentBuilder, px, relative,
-    retain_all,
+    retain_recent,
 };
 use oxideterm_gpui_ui::{ScrollableElement, Scrollbar};
 use oxideterm_theme::ThemeTokens;
@@ -30,8 +30,12 @@ use crate::model::{
 use crate::options::MarkdownOptions;
 use crate::style;
 
+mod text_index;
+pub use text_index::visit_selectable_text;
+
 const WINDOWED_MARKDOWN_MIN_ITEMS: usize = 24;
 const MARKDOWN_VIRTUAL_OVERDRAW_PX: f32 = 480.0;
+const MARKDOWN_IMAGE_CACHE_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub struct MarkdownTextFragmentId {
@@ -98,9 +102,12 @@ fn render_document_with_code_actions(
     }
 
     if opts.enable_async_images {
-        image_cache(retain_all(opts.image_cache_id))
-            .child(content)
-            .into_any_element()
+        image_cache(retain_recent(
+            opts.image_cache_id,
+            MARKDOWN_IMAGE_CACHE_BYTES,
+        ))
+        .child(content)
+        .into_any_element()
     } else {
         content.into_any_element()
     }
@@ -199,9 +206,12 @@ fn render_document_windowed_with_code_actions(
     if rendered.is_empty() {
         let content = div().w_full().min_w_0().h(px(total_height));
         return if opts.enable_async_images {
-            image_cache(retain_all(opts.image_cache_id))
-                .child(content)
-                .into_any_element()
+            image_cache(retain_recent(
+                opts.image_cache_id,
+                MARKDOWN_IMAGE_CACHE_BYTES,
+            ))
+            .child(content)
+            .into_any_element()
         } else {
             content.into_any_element()
         };
@@ -231,9 +241,12 @@ fn render_document_windowed_with_code_actions(
     }
 
     if opts.enable_async_images {
-        image_cache(retain_all(opts.image_cache_id))
-            .child(content)
-            .into_any_element()
+        image_cache(retain_recent(
+            opts.image_cache_id,
+            MARKDOWN_IMAGE_CACHE_BYTES,
+        ))
+        .child(content)
+        .into_any_element()
     } else {
         content.into_any_element()
     }
@@ -282,13 +295,21 @@ pub fn render_document_selectable_with_code_actions(
         ));
 
     if opts.enable_footnotes && !document.footnotes.is_empty() {
-        content = content.child(render_footnotes(&document.footnotes, tokens, opts));
+        content = content.child(render_selectable_footnotes(
+            &document.footnotes,
+            tokens,
+            opts,
+            render_text,
+        ));
     }
 
     if opts.enable_async_images {
-        image_cache(retain_all(opts.image_cache_id))
-            .child(content)
-            .into_any_element()
+        image_cache(retain_recent(
+            opts.image_cache_id,
+            MARKDOWN_IMAGE_CACHE_BYTES,
+        ))
+        .child(content)
+        .into_any_element()
     } else {
         content.into_any_element()
     }
@@ -402,7 +423,7 @@ pub fn render_document_windowed_selectable_with_code_actions(
                                 tokens,
                                 opts,
                                 code_actions,
-                                &format!("w:{index}"),
+                                &format!("b:{index}"),
                                 render_text,
                             ))
                             .into_any_element(),
@@ -410,7 +431,10 @@ pub fn render_document_windowed_selectable_with_code_actions(
                 );
             }
             MarkdownLayoutItem::Footnotes(footnotes) => {
-                rendered.push(layout.measure(index, render_footnotes(footnotes, tokens, opts)));
+                rendered.push(layout.measure(
+                    index,
+                    render_selectable_footnotes(footnotes, tokens, opts, render_text),
+                ));
             }
         }
     }
@@ -418,9 +442,12 @@ pub fn render_document_windowed_selectable_with_code_actions(
     if rendered.is_empty() {
         let content = div().w_full().min_w_0().h(px(total_height));
         return if opts.enable_async_images {
-            image_cache(retain_all(opts.image_cache_id))
-                .child(content)
-                .into_any_element()
+            image_cache(retain_recent(
+                opts.image_cache_id,
+                MARKDOWN_IMAGE_CACHE_BYTES,
+            ))
+            .child(content)
+            .into_any_element()
         } else {
             content.into_any_element()
         };
@@ -450,9 +477,12 @@ pub fn render_document_windowed_selectable_with_code_actions(
     }
 
     if opts.enable_async_images {
-        image_cache(retain_all(opts.image_cache_id))
-            .child(content)
-            .into_any_element()
+        image_cache(retain_recent(
+            opts.image_cache_id,
+            MARKDOWN_IMAGE_CACHE_BYTES,
+        ))
+        .child(content)
+        .into_any_element()
     } else {
         content.into_any_element()
     }
@@ -2359,6 +2389,20 @@ fn render_footnotes(
     tokens: &ThemeTokens,
     opts: &MarkdownOptions,
 ) -> AnyElement {
+    render_selectable_footnotes(footnotes, tokens, opts, &mut plain_text_element)
+}
+
+fn render_selectable_footnotes(
+    footnotes: &[FootnoteDefinition],
+    tokens: &ThemeTokens,
+    opts: &MarkdownOptions,
+    render_text: &mut impl FnMut(
+        MarkdownTextFragmentId,
+        SharedString,
+        Vec<TextRun>,
+        Vec<MarkdownTextLink>,
+    ) -> AnyElement,
+) -> AnyElement {
     div()
         .flex()
         .flex_col()
@@ -2381,21 +2425,27 @@ fn render_footnotes(
                     div()
                         .min_w(px(opts.list_indent))
                         .text_color(style::accent_color(tokens))
-                        .child(render_styled_inlines(
+                        .child(render_selectable_inlines(
+                            &format!("footnote:{index}:label"),
                             &[Inline::Link {
                                 text: vec![Inline::Text(format!("[{}] ↩", index + 1))],
                                 url: format!("#fnback:{}", index + 1),
                             }],
                             tokens,
                             opts,
+                            render_text,
                         )),
                 )
-                .child(
-                    div()
-                        .flex_1()
-                        .text_color(style::muted_color(tokens))
-                        .child(render_blocks(&footnote.blocks, tokens, opts)),
-                )
+                .child(div().flex_1().text_color(style::muted_color(tokens)).child(
+                    render_selectable_blocks(
+                        &footnote.blocks,
+                        tokens,
+                        opts,
+                        None,
+                        &format!("footnote:{index}:body"),
+                        render_text,
+                    ),
+                ))
         }))
         .into_any_element()
 }
@@ -2512,13 +2562,9 @@ fn render_selectable_inlines_with_style(
             return;
         }
         let (value, runs, links) = flat_text(text, tokens, opts);
-        let mut start = 0;
-        let ends = breaks
-            .range((*logical_cursor + 1)..(*logical_cursor + value.len()))
-            .map(|offset| offset - *logical_cursor)
-            .chain(std::iter::once(value.len()))
-            .collect::<Vec<_>>();
-        for end in ends {
+        for range in inline_text_segments(&value, *logical_cursor, &breaks) {
+            let start = range.start;
+            let end = range.end;
             let segment = &value[start..end];
             let hard_break = segment.ends_with('\n');
             let visible_end = if hard_break { end - 1 } else { end };
@@ -2549,7 +2595,6 @@ fn render_selectable_inlines_with_style(
                 hard_break,
             });
             previous_hard_break.set(hard_break);
-            start = end;
             part += 1;
         }
         *logical_cursor += value.len();
@@ -2747,6 +2792,24 @@ fn inline_break_offsets(flat: &[FlatRun]) -> std::collections::BTreeSet<usize> {
         .collect()
 }
 
+fn inline_text_segments<'a>(
+    text: &'a str,
+    logical_cursor: usize,
+    breaks: &'a std::collections::BTreeSet<usize>,
+) -> impl Iterator<Item = Range<usize>> + 'a {
+    // The text index and the renderer must use identical byte ranges around
+    // inline images, formulas and hard breaks.
+    breaks
+        .range((logical_cursor + 1)..(logical_cursor + text.len()).max(logical_cursor + 1))
+        .map(move |offset| offset - logical_cursor)
+        .chain(std::iter::once(text.len()))
+        .scan(0, |start, end| {
+            let range = *start..end;
+            *start = end;
+            Some(range)
+        })
+}
+
 fn inline_text_baseline_depth(line_height: f32, ascent: f32, descent: f32) -> f32 {
     // Native macOS font metrics have a negative descent, whereas GPUI's shaped
     // lines paint with a positive descent. Match that convention and line leading.
@@ -2860,6 +2923,9 @@ fn render_image(
 }
 
 fn image_path_from_url(url: &str, opts: &MarkdownOptions) -> Option<PathBuf> {
+    if !should_load_image(url, opts) {
+        return None;
+    }
     if let Some(scheme) = url_scheme(url) {
         if !image_scheme_allowed(scheme, opts) {
             return None;
@@ -2883,7 +2949,8 @@ fn image_path_from_url(url: &str, opts: &MarkdownOptions) -> Option<PathBuf> {
 
 fn should_load_image(url: &str, opts: &MarkdownOptions) -> bool {
     let Some(scheme) = url_scheme(url) else {
-        return true;
+        // Relative and absolute filesystem paths share the file-scheme policy.
+        return image_scheme_allowed("file", opts);
     };
     image_scheme_allowed(scheme, opts)
 }
@@ -3604,8 +3671,17 @@ mod tests {
     fn image_resolution_preserves_local_paths_and_enforces_scheme_policy() {
         let opts = MarkdownOptions::default();
         let source_opts = MarkdownOptions::default().with_source_path("/tmp/docs/README.md");
+        let remote_opts = MarkdownOptions {
+            allowed_image_schemes: vec!["http", "https", "data"],
+            ..MarkdownOptions::default()
+        };
         for (url, options, allowed, path) in [
             ("images/logo.png", &opts, true, Some("images/logo.png")),
+            ("images/logo.png", &remote_opts, false, None),
+            ("/tmp/logo.png", &remote_opts, false, None),
+            ("file:///tmp/logo.png", &remote_opts, false, None),
+            (r"C:\images\logo.png", &remote_opts, false, None),
+            ("https://example.com/logo.png", &remote_opts, true, None),
             ("file:///tmp/logo.png", &opts, true, Some("/tmp/logo.png")),
             ("https://example.com/logo.png", &opts, true, None),
             ("http://example.com/logo.png", &opts, true, None),

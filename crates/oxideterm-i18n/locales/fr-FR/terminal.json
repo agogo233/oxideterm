@@ -1,5 +1,28 @@
 {
   "terminal": {
+    "archive": {
+      "title": "Extraire l’archive",
+      "command": "Commande d’extraction",
+      "change_shell": "Changer",
+      "open_hint": "Cliquez pour préparer la commande d’extraction",
+      "open_modifier_hint": "{{modifier}} + clic pour préparer la commande d’extraction",
+      "source": "Archive",
+      "destination": "Dossier de destination",
+      "probing": "Vérification des outils d’extraction disponibles…",
+      "fill": "Ajouter à la barre de commandes",
+      "context_unavailable": "Revenez à un shell inactif avant de préparer l’extraction.",
+      "probe_failed": "Impossible de vérifier cet environnement. Réessayez depuis un shell local ou SSH classique.",
+      "choose_shell": "Sélectionnez le shell utilisé par ce terminal.",
+      "unsupported": "Ce format d’archive n’est pas pris en charge.",
+      "invalid_path": "Ce chemin ne peut pas être représenté de manière sûre dans le shell sélectionné.",
+      "cwd_unavailable": "Le répertoire actuel est inconnu. Utilisez un chemin d’archive absolu.",
+      "tool_unavailable": "Aucun outil d’extraction adapté trouvé. Installez tar, unzip, 7-Zip ou le décompresseur nécessaire dans cet environnement.",
+      "context_changed": "Le terminal, la connexion ou le répertoire a changé. Cliquez à nouveau sur l’archive.",
+      "shell_posix": "sh / Bash / Zsh",
+      "shell_fish": "Fish",
+      "shell_powershell": "PowerShell",
+      "shell_cmd": "CMD"
+    },
     "history": {
       "save": "Enregistrer l’historique sur cet appareil",
       "save_hint": "Enregistre les commandes complètes des connexions SSH, Telnet, Mosh et série enregistrées dans un fichier local non chiffré, y compris les mots de passe ou jetons dans les arguments. L’enregistrement commence à l’activation.",
@@ -102,6 +125,10 @@
       "find": "Rechercher...",
       "manage_triggers": "Gérer les déclencheurs de cette session...",
       "select_command": "Sélectionner la commande",
+      "collapse_output": "Replier la sortie",
+      "expand_output": "Déplier la sortie",
+      "folded_output": "{{count}} lignes de sortie repliées",
+      "folded_exit_code": "Code de sortie {{code}}",
       "previous_command": "Commande précédente",
       "next_command": "Commande suivante",
       "clear_screen": "Effacer l'écran"
@@ -267,6 +294,13 @@
       "source_quick_command": "quick"
     },
     "quick_commands": {
+      "all_groups": "Tous les groupes",
+      "search_groups": "Rechercher un groupe…",
+      "group_empty": "Aucune commande disponible dans ce groupe",
+      "icon_color": "Couleur de l’icône",
+      "icon_color_hint": "#RRGGBB · vide pour le thème",
+      "icon_color_reset": "Utiliser le thème",
+      "icon_color_invalid": "Saisissez une couleur hexadécimale à six chiffres, par exemple #22d3ee.",
       "title": "Quick Commands",
       "open": "Quick Commands",
       "close": "Close Quick Commands",
@@ -581,11 +615,33 @@
       "enter_fill": "Entrée pour remplir",
       "enter_fill_title": "Appuyez sur Entrée ou cliquez pour remplir {{label}}",
       "inline_fill_hint": "Appuyez sur Entrée pour utiliser l’identifiant d’élévation enregistré",
+      "totp_fill_hint": "Appuyez sur Entrée pour remplir le code de vérification enregistré",
+      "totp_load_failed": "Impossible de charger l’identifiant de code de vérification",
+      "totp_send_failed": "Impossible d’envoyer le code de vérification",
       "load_failed": "Impossible de charger l’identifiant de privilège",
       "send_failed": "Impossible d’envoyer l’identifiant de privilège",
       "manage": "Identifiants d’élévation",
       "manage_title": "Ouvrir les réglages d’identifiants d’élévation pour ce périmètre",
       "local_manage_unavailable": "La gestion des identifiants d’élévation du shell local n’est pas encore disponible."
+    },
+    "shell_ide": {
+      "requirements": "L’accès par commandes nécessite Linux avec GNU find, stat, grep et coreutils.",
+      "access_title": "Choisir l’accès aux fichiers",
+      "agent": "Utiliser l’agent (installer ou mettre à jour si nécessaire)",
+      "commands": "Commandes shell",
+      "sftp": "SFTP",
+      "convert": "Convertir en IDE",
+      "return": "Retour au terminal",
+      "confirm": "Confirmez que le terminal affiche une invite shell sans saisie en attente. Les commandes ou l’agent utilisent l’utilisateur, le conteneur et le dossier actuels. La saisie est suspendue jusqu’au retour depuis l’IDE.",
+      "failed": "Impossible de démarrer l’accès aux fichiers. Vérifiez le shell et les prérequis. Reconnectez le terminal si sa restauration a échoué.",
+      "preparing": "Démarrage du service de fichiers IDE ; la saisie du terminal est suspendue…",
+      "ssh": "SSH",
+      "agent_choice_hint": "Le Shell seul n’installe aucun agent. L’agent est installé ou réutilisé dans ~/.oxideterm/oxideterm-agent de l’environnement choisi.",
+      "sftp_unavailable": "SFTP est indisponible. Choisissez SSH.",
+      "ssh_unavailable": "Échec de l’accès aux fichiers SSH. Vérifiez l’environnement. Si une connexion interactive est nécessaire, terminez-la dans un terminal, puis faites un clic droit sur celui-ci et choisissez « Convertir en IDE ».",
+      "ssh_shell": "SSH (canal Shell)",
+      "agent_installing": "Installation de l’agent : {{percent}}% ({{transferred}} / {{total}} KiB)",
+      "agent_starting": "Démarrage de l’agent…"
     }
   },
   "search": {
@@ -594,6 +650,9 @@
     "next": "suiv",
     "close": "x",
     "no_results": "Aucun résultat",
+    "match_case": "Respecter la casse",
+    "use_regex": "Utiliser une expression régulière",
+    "invalid_regex": "Expression régulière invalide",
     "visible_terminal_hint": "Recherche dans le défilement visible du terminal."
   },
   "workspace": {

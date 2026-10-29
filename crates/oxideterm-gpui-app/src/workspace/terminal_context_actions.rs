@@ -46,6 +46,7 @@ impl WorkspaceApp {
                     save_after_open: None,
                     cleanup_node_id: None,
                     title: String::new(),
+                    open_sftp_on_connect: false,
                 },
                 cx,
             )
@@ -129,6 +130,10 @@ impl WorkspaceApp {
         };
 
         match action {
+            TerminalContextAction::ConvertToShellIde => {
+                self.request_shell_ide(pane_id, source_pane, window, cx);
+                true
+            }
             TerminalContextAction::Reconnect => {
                 self.request_ssh_terminal_reconnect(pane_id, cx);
                 true
@@ -182,6 +187,13 @@ impl WorkspaceApp {
             }
             TerminalContextAction::OpenSessionTriggers => {
                 self.open_terminal_trigger_settings_for_pane(pane_id, window, cx);
+                true
+            }
+            TerminalContextAction::PreviewArchiveCommand => {
+                let path = source_pane.update(cx, |pane, _| pane.take_archive_path_request());
+                if let Some(path) = path {
+                    self.open_archive_command(pane_id, source_pane, path, window, cx);
+                }
                 true
             }
         }

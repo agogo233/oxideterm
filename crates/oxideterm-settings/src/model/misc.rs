@@ -5,6 +5,9 @@ pub struct LocalTerminalSettings {
     pub recent_shell_ids: Vec<String>,
     pub default_cwd: Option<String>,
     pub git_bash_path: Option<String>,
+    // Executable locations belong to this device and are excluded from portable settings.
+    #[serde(default)]
+    pub shell_paths: std::collections::BTreeMap<String, String>,
     pub load_shell_profile: bool,
     pub oh_my_posh_enabled: bool,
     pub oh_my_posh_theme: Option<String>,
@@ -23,6 +26,7 @@ impl Default for LocalTerminalSettings {
             recent_shell_ids: Vec::new(),
             default_cwd: None,
             git_bash_path: None,
+            shell_paths: std::collections::BTreeMap::new(),
             load_shell_profile: true,
             oh_my_posh_enabled: false,
             oh_my_posh_theme: None,
@@ -47,6 +51,9 @@ pub struct SftpSettings {
     // The default keeps existing installations neutral until the user chooses a surface.
     #[serde(default)]
     pub presentation: SftpPresentationPreference,
+    // The sidebar keeps flat/tree as a user preference; tabs always stay flat.
+    #[serde(default)]
+    pub sidebar_view_mode: SftpSidebarViewMode,
     // Preserve the user's embedded sidebar split without exposing transient
     // drag state in settings.
     #[serde(default = "default_sftp_sidebar_session_fraction")]
@@ -67,6 +74,7 @@ impl Default for SftpSettings {
     fn default() -> Self {
         Self {
             presentation: SftpPresentationPreference::Ask,
+            sidebar_view_mode: SftpSidebarViewMode::Flat,
             sidebar_session_fraction: default_sftp_sidebar_session_fraction(),
             transfer_protocol: FileTransferProtocolPreference::Auto,
             max_concurrent_transfers: 3,
@@ -90,6 +98,15 @@ pub enum SftpPresentationPreference {
     Ask,
     Tab,
     Sidebar,
+}
+
+/// Remote list presentation for the embedded sidebar browser.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SftpSidebarViewMode {
+    #[default]
+    Flat,
+    Tree,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]

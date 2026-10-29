@@ -43,7 +43,6 @@
       "loading": "Chargement des statistiques...",
       "idle_timeout": "Inactif : {{min}} min",
       "idle_timeout_never": "Inactif : jamais",
-      "capacity": "Capacité : {{capacity}}",
       "active": "Actif",
       "idle": "Inactif",
       "reconnecting": "Reconnexion",
@@ -60,7 +59,8 @@
       "overview_error": "Erreur",
       "overview_refresh_interval": "Actualisation toutes les {{seconds}} secondes",
       "topology_nodes_edges": "Nodes: {{nodes}} • Edges: {{edges}}",
-      "topology_roots_children": "{{roots}} roots / {{children}} children"
+      "topology_roots_children": "{{roots}} roots / {{children}} children",
+      "ide": "IDE"
     },
     "status": {
       "reconnecting_title": "Reconnexion en cours",

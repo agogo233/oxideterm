@@ -14,11 +14,14 @@ fn tab_scroll_viewport(scroll_handle: &ScrollHandle) -> gpui::Stateful<gpui::Div
 
 impl IdeSurface {
     fn render_editor_area(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        self.sync_tab_render_caches(cx);
         let editor_content = div()
+            .debug_selector(|| "ide-editor-content".into())
             .relative()
             .flex_1()
             .min_h_0()
             .child(match self.active_editor() {
+                Some(_) if self.is_markdown_preview() => self.render_markdown_preview(cx),
                 Some(editor) => editor.into_any_element(),
                 None if self
                     .workspace
@@ -27,10 +30,22 @@ impl IdeSurface {
                 {
                     self.render_loading_file()
                 }
+                None if let Some(error) = self
+                    .workspace
+                    .active_tab()
+                    .and_then(|tab| self.file_open_errors.get(&tab)) =>
+                {
+                    oxideterm_gpui_ui::error_state(
+                        &self.tokens,
+                        self.icon("lucide/triangle-alert.svg", 32.0, self.tokens.ui.warning),
+                        self.file_error_message(error),
+                        None,
+                        None,
+                    )
+                    .debug_selector(|| "ide-file-open-error".into())
+                    .into_any_element()
+                }
                 None => self.render_empty_editor(cx),
-            })
-            .when(self.editor_search.open, |this| {
-                this.child(self.render_editor_search_bar(cx))
             });
 
         div()
@@ -206,11 +221,25 @@ impl IdeSurface {
             .border_b_1()
             .border_color(rgb(self.tokens.ui.border))
             .bg(self.ide_bg(self.tokens.ui.bg, IDE_BG_HALF_ALPHA))
-            .child(scroll_viewport)
+            .flex()
+            .items_center()
             .child(
-                Scrollbar::new(&self.tab_scroll_handle)
-                    .id("ide-tabs-horizontal-scrollbar")
-                    .axis(ScrollbarAxis::Horizontal),
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .overflow_hidden()
+                    .child(scroll_viewport)
+                    .child(
+                        Scrollbar::new(&self.tab_scroll_handle)
+                            .id("ide-tabs-horizontal-scrollbar")
+                            .axis(ScrollbarAxis::Horizontal),
+                    ),
+            )
+            .when(
+                self.active_markdown_tab().is_some() && self.active_editor().is_some(),
+                |row| row.child(self.render_markdown_toggle(cx)),
             )
             .into_any_element()
     }

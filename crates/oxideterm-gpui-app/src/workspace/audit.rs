@@ -790,6 +790,7 @@ impl WorkspaceApp {
     fn render_audit_toggle(&self, cx: &Context<Self>) -> AnyElement {
         oxideterm_gpui_ui::checkbox::checkbox(
             &self.tokens,
+            "audit-enabled",
             self.i18n.t(if self.audit.policy.enabled {
                 "event_log.audit.enabled_status"
             } else {
@@ -1012,23 +1013,24 @@ impl WorkspaceApp {
                             ))
                             .child({
                                 let target = WorkspaceImeTarget::AuditSearch;
-                                let input = oxideterm_gpui_ui::text_input::text_input(
-                                    &self.tokens,
-                                    oxideterm_gpui_ui::text_input::TextInputView {
-                                        value: &self.audit.search,
-                                        placeholder: self.i18n.t("event_log.audit.search"),
-                                        focused: self.active_ime_target(cx) == Some(target),
-                                        caret_visible: self.input_caret.visible(),
-                                        secret: false,
-                                        selected_all: false,
-                                        selected_range: self
-                                            .ime_selected_range_for_target(target, cx),
-                                        marked_text: self.marked_text_for_target(target, cx),
-                                    },
-                                )
-                                .flex_1()
-                                .min_w_0()
-                                .h(px(28.0));
+                                let input = self
+                                    .workspace_text_input(
+                                        target,
+                                        oxideterm_gpui_ui::text_input::TextInputView {
+                                            value: &self.audit.search,
+                                            placeholder: self.i18n.t("event_log.audit.search"),
+                                            focused: self.active_ime_target(cx) == Some(target),
+                                            caret_visible: self.input_caret.visible(),
+                                            secret: false,
+                                            selected_all: false,
+                                            selected_range: self
+                                                .ime_selected_range_for_target(target, cx),
+                                            marked_text: self.marked_text_for_target(target, cx),
+                                        },
+                                    )
+                                    .flex_1()
+                                    .min_w_0()
+                                    .h(px(28.0));
                                 self.text_input_with_workspace_ime(
                                     target,
                                     input,

@@ -43,7 +43,6 @@
       "loading": "통계 로딩 중...",
       "idle_timeout": "유휴: {{min}}분",
       "idle_timeout_never": "유휴: 시간 초과 없음",
-      "capacity": "용량: {{capacity}}",
       "active": "활성",
       "idle": "유휴",
       "reconnecting": "재연결 중",
@@ -60,7 +59,8 @@
       "overview_error": "오류",
       "overview_refresh_interval": "{{seconds}}초마다 업데이트",
       "topology_nodes_edges": "Nodes: {{nodes}} • Edges: {{edges}}",
-      "topology_roots_children": "{{roots}} roots / {{children}} children"
+      "topology_roots_children": "{{roots}} roots / {{children}} children",
+      "ide": "IDE"
     },
     "status": {
       "reconnecting_title": "연결 재설정 중",

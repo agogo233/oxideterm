@@ -43,7 +43,6 @@
       "loading": "加载统计中...",
       "idle_timeout": "空闲: {{min}}分钟",
       "idle_timeout_never": "空闲: 永不超时",
-      "capacity": "容量: {{capacity}}",
       "active": "活动",
       "idle": "空闲",
       "reconnecting": "重连中",
@@ -60,7 +59,8 @@
       "overview_error": "错误",
       "overview_refresh_interval": "每 {{seconds}} 秒更新",
       "topology_nodes_edges": "节点: {{nodes}} • 边: {{edges}}",
-      "topology_roots_children": "{{roots}} 个根 / {{children}} 个子节点"
+      "topology_roots_children": "{{roots}} 个根 / {{children}} 个子节点",
+      "ide": "IDE"
     },
     "status": {
       "reconnecting_title": "连接重连中",

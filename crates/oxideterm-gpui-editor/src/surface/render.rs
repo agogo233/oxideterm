@@ -5,10 +5,9 @@ use std::{cell::Cell, collections::BTreeMap, ops::Range, rc::Rc};
 
 use gpui::{
     Anchor, AnchoredPositionMode, AnyElement, App, AppContext, Context, CursorStyle, Div,
-    EmptyView, Entity, InteractiveElement, IntoElement, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ParentElement, Render, ScrollWheelEvent, SharedString,
-    StatefulInteractiveElement, Styled, Window, anchored, deferred, div, prelude::FluentBuilder,
-    px, rgb, rgba,
+    EmptyView, Entity, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement,
+    Render, ScrollWheelEvent, SharedString, StatefulInteractiveElement, Styled, Window, anchored,
+    deferred, div, prelude::FluentBuilder, px, rgb, rgba,
 };
 use oxideterm_editor_core::{BufferOffset, Selection};
 use oxideterm_editor_syntax::{BracketPair, SyntaxScope};
@@ -98,10 +97,11 @@ impl Render for TextEditorView {
         let focused = self.focus_handle.is_focused(window);
         self.sync_caret_blink_focus(focused, cx);
         self.measure_code_metrics(window, cx);
+        self.highlight_chunk_cache.borrow_mut().begin_frame();
         // Content edits, wrapping, and resizing can all shorten the widest row.
         self.viewport
             .clamp_horizontal(self.max_horizontal_scroll_px());
-        self.reveal_changed_caret_horizontally(window);
+        self.reveal_changed_caret(window);
         let display_rows = self.display_rows();
         let visible = self
             .viewport
@@ -136,11 +136,35 @@ impl Render for TextEditorView {
             rows = rows.child(self.render_row(display_index, row, &row_context, window, cx));
         }
         rows = rows.child(div().h(px(visible.bottom_spacer_px as f32)));
+        self.highlight_chunk_cache.borrow_mut().finish_frame();
+        self.segment_cache
+            .borrow_mut()
+            .lines
+            .retain(|line, _| visible_rows.iter().any(|row| row.line == *line));
 
         let mut body_content = div()
             .relative()
             .size_full()
             .overflow_hidden()
+            .cursor(CursorStyle::Arrow)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    // Document rows consume their own clicks; the remaining viewport is
+                    // whitespace below the document and must retain editor input ownership.
+                    window.focus(&this.focus_handle, cx);
+                    this.activate_caret_blink(cx);
+                    this.context_menu = None;
+                    let end = BufferOffset(this.buffer.len());
+                    let anchor = if event.modifiers.shift {
+                        this.cursor.selection().anchor
+                    } else {
+                        end
+                    };
+                    this.start_selection_drag(anchor, end, cx);
+                    cx.stop_propagation();
+                }),
+            )
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
@@ -153,14 +177,14 @@ impl Render for TextEditorView {
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _window, cx| {
                 this.handle_scroll(event, cx);
             }))
-            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
-                this.drag_selection_to_point(event.position, window, cx);
-            }))
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
-                    this.finish_selection_drag(cx);
-                }),
+            .child(
+                div()
+                    .absolute()
+                    .left(px(self.visible_gutter_width()))
+                    .right_0()
+                    .top_0()
+                    .bottom_0()
+                    .cursor(CursorStyle::IBeam),
             )
             .child(rows);
         if let Some(placeholder) = self.render_placeholder() {
@@ -222,11 +246,10 @@ impl Render for TextEditorView {
                 this.handle_key(event, window, cx);
             }))
             .child(body);
-        if self.presentation == EditorPresentation::Document
+        if (self.presentation == EditorPresentation::Document || self.document_row_count() > 1)
             && let Some(scrollbar) = self.render_vertical_scrollbar(view, cx)
         {
-            // Inline editors are single-row controls. Their overflow belongs to
-            // the horizontal axis, so a vertical thumb is always misleading.
+            // Multiline inputs share the document viewport and scrollbar behavior.
             root = root.child(scrollbar);
         }
         if let Some(scrollbar) = self.render_horizontal_scrollbar(cx.entity(), cx) {
@@ -234,6 +257,12 @@ impl Render for TextEditorView {
         }
         if let Some(menu) = self.context_menu {
             root = root.child(self.render_context_menu(menu, window, cx));
+        }
+        // Search inputs are siblings of the document key handler, so their edits
+        // cannot bubble into the buffer they are searching.
+        let mut root = div().relative().size_full().child(root);
+        if self.search_bar.is_some() {
+            root = root.child(self.render_search_bar(window, cx));
         }
         let Some(language) = self
             .language
@@ -261,7 +290,7 @@ impl Render for TextEditorView {
 }
 
 impl TextEditorView {
-    fn reveal_changed_caret_horizontally(&mut self, window: &mut Window) {
+    fn reveal_changed_caret(&mut self, window: &mut Window) {
         let Some(bounds) = self.content_bounds else {
             return;
         };
@@ -270,6 +299,19 @@ impl TextEditorView {
             return;
         }
         self.last_revealed_caret = Some(caret_state);
+        if self.presentation == EditorPresentation::Inline
+            && let Ok(position) = self.buffer.offset_to_line_col(caret_state.1)
+        {
+            let text = self.buffer.line_text(position.line).unwrap_or_default();
+            let column = visual_column_for_byte_column(&text, position.column);
+            if let Some((index, _, _)) = super::wrap::display_row_for_visual_column(
+                &self.display_rows(),
+                position.line,
+                column,
+            ) {
+                self.reveal_display_row(index);
+            }
+        }
         // Only edits and caret movement reveal text. Repaints after manual scrolling
         // must not pull the viewport back to an unchanged selection.
         let caret = self.bounds_for_byte_offset(caret_state.1, bounds, window);
@@ -295,7 +337,8 @@ impl TextEditorView {
     ) -> Option<AnyElement> {
         let geometry = editor_scrollbar_geometry(
             self.viewport.height_px,
-            self.document_row_count() as f32 * self.metrics.line_height,
+            self.viewport
+                .scrollable_height(self.document_row_count(), self.metrics.line_height),
             self.viewport.scroll_y_px,
         )?;
         let drag_state = EditorScrollbarDragState {
@@ -367,7 +410,8 @@ impl TextEditorView {
         };
         let Some(geometry) = editor_scrollbar_geometry(
             self.viewport.height_px,
-            self.document_row_count() as f32 * self.metrics.line_height,
+            self.viewport
+                .scrollable_height(self.document_row_count(), self.metrics.line_height),
             self.viewport.scroll_y_px,
         ) else {
             return;
@@ -487,12 +531,35 @@ impl TextEditorView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Div {
+        if matches!(
+            &*self.display_rows(),
+            super::wrap::DisplayRows::Unwrapped(_)
+        ) && let Some(segments) = self.line_segments(display_row.line)
+        {
+            let first = segments.at_x(self.viewport.scroll_x_px).saturating_sub(1);
+            let last = (segments
+                .at_x(self.viewport.scroll_x_px + self.horizontal_viewport_width_px())
+                + 1)
+            .min(segments.starts.len() - 1);
+            let origin = segments.starts[first];
+            let text = self.segment_text(display_row.line, origin.byte, segments.end(last));
+            return self.render_row_with_text(
+                display_index,
+                display_row,
+                &text,
+                origin,
+                row_context,
+                window,
+                cx,
+            );
+        }
         self.buffer
             .with_line_text(display_row.line, |line_text| {
                 self.render_row_with_text(
                     display_index,
                     display_row,
                     line_text,
+                    super::segments::SegmentOrigin::default(),
                     row_context,
                     window,
                     cx,
@@ -506,6 +573,7 @@ impl TextEditorView {
         display_index: usize,
         display_row: DisplayRow,
         line_text: &str,
+        origin: super::segments::SegmentOrigin,
         row_context: &RenderRowContext,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -533,21 +601,38 @@ impl TextEditorView {
             .iter()
             .any(|range| range.contains(&line));
         let cursor_visual_column = cursor_position
-            .map(|position| visual_column_for_byte_column(&line_text, position.column))
+            .map(|position| {
+                origin.column
+                    + visual_column_for_byte_column(
+                        &line_text,
+                        position.column.saturating_sub(origin.byte),
+                    )
+            })
             .unwrap_or(0);
-        let show_cursor = row_context.primary_caret_display_index == Some(display_index);
-        let cursor_column = cursor_visual_column.saturating_sub(display_row.start_col);
+        let show_cursor = row_context.primary_caret_display_index == Some(display_index)
+            && cursor_position.is_some_and(|position| {
+                position.column >= origin.byte && position.column <= origin.byte + line_text.len()
+            });
+        let cursor_column =
+            cursor_visual_column.saturating_sub(display_row.start_col.max(origin.column));
         let line_height = self.metrics.line_height;
         let gutter_width = self.visible_gutter_width();
-        let content_left = self.visible_content_padding_x() - self.viewport.scroll_x_px;
+        let content_left = self.visible_content_padding_x() - self.viewport.scroll_x_px + origin.x;
         let row_display = display_row;
-        let byte_start = byte_column_for_visual_column(&line_text, display_row.start_col);
-        let byte_end = byte_column_for_visual_column(&line_text, display_row.end_col);
+        let byte_start = byte_column_for_visual_column(
+            &line_text,
+            display_row.start_col.saturating_sub(origin.column),
+        );
+        let byte_end = byte_column_for_visual_column(
+            &line_text,
+            display_row.end_col.saturating_sub(origin.column),
+        );
         let segment_text = &line_text[byte_start..byte_end];
         let cursor_byte_column = cursor_position
             .filter(|_| show_cursor)
-            .map(|position| position.column.saturating_sub(byte_start));
-        let segment_range = (line_start + byte_start)..(line_start + byte_end).min(line_end);
+            .map(|position| position.column.saturating_sub(origin.byte + byte_start));
+        let segment_range = (line_start + origin.byte + byte_start)
+            ..(line_start + origin.byte + byte_end).min(line_end);
         let selection_ranges = if row_context.selections.is_empty() {
             Vec::new()
         } else {
@@ -560,15 +645,18 @@ impl TextEditorView {
         let find_ranges = if self.find_matches.is_empty() {
             Vec::new()
         } else {
-            self.find_rects_for_line(line, &segment_text, segment_range.clone())
+            self.find_rects_for_line(&segment_text, segment_range.clone())
         };
         let bracket_ranges = row_context
             .matching_bracket_pair
             .as_ref()
             .map(|pair| self.bracket_rects_for_line(pair, &segment_text, segment_range.clone()))
             .unwrap_or_default();
-        let indent_guides =
-            self.indentation_marker_columns(display_row, &row_context.indentation_columns_by_line);
+        let indent_guides = self
+            .indentation_marker_columns(display_row, &row_context.indentation_columns_by_line)
+            .into_iter()
+            .filter_map(|column| column.checked_sub(origin.column))
+            .collect::<Vec<_>>();
         let needs_shaped_coordinates = cursor_byte_column.is_some()
             || !selection_ranges.is_empty()
             || !find_ranges.is_empty()
@@ -789,6 +877,7 @@ impl TextEditorView {
                     show_cursor,
                     marked_text,
                     folded,
+                    window,
                 )),
         );
 
@@ -1025,6 +1114,7 @@ impl TextEditorView {
         show_cursor: bool,
         marked_text: Option<&str>,
         folded: bool,
+        window: &mut Window,
     ) -> Div {
         let byte_column = byte_column_for_visual_column(line_text, cursor_column);
         let mut row = div().flex().items_center();
@@ -1068,7 +1158,7 @@ impl TextEditorView {
                 row = self.append_rendered_text(row, after, chunk.color);
                 cursor_drawn = true;
             } else {
-                row = self.append_rendered_chunk(row, chunk);
+                row = self.append_rendered_chunk(row, chunk, window);
             }
         }
 
@@ -1114,11 +1204,64 @@ impl TextEditorView {
         row
     }
 
-    fn append_rendered_chunk(&self, row: Div, chunk: &LineChunkSpec) -> Div {
+    fn append_rendered_chunk(&self, row: Div, chunk: &LineChunkSpec, window: &mut Window) -> Div {
         if !self.settings.highlight_special_chars || !contains_special_char(&chunk.text) {
-            // Highlight chunks are cached across scroll frames, so retain the
-            // shared text allocation instead of rebuilding a String per row.
-            return row.child(colored_shared_text(chunk.text.clone(), chunk.color));
+            // Retain the native glyph layout with the existing bounded row cache,
+            // so scrolling back does not depend on GPUI's previous-frame cache.
+            let layout = chunk
+                .layout
+                .get_or_init(|| {
+                    let run = gpui::TextRun {
+                        len: chunk.text.len(),
+                        font: editor_code_font(
+                            &self.appearance.font_family,
+                            self.appearance.font_fallback_family.as_deref(),
+                            self.appearance.font_weight,
+                        ),
+                        color: rgb(chunk.color).into(),
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                        letter_spacing: None,
+                    };
+                    window.text_system().layout_line(
+                        &chunk.text,
+                        px(self.metrics.font_size),
+                        &[run],
+                        None,
+                    )
+                })
+                .clone();
+            let width = layout.width.ceil();
+            let line_height = px(self.metrics.line_height);
+            let decoration = gpui::DecorationRun {
+                len: chunk.text.len() as u32,
+                color: rgb(chunk.color).into(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            return row.child(
+                gpui::canvas(
+                    |_, _, _| (),
+                    move |bounds, _, window, cx| {
+                        layout
+                            .paint(
+                                bounds.origin,
+                                line_height,
+                                gpui::TextAlign::Left,
+                                None,
+                                std::slice::from_ref(&decoration),
+                                window,
+                                cx,
+                            )
+                            .expect("editor text painting failed");
+                    },
+                )
+                .w(width)
+                .h(line_height)
+                .flex_none(),
+            );
         }
         self.append_rendered_text(row, &chunk.text, chunk.color)
     }
@@ -1148,6 +1291,9 @@ impl TextEditorView {
                     .offset_to_line_col(self.cursor.selection().head)
                     .ok()
                     .and_then(|position| {
+                        if matches!(display_rows, super::wrap::DisplayRows::Unwrapped(_)) {
+                            return Some(position.line);
+                        }
                         let line_text = self.buffer.line_text(position.line).unwrap_or_default();
                         let visual_column =
                             visual_column_for_byte_column(&line_text, position.column);
@@ -1253,20 +1399,15 @@ impl TextEditorView {
             .collect()
     }
 
-    fn find_rects_for_line(
-        &self,
-        line: usize,
-        line_text: &str,
-        line_range: Range<usize>,
-    ) -> Vec<Range<usize>> {
-        let match_range = self.find_line_matches.get(line).cloned().unwrap_or(0..0);
-        if match_range.is_empty() {
-            return Vec::new();
-        }
-        self.find_matches
-            .get(match_range)
-            .unwrap_or(&[])
+    fn find_rects_for_line(&self, line_text: &str, line_range: Range<usize>) -> Vec<Range<usize>> {
+        // Literal matches have equal byte lengths and regex matches do not
+        // overlap, so both their starts and ends are ordered, including multiline hits.
+        let first = self
+            .find_matches
+            .partition_point(|hit| hit.range.end.0 <= line_range.start);
+        self.find_matches[first..]
             .iter()
+            .take_while(|hit| hit.range.start.0 < line_range.end)
             .filter_map(|hit| {
                 selection_byte_range_for_line(
                     Selection::new(hit.range.start, hit.range.end),
@@ -1337,7 +1478,7 @@ impl TextEditorView {
             range_start: line_range.start,
             range_end: line_range.end,
         };
-        if let Some(chunks) = self.highlight_chunk_cache.borrow().get(&key) {
+        if let Some(chunks) = self.highlight_chunk_cache.borrow_mut().get(&key) {
             return chunks;
         }
 
@@ -1498,11 +1639,8 @@ fn push_chunk(
         end,
         color,
         text: SharedString::from(line_text[start..end].to_string()),
+        layout: Default::default(),
     });
-}
-
-fn colored_shared_text(text: SharedString, color: u32) -> Div {
-    div().text_color(rgb(color)).child(text)
 }
 
 fn contains_special_char(text: &str) -> bool {
@@ -1543,7 +1681,7 @@ fn visible_indentation_columns(
 
 #[cfg(test)]
 mod tests {
-    use super::visible_indentation_columns;
+    use super::*;
     use crate::surface::wrap::DisplayRow;
     use oxideterm_editor_syntax::{LanguageId, StructureCache};
 
@@ -1555,6 +1693,270 @@ mod tests {
             is_first: start_col == 0,
             is_folded_header: false,
         }
+    }
+
+    struct SelectionDragTestView {
+        editor: Entity<TextEditorView>,
+    }
+
+    impl Render for SelectionDragTestView {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .p(px(30.0))
+                .child(div().h(px(160.0)).w_full().child(self.editor.clone()))
+        }
+    }
+
+    #[gpui::test]
+    fn dragging_at_viewport_edges_scrolls_and_extends_selection_until_mouse_up(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let source = (0..200)
+            .map(|line| format!("line {line:03}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (root, cx) = cx.add_window_view(|_, cx| SelectionDragTestView {
+            editor: cx
+                .new(|cx| TextEditorView::new(source, &oxideterm_theme::default_tokens(), cx)),
+        });
+        let editor = root.read_with(cx, |root, _| root.editor.clone());
+        cx.simulate_resize(gpui::size(px(500.0), px(300.0)));
+        cx.update(|window, cx| {
+            window.activate_window();
+            window.draw(cx).clear(cx);
+        });
+        let (bounds, x, line_height) = editor.read_with(cx, |editor, _| {
+            let bounds = editor.content_bounds.unwrap();
+            (
+                bounds,
+                bounds.left()
+                    + px(editor.visible_gutter_width() + editor.visible_content_padding_x()),
+                editor.metrics.line_height,
+            )
+        });
+        let start = gpui::point(x, bounds.top() + px(line_height / 2.0));
+        let bottom = gpui::point(x, bounds.bottom() - px(1.0));
+        cx.simulate_mouse_down(start, MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_move(bottom, Some(MouseButton::Left), gpui::Modifiers::default());
+        cx.run_until_parked();
+        // The pointer remains still; scrolling must not depend on more move events.
+        for _ in 0..20 {
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(30));
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+        editor.read_with(cx, |editor, _| {
+            let selection = editor.cursor.selection();
+            assert_eq!(selection.anchor, BufferOffset::ZERO);
+            let selected = editor.buffer.slice(selection.range()).unwrap();
+            assert!(
+                selected.contains("line 010"),
+                "selection did not reach text below the original viewport: {selected:?}"
+            );
+            assert!(editor.viewport.scroll_y_px > 0.0);
+        });
+
+        cx.simulate_mouse_move(
+            bounds.center(),
+            Some(MouseButton::Left),
+            gpui::Modifiers::default(),
+        );
+        let paused = editor.read_with(cx, |editor, _| {
+            (editor.viewport.scroll_y_px, editor.cursor.selection())
+        });
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(100));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        editor.read_with(cx, |editor, _| {
+            assert_eq!(
+                (editor.viewport.scroll_y_px, editor.cursor.selection()),
+                paused
+            );
+        });
+
+        let outside = gpui::point(x, bounds.bottom() + px(line_height));
+        let before = editor.read_with(cx, |editor, _| {
+            (editor.viewport.scroll_y_px, editor.cursor.selection())
+        });
+        cx.simulate_mouse_move(outside, Some(MouseButton::Left), gpui::Modifiers::default());
+        for _ in 0..3 {
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(30));
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+        editor.read_with(cx, |editor, _| {
+            assert!(editor.viewport.scroll_y_px > before.0);
+            assert!(editor.cursor.selection().head > before.1.head);
+            assert_eq!(editor.cursor.selection().anchor, BufferOffset::ZERO);
+        });
+        cx.simulate_mouse_up(outside, MouseButton::Left, gpui::Modifiers::default());
+        let stopped = editor.read_with(cx, |editor, _| {
+            (editor.viewport.scroll_y_px, editor.cursor.selection())
+        });
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(100));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        editor.read_with(cx, |editor, _| {
+            assert_eq!(
+                (editor.viewport.scroll_y_px, editor.cursor.selection()),
+                stopped
+            );
+            assert!(editor.selection_drag.is_none());
+        });
+
+        cx.simulate_mouse_down(
+            bounds.center(),
+            MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        let anchor = editor.read_with(cx, |editor, _| editor.cursor.selection().anchor);
+        let top = gpui::point(x, bounds.top() - px(line_height));
+        cx.simulate_mouse_move(top, Some(MouseButton::Left), gpui::Modifiers::default());
+        cx.run_until_parked();
+        for _ in 0..3 {
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(30));
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+        editor.read_with(cx, |editor, _| {
+            assert!(editor.viewport.scroll_y_px < stopped.0);
+            assert!(editor.cursor.selection().head < anchor);
+            assert_eq!(editor.cursor.selection().anchor, anchor);
+        });
+        cx.simulate_mouse_up(top, MouseButton::Left, gpui::Modifiers::default());
+    }
+
+    #[gpui::test]
+    fn cursor_distinguishes_gutter_from_text_and_document_whitespace(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (editor, cx) = cx.add_window_view(|_, cx| {
+            TextEditorView::new("text", &oxideterm_theme::default_tokens(), cx)
+        });
+        cx.simulate_resize(gpui::size(px(500.0), px(240.0)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let (bounds, gutter, line_height) = editor.read_with(cx, |editor, _| {
+            (
+                editor.content_bounds.unwrap(),
+                editor.visible_gutter_width(),
+                editor.metrics.line_height,
+            )
+        });
+        for (x, y, expected) in [
+            (gutter / 2.0, line_height / 2.0, CursorStyle::Arrow),
+            (gutter + 20.0, line_height / 2.0, CursorStyle::IBeam),
+            (gutter / 2.0, 180.0, CursorStyle::Arrow),
+            (gutter + 20.0, 180.0, CursorStyle::IBeam),
+        ] {
+            cx.simulate_mouse_move(
+                bounds.origin + gpui::point(px(x), px(y)),
+                None,
+                gpui::Modifiers::default(),
+            );
+            cx.update(|window, cx| {
+                window.draw(cx).clear(cx);
+                assert_eq!(
+                    window.cursor_style_for_test(),
+                    expected,
+                    "position=({x}, {y})"
+                );
+            });
+        }
+        editor.update(cx, |editor, cx| {
+            editor.set_presentation(EditorPresentation::Inline, cx)
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.simulate_mouse_move(
+            bounds.origin + gpui::point(px(4.0), px(8.0)),
+            None,
+            gpui::Modifiers::default(),
+        );
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            assert_eq!(window.cursor_style_for_test(), CursorStyle::IBeam);
+        });
+    }
+
+    #[gpui::test]
+    fn final_line_reaches_viewport_top_by_wheel_and_scrollbar(cx: &mut gpui::TestAppContext) {
+        let source = format!("{}\nlast", "abc ".repeat(40));
+        let (editor, cx) = cx.add_window_view(|_, cx| {
+            TextEditorView::new(source, &oxideterm_theme::default_tokens(), cx)
+        });
+        cx.simulate_resize(gpui::size(px(340.0), px(200.0)));
+        for wrap in [false, true] {
+            editor.update(cx, |editor, cx| {
+                let mut settings = editor.settings.clone();
+                settings.soft_wrap = wrap;
+                settings.soft_wrap_column = None;
+                editor.set_settings(settings, cx);
+            });
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            editor.update(cx, |editor, cx| {
+                editor.handle_scroll(
+                    &ScrollWheelEvent {
+                        position: editor.content_bounds.unwrap().center(),
+                        delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.0), px(-10000.0))),
+                        modifiers: gpui::Modifiers::default(),
+                        touch_phase: gpui::TouchPhase::Moved,
+                    },
+                    cx,
+                );
+            });
+            cx.update(|window, cx| {
+                window.draw(cx).clear(cx);
+                editor.update(cx, |editor, _| {
+                    let anchor = editor.scroll_anchor();
+                    assert_eq!(anchor.source_position, 161.0, "wrap={wrap}");
+                    assert!(anchor.at_end);
+                    let bounds = editor.content_bounds.unwrap();
+                    let point = bounds.origin
+                        + gpui::point(
+                            px(editor.visible_gutter_width()
+                                + editor.visible_content_padding_x()
+                                + 1.0),
+                            px(1.0),
+                        );
+                    assert_eq!(
+                        editor.offset_for_window_point(point, window),
+                        Some(BufferOffset(161)),
+                        "last line must occupy the first viewport row"
+                    );
+                });
+            });
+            editor.update(cx, |editor, cx| {
+                editor.viewport.scroll_y_px = 0.0;
+                editor.scroll_from_scrollbar_pointer(
+                    editor.content_bounds.unwrap().bottom() + px(100.0),
+                    0.0,
+                    cx,
+                );
+                assert_eq!(
+                    editor.scroll_anchor().source_position,
+                    161.0,
+                    "scrollbar wrap={wrap}"
+                );
+            });
+        }
+        cx.simulate_resize(gpui::size(px(340.0), px(300.0)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        editor.update(cx, |editor, cx| {
+            assert_eq!(editor.scroll_anchor().source_position, 161.0);
+            let mut settings = editor.settings.clone();
+            settings.soft_wrap = false;
+            editor.set_settings(settings, cx);
+            editor.set_presentation(EditorPresentation::Inline, cx);
+            assert_eq!(
+                editor.viewport.scroll_y_px, 0.0,
+                "inline inputs must not inherit document bottom padding"
+            );
+        });
     }
 
     #[test]

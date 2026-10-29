@@ -64,6 +64,7 @@ pub(in crate::workspace) struct PendingSshTerminalOpen {
     pub(in crate::workspace) save_after_open: Option<SaveConnectionRequest>,
     pub(in crate::workspace) cleanup_node_id: Option<NodeId>,
     pub(in crate::workspace) title: String,
+    pub(in crate::workspace) open_sftp_on_connect: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -559,6 +560,9 @@ impl WorkspaceRuntimeEntity {
             if existing.post_connect_command.is_none() {
                 existing.post_connect_command = request.post_connect_command.take();
             }
+            // The flag is a one-shot user intent; a later Ctrl+click must not
+            // be lost behind an already queued plain open.
+            existing.open_sftp_on_connect |= request.open_sftp_on_connect;
             QueueSshTerminalOpenOutcome::Coalesced
         } else {
             self.pending_ssh_terminal_opens.push_back(request);
@@ -1172,9 +1176,11 @@ impl WorkspaceRuntimeEntity {
         &mut self,
         mode: RemoteShellIntegrationMode,
         awareness_enabled: bool,
+        deferred: std::collections::BTreeMap<String, u32>,
     ) {
         self.remote_shell_integration
             .configure(mode, awareness_enabled);
+        self.remote_shell_integration.set_deferred(deferred);
         if mode == RemoteShellIntegrationMode::Disabled || !awareness_enabled {
             for (_, (_, abort_handle)) in self.remote_shell_gate_tasks.drain() {
                 abort_handle.abort();
@@ -1225,12 +1231,42 @@ impl WorkspaceRuntimeEntity {
         self.remote_shell_integration.accept_confirm()
     }
 
+    pub(in crate::workspace) fn remote_shell_integration_host_key(
+        &self,
+        node_id: &NodeId,
+    ) -> Option<String> {
+        let store = self.node_router.runtime_store();
+        let mut route = Vec::new();
+        for node in store.path_to_node(node_id).ok()? {
+            let snapshot = store.snapshot(&node)?;
+            if let Some(hops) = snapshot.config.proxy_chain.as_ref() {
+                for hop in hops {
+                    route.push((hop.host.clone(), hop.port, hop.username.clone()));
+                }
+            }
+            route.push((
+                snapshot.config.host,
+                snapshot.config.port,
+                snapshot.config.username,
+            ));
+        }
+        // Only endpoint identity is persisted, never authentication or agent settings.
+        serde_json::to_string(&route).ok()
+    }
+
     pub(in crate::workspace) fn start_remote_shell_integration_gate(
         &mut self,
         node_id: NodeId,
         force_install: bool,
     ) -> bool {
         use settings::RemoteShellIntegrationFailure;
+        if !force_install
+            && self
+                .remote_shell_integration_host_key(&node_id)
+                .is_some_and(|key| self.remote_shell_integration.is_deferred(&key))
+        {
+            return false;
+        }
         let Some(generation) = self
             .remote_shell_integration
             .begin_terminal_gate(&node_id, force_install)
@@ -1274,10 +1310,10 @@ impl WorkspaceRuntimeEntity {
                 if should_install_remote_shell_integration(force_install, mode, status.state) {
                     oxideterm_terminal::install_remote_shell_integration(&sftp, Some(&remote_env))
                         .await
-                        .map(|status| (status, true))
+                        .map(|installed| (installed, Some(status.state)))
                         .map_err(RemoteShellIntegrationFailure::Integration)
                 } else {
-                    Ok((status, false))
+                    Ok((status, None))
                 }
             }
             .await;
@@ -2755,6 +2791,13 @@ impl WorkspaceRuntimeEntity {
                     .remote_shell_integration
                     .finish_terminal_gate(node_id, generation, result);
                 match outcome {
+                    settings::RemoteShellIntegrationGateOutcome::Configured(node_id, previous) => {
+                        Some(ReconnectRuntimeEffect::RemoteShellIntegrationGateFinished {
+                            notice: Some(settings::RemoteShellIntegrationNotice::Configured(
+                                node_id, previous,
+                            )),
+                        })
+                    }
                     settings::RemoteShellIntegrationGateOutcome::Applied => {
                         Some(ReconnectRuntimeEffect::RemoteShellIntegrationGateFinished {
                             notice: None,
@@ -2957,9 +3000,10 @@ fn should_install_remote_shell_integration(
     mode: RemoteShellIntegrationMode,
     state: oxideterm_terminal::RemoteShellIntegrationState,
 ) -> bool {
-    force_install
-        || (mode == RemoteShellIntegrationMode::Enabled
-            && state != oxideterm_terminal::RemoteShellIntegrationState::Installed)
+    state != oxideterm_terminal::RemoteShellIntegrationState::NewerVersion
+        && (force_install
+            || (mode == RemoteShellIntegrationMode::Enabled
+                && state != oxideterm_terminal::RemoteShellIntegrationState::Installed))
 }
 
 fn reconnect_error_is_non_retryable(error: &str) -> bool {
@@ -3086,6 +3130,20 @@ mod tests {
     #[test]
     fn remote_shell_gate_installs_only_when_requested_or_enabled_and_missing() {
         use oxideterm_terminal::RemoteShellIntegrationState;
+
+        for mode in [
+            RemoteShellIntegrationMode::Ask,
+            RemoteShellIntegrationMode::Enabled,
+            RemoteShellIntegrationMode::Disabled,
+        ] {
+            for force in [false, true] {
+                assert!(!should_install_remote_shell_integration(
+                    force,
+                    mode,
+                    RemoteShellIntegrationState::NewerVersion
+                ));
+            }
+        }
 
         assert!(should_install_remote_shell_integration(
             true,
@@ -3706,6 +3764,7 @@ mod tests {
                     save_after_open: None,
                     cleanup_node_id: None,
                     title: "First terminal".to_string(),
+                    open_sftp_on_connect: false,
                 },
                 cx,
             );
@@ -3718,6 +3777,7 @@ mod tests {
                     save_after_open: None,
                     cleanup_node_id: None,
                     title: "Ignored duplicate".to_string(),
+                    open_sftp_on_connect: true,
                 },
                 cx,
             );
@@ -3732,6 +3792,7 @@ mod tests {
             assert_eq!(pending.title, "First terminal");
             assert_eq!(pending.post_connect_command.as_deref(), Some("pwd"));
             assert_eq!(pending.mark_used_connection_id.as_deref(), Some("saved-a"));
+            assert!(pending.open_sftp_on_connect);
 
             let cancelled_session = TerminalSessionId(42);
             let restored_session = TerminalSessionId(43);
@@ -3746,6 +3807,7 @@ mod tests {
                         save_after_open: None,
                         cleanup_node_id: None,
                         title: String::new(),
+                        open_sftp_on_connect: false,
                     },
                     cx,
                 );
@@ -3801,6 +3863,7 @@ mod tests {
                     save_after_open: None,
                     cleanup_node_id: None,
                     title: String::new(),
+                    open_sftp_on_connect: false,
                 },
                 cx,
             );
@@ -3813,6 +3876,7 @@ mod tests {
                     save_after_open: None,
                     cleanup_node_id: None,
                     title: "Restored".to_string(),
+                    open_sftp_on_connect: false,
                 },
                 cx,
             );

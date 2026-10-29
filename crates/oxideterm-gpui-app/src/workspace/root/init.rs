@@ -11,6 +11,7 @@ impl WorkspaceApp {
         single_instance_rx: Option<crate::single_instance::SingleInstanceReceiver>,
     ) -> Result<Self> {
         let focus_handle = cx.focus_handle();
+        window.focus(&focus_handle, cx);
         let window_registry = window_registry::WorkspaceWindowRegistry::default();
         let window_intents = cx.new(|cx| {
             WorkspaceWindowIntentEntity::new(desktop_presence_rx, single_instance_rx, cx)
@@ -283,6 +284,7 @@ impl WorkspaceApp {
             runtime.configure_remote_shell_integration(
                 settings.terminal.remote_shell_integration_mode,
                 settings.terminal.command_bar.current_directory_awareness,
+                settings.terminal.remote_shell_integration_deferred.clone(),
             );
         });
         let ssh_consumer_prompt_handler = workspace_runtime.read(cx).native_ssh_prompt_handler();
@@ -419,12 +421,7 @@ impl WorkspaceApp {
                 HostToolsEvent::ShowNotice(notice) => {
                     workspace.push_host_tools_notice(notice.clone(), cx);
                 }
-                HostToolsEvent::ToolSelected(tool) => {
-                    workspace.begin_user_segmented_control_transition(
-                        selection_motion::HOST_TOOLS_SWITCHER_ID,
-                        connection_monitor::host_tools_tab_index(*tool),
-                        cx,
-                    );
+                HostToolsEvent::ToolSelected => {
                     workspace.clear_ime_selection();
                     workspace.ime_marked_text = None;
                     cx.notify();
@@ -433,6 +430,8 @@ impl WorkspaceApp {
         );
         let sftp_transfer_manager = Arc::new(SftpTransferManager::new());
         sftp_transfer_manager.apply_settings(sftp_runtime_settings_from_settings(&settings));
+        let background_transfer_observation =
+            Self::observe_background_transfers(sftp_transfer_manager.clone(), cx);
         let sftp_progress_store: Arc<dyn ProgressStore> = {
             let path = default_settings_path()
                 .parent()
@@ -608,6 +607,8 @@ impl WorkspaceApp {
             search: actions::TerminalSearchState::default(),
             terminal_recording_menu_open: false,
             privilege_credential_picker: None,
+            pending_privilege_totp: None,
+            privilege_prompt_sync_task: None,
             terminal_highlight_popover_open: false,
             terminal_trigger_settings_pane: None,
             terminal_trigger_shell_confirmation_pending: false,
@@ -716,6 +717,8 @@ impl WorkspaceApp {
             active_surface: ActiveSurface::Terminal,
             active_session_sidebar_view_mode: ActiveSessionSidebarViewMode::Tree,
             session_sort_menu_open: false,
+            context_tools_menu: None,
+            context_tools_menu_scroll: ScrollHandle::new(),
             session_search_open: false,
             session_search_query: String::new(),
             active_session_sidebar_focused_node_id: settings
@@ -815,6 +818,8 @@ impl WorkspaceApp {
             forwarding_service,
             forwarding_runtime,
             sftp_transfer_manager,
+            background_transfers: Vec::new(),
+            _background_transfer_observation: background_transfer_observation,
             sftp_progress_store,
             node_router,
             notification_center: NotificationCenterState::default(),
@@ -831,6 +836,7 @@ impl WorkspaceApp {
             ssh_nodes: HashMap::new(),
             saved_ssh_nodes: HashMap::new(),
             expanded_ssh_nodes: HashSet::new(),
+            session_group_expanded: HashMap::new(),
             expanded_standalone_connections: HashSet::new(),
             local_session_group_expanded: true,
             active_ssh_node_id: None,
@@ -858,6 +864,8 @@ impl WorkspaceApp {
             sftp_pages: HashMap::new(),
             sftp_dispatch_surface: Rc::new(Cell::new(None)),
             sftp_focused_surface: sftp::SftpSurfaceId::Sidebar,
+            sftp_path_bookmarks: Vec::new(),
+            sftp_path_bookmarks_loaded: false,
             _sftp_observation: sftp_observation,
             _sftp_subscription: sftp_subscription,
             graphics,
@@ -870,11 +878,12 @@ impl WorkspaceApp {
             _cloud_sync_subscription: cloud_sync_subscription,
             i18n,
             tokens,
+            theme_transition_task: None,
             system_dark,
             appearance_edit_dark: settings
                 .appearance
-                .follow_system_appearance
-                .then_some(system_dark),
+                .active_scheme(system_dark)
+                .map(oxideterm_settings::AppearanceScheme::is_dark),
             active_background: settings.resolved_background(system_dark),
             detected_graphics,
             render_profile_override,
@@ -896,6 +905,8 @@ impl WorkspaceApp {
             local_shells,
             local_shell_launcher_open: false,
             local_shell_launcher_selected_id: None,
+            archive_command: None,
+            ssh_tunnels: ssh_tunnels::SshTunnels::default(),
             terminal,
             _terminal_subscription: terminal_subscription,
             overlay,
@@ -927,6 +938,7 @@ impl WorkspaceApp {
         workspace.sync_ssh_config_sync_service();
         workspace.start_audit_delivery(cx);
         workspace.restore_session_tree_snapshot();
+        workspace.start_startup_ssh_tunnels(window, cx);
         workspace.standalone_connections =
             standalone_connections::StandaloneConnectionRegistry::restore(
                 default_session_tree_path().with_file_name("standalone_sessions.json"),
@@ -1200,6 +1212,8 @@ impl WorkspaceApp {
             processing_failed_message: self.i18n.t("terminal.processing_failed"),
             reconnect_label: self.i18n.t("sessions.actions.reconnect"),
             reconnect_hint: self.i18n.t("terminal.reconnect_hint"),
+            archive_link_hint: self.i18n.t("terminal.archive.open_hint"),
+            archive_link_modifier_hint: self.i18n.t("terminal.archive.open_modifier_hint"),
             reconnecting_label: self.i18n.t("connections.monitor.reconnecting"),
             font_family: terminal
                 .font_family
@@ -1228,6 +1242,7 @@ impl WorkspaceApp {
             right_click_paste: terminal.right_click_paste,
             open_links_with_modifier: terminal.open_links_with_modifier,
             detect_file_paths_as_links: terminal.detect_file_paths_as_links,
+            timestamp_hover: terminal.timestamp_hover,
             semantic_coloring: terminal.semantic_coloring,
             selection_highlighting: terminal.selection_highlighting,
             semantic_scheme: resolved_terminal_semantic_scheme(
@@ -1243,6 +1258,7 @@ impl WorkspaceApp {
             bidi_enabled: terminal.unicode.bidi_enabled,
             current_directory_awareness_enabled: terminal.command_bar.current_directory_awareness,
             command_marks_enabled: terminal.command_marks.enabled,
+            command_folding_enabled: terminal.command_marks.folding_enabled,
             command_marks_user_input_observed: terminal.command_marks.user_input_observed,
             command_marks_heuristic_detection: terminal.command_marks.heuristic_detection,
             command_marks_show_hover_actions: terminal.command_marks.show_hover_actions,
@@ -1302,6 +1318,8 @@ impl WorkspaceApp {
                 copy: self.i18n.t("terminal.command_selection.copy"),
                 copy_title: self.i18n.t("terminal.command_selection.copy_title"),
                 copy_command: self.i18n.t("terminal.command_selection.copy_command"),
+                shell_ide: self.i18n.t("terminal.shell_ide.convert"),
+                shell_ide_preparing: self.i18n.t("terminal.shell_ide.preparing"),
                 send_to_ai: self.i18n.t("terminal.command_selection.send_to_ai"),
                 fill_command_bar: self.i18n.t("terminal.command_selection.fill_command_bar"),
                 insert_selection_into_command: self
@@ -1313,6 +1331,10 @@ impl WorkspaceApp {
                 find: self.i18n.t("terminal.command_selection.find"),
                 manage_triggers: self.i18n.t("terminal.command_selection.manage_triggers"),
                 select_command: self.i18n.t("terminal.command_selection.select_command"),
+                collapse_output: self.i18n.t("terminal.command_selection.collapse_output"),
+                expand_output: self.i18n.t("terminal.command_selection.expand_output"),
+                folded_output: self.i18n.t("terminal.command_selection.folded_output"),
+                folded_exit_code: self.i18n.t("terminal.command_selection.folded_exit_code"),
                 previous_command: self.i18n.t("terminal.command_selection.previous_command"),
                 next_command: self.i18n.t("terminal.command_selection.next_command"),
                 clear_screen: self.i18n.t("terminal.command_selection.clear_screen"),
@@ -1485,6 +1507,7 @@ impl WorkspaceApp {
             }),
             highlight_rules: terminal_highlight_rules(terminal.effective_highlight_rules()),
             trzsz_policy,
+            xmodem_block_size: terminal.xmodem_block_size,
             theme: TerminalUiTheme::from_tokens(self.tokens),
         }
     }
@@ -1544,11 +1567,7 @@ impl WorkspaceApp {
     }
 
     pub(in crate::workspace) fn workspace_chrome_background(&self, color: u32) -> Rgba {
-        if self.window_background_preferences().is_some() {
-            rgba((color << 8) | alpha_byte(self.tokens.metrics.panel_vibrancy_alpha))
-        } else {
-            rgb(color)
-        }
+        self.workspace_sidebar_background(color)
     }
 
     pub(in crate::workspace) fn workspace_sidebar_background(&self, color: u32) -> Rgba {

@@ -42,18 +42,16 @@ impl WorkspaceApp {
         }
         if index == 2 {
             if let Some(collection) = selected_collection {
+                let stats = self.ai_entity.update(cx, |ai, cx| {
+                    ai.request_knowledge_collection_stats(&collection.id, cx)
+                });
                 let page = self
                     .ai_entity
                     .read(cx)
                     .knowledge_document_page(&collection.id);
                 return match page {
                     Ok((page_index, documents)) => self.knowledge_documents_card(
-                        collection,
-                        documents,
-                        page_index,
-                        oxideterm_ai::rag_get_collection_stats(&rag_store, &collection.id).ok(),
-                        true,
-                        cx,
+                        collection, documents, page_index, stats, true, cx,
                     ),
                     Err(error) => self.knowledge_error_row(&error),
                 };
@@ -910,48 +908,31 @@ impl WorkspaceApp {
                         )
                         .child(
                             div()
-                                .grid()
-                                .grid_cols(2)
-                                .gap(px(12.0))
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_col()
-                                        .gap(px(6.0))
-                                        .child(
-                                            div()
-                                                .text_size(px(self.tokens.metrics.ui_text_xs))
-                                                .font_weight(gpui::FontWeight::MEDIUM)
-                                                .text_color(rgb(self.tokens.ui.text_muted))
-                                                .child(self.i18n.t("settings_view.ai.embedding_provider")),
-                                        )
-                                        .child(self.ai_settings_select_control(
-                                            SettingsSelect::AiEmbeddingProvider,
-                                            provider_label,
-                                            224.0,
-                                            cx,
-                                        )),
-                                )
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_col()
-                                        .gap(px(6.0))
-                                        .child(
-                                            div()
-                                                .text_size(px(self.tokens.metrics.ui_text_xs))
-                                                .font_weight(gpui::FontWeight::MEDIUM)
-                                                .text_color(rgb(self.tokens.ui.text_muted))
-                                                .child(self.i18n.t("settings_view.ai.embedding_model")),
-                                        )
-                                        .child(self.settings_text_input_control(
+                                .w_full()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .gap(px(self.tokens.metrics.settings_card_gap))
+                                .child(self.select_setting_row(
+                                    "settings_view.ai.embedding_provider",
+                                    "",
+                                    SettingsSelect::AiEmbeddingProvider,
+                                    provider_label,
+                                    self.tokens.metrics.settings_select_width,
+                                    cx,
+                                ))
+                                .child(self.setting_row(
+                                    "settings_view.ai.embedding_model",
+                                    "",
+                                    self.settings_text_input_control(
                                             SettingsInput::AiEmbeddingModel,
                                             model_value,
                                             self.i18n.t("settings_view.ai.embedding_model"),
                                             224.0,
                                             cx,
-                                        )),
-                                ),
+                                    ),
+                                    cx,
+                                )),
                         ),
                 )
             })

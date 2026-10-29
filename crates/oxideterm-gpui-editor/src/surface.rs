@@ -1,17 +1,22 @@
 // Copyright (C) 2026 AnalyseDeCircuit
 // SPDX-License-Identifier: GPL-3.0-only
 
-use std::{cell::RefCell, collections::HashMap, ops::Range, sync::Arc, time::Duration};
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, HashMap},
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 
 use gpui::{
-    AnyElement, App, Bounds, Context, Div, Element, ElementId, ElementInputHandler, Entity,
-    FocusHandle, Focusable, GlobalElementId, InspectorElementId, IntoElement, LayoutId,
-    ParentElement, Pixels, Point, ScrollWheelEvent, SharedString, Task, TextRun, Window, div,
-    point, prelude::*, px, rgb,
+    AnyElement, App, Bounds, Context, DispatchPhase, Div, Element, ElementId, ElementInputHandler,
+    Entity, FocusHandle, Focusable, GlobalElementId, InspectorElementId, IntoElement, LayoutId,
+    MouseButton, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, ScrollWheelEvent,
+    SharedString, Task, TextRun, Window, div, point, prelude::*, px, rgb,
 };
 use oxideterm_editor_core::{
     BufferOffset, Cursor, EditTransaction, FindMatch, LineCol, Selection, TextBuffer, TextEdit,
-    TextRange, word_at,
+    TextRange,
 };
 use oxideterm_editor_syntax::{
     BracketIndex, BracketPair, HighlightCache, LanguageId, StructureCache, SyntaxEdit,
@@ -30,7 +35,11 @@ mod input;
 mod render;
 mod scroll;
 mod search;
+mod search_bar;
+mod segments;
 pub use scroll::{EditorScrollAnchor, EditorScrollOrigin, EditorViewportChanged};
+use search_bar::EditorSearchBar;
+pub use search_bar::EditorSearchLabels;
 mod syntax_task;
 mod wrap;
 
@@ -54,6 +63,7 @@ fn normalize_editor_text(text: String) -> String {
 }
 
 const EDITOR_CARET_BLINK_INTERVAL: Duration = Duration::from_millis(530);
+const EDITOR_SELECTION_SCROLL_INTERVAL: Duration = Duration::from_millis(30);
 
 /// Controls whether the editor owns a full document surface or sits inside an
 /// existing input row whose surrounding component already provides chrome.
@@ -170,6 +180,34 @@ impl Element for EditorBoundsProbe {
             ElementInputHandler::new(_bounds, self.view.clone()),
             cx,
         );
+        let drag_view = self.view.downgrade();
+        window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+            if phase == DispatchPhase::Capture
+                && let Some(view) = drag_view.upgrade()
+                && view.read(cx).selection_drag.is_some()
+            {
+                view.update(cx, |this, cx| {
+                    if event.pressed_button == Some(MouseButton::Left) {
+                        this.drag_selection_to_point(event.position, window, cx);
+                    } else {
+                        this.finish_selection_drag(cx);
+                    }
+                });
+            }
+        });
+        let drag_view = self.view.downgrade();
+        // Drag selection belongs to this editor until release, even outside its viewport.
+        window.on_mouse_event(move |event: &MouseUpEvent, phase, _window, cx| {
+            if phase == DispatchPhase::Capture
+                && event.button == MouseButton::Left
+                && let Some(view) = drag_view.upgrade()
+                && view.read(cx).selection_drag.is_some()
+            {
+                view.update(cx, |this, cx| {
+                    this.finish_selection_drag(cx);
+                });
+            }
+        });
     }
 }
 
@@ -229,27 +267,80 @@ pub(super) struct HighlightChunkCacheKey {
     pub range_end: usize,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub(super) struct LineChunkSpec {
     pub start: usize,
     pub end: usize,
     pub color: u32,
     pub text: gpui::SharedString,
+    pub layout: OnceLock<Arc<gpui::LineLayout>>,
 }
 
 #[derive(Clone, Debug, Default)]
 struct HighlightChunkCache {
-    entries: HashMap<HighlightChunkCacheKey, Arc<Vec<LineChunkSpec>>>,
+    entries: HashMap<HighlightChunkCacheKey, CachedLineChunks>,
+    recency: BTreeMap<u64, HighlightChunkCacheKey>,
+    clock: u64,
+    frame_start: u64,
+    retained_bytes: usize,
+    font_generation: usize,
+}
+
+#[derive(Clone, Debug)]
+struct CachedLineChunks {
+    chunks: Arc<Vec<LineChunkSpec>>,
+    bytes: usize,
+    last_used: u64,
+}
+
+impl CachedLineChunks {
+    fn estimate_bytes(chunks: &Arc<Vec<LineChunkSpec>>) -> usize {
+        let metadata = std::mem::size_of::<(HighlightChunkCacheKey, Self)>()
+            + std::mem::size_of::<(u64, HighlightChunkCacheKey)>()
+            + std::mem::size_of::<Vec<LineChunkSpec>>()
+            + 2 * std::mem::size_of::<usize>();
+        metadata
+            + chunks.capacity() * std::mem::size_of::<LineChunkSpec>()
+            + chunks
+                .iter()
+                .map(|chunk| {
+                    // Charge shared layouts to each retaining row conservatively;
+                    // allocator bookkeeping is not part of this payload estimate.
+                    chunk.text.len()
+                        + chunk.layout.get().map_or(0, |layout| {
+                            std::mem::size_of::<gpui::LineLayout>()
+                                + 2 * std::mem::size_of::<usize>()
+                                + layout.runs.capacity() * std::mem::size_of::<gpui::ShapedRun>()
+                                + layout
+                                    .runs
+                                    .iter()
+                                    .map(|run| {
+                                        run.glyphs.capacity()
+                                            * std::mem::size_of::<gpui::ShapedGlyph>()
+                                    })
+                                    .sum::<usize>()
+                        })
+                })
+                .sum::<usize>()
+    }
 }
 
 impl HighlightChunkCache {
-    // Keep roughly several large viewports of rendered rows. The cache is a
-    // scroll hot-path helper, so clearing it wholesale is cheaper than managing
-    // a per-entry LRU list in the render path.
-    const MAX_ENTRIES: usize = 2048;
+    // Bound retained text and native layouts, while keeping the current working
+    // set pinned until it leaves the rendered window to avoid redraw churn.
+    const BYTE_BUDGET: usize = 1024 * 1024;
 
-    fn get(&self, key: &HighlightChunkCacheKey) -> Option<Arc<Vec<LineChunkSpec>>> {
-        self.entries.get(key).cloned()
+    fn begin_frame(&mut self) {
+        self.frame_start = self.clock;
+    }
+
+    fn get(&mut self, key: &HighlightChunkCacheKey) -> Option<Arc<Vec<LineChunkSpec>>> {
+        let entry = self.entries.get_mut(key)?;
+        self.recency.remove(&entry.last_used);
+        self.clock += 1;
+        entry.last_used = self.clock;
+        self.recency.insert(entry.last_used, *key);
+        Some(entry.chunks.clone())
     }
 
     fn insert(
@@ -257,21 +348,68 @@ impl HighlightChunkCache {
         key: HighlightChunkCacheKey,
         chunks: Arc<Vec<LineChunkSpec>>,
     ) -> Arc<Vec<LineChunkSpec>> {
-        if self.entries.len() >= Self::MAX_ENTRIES {
-            self.entries.clear();
+        if let Some(previous) = self.entries.remove(&key) {
+            self.recency.remove(&previous.last_used);
+            self.retained_bytes -= previous.bytes;
         }
-        self.entries.insert(key, chunks.clone());
+        self.clock += 1;
+        let bytes = CachedLineChunks::estimate_bytes(&chunks);
+        self.retained_bytes += bytes;
+        self.entries.insert(
+            key,
+            CachedLineChunks {
+                chunks: chunks.clone(),
+                bytes,
+                last_used: self.clock,
+            },
+        );
+        self.recency.insert(self.clock, key);
         chunks
     }
 
+    fn finish_frame(&mut self) {
+        // Glyph layouts are filled lazily while building rows, after insertion.
+        for (_, key) in self.recency.range(self.frame_start + 1..) {
+            let entry = self
+                .entries
+                .get_mut(key)
+                .expect("cached row owns recency entry");
+            let bytes = CachedLineChunks::estimate_bytes(&entry.chunks);
+            self.retained_bytes = self.retained_bytes - entry.bytes + bytes;
+            entry.bytes = bytes;
+        }
+        while self.retained_bytes > Self::BYTE_BUDGET {
+            let Some((&last_used, &key)) = self.recency.first_key_value() else {
+                break;
+            };
+            if last_used > self.frame_start {
+                break;
+            }
+            self.recency.pop_first();
+            let entry = self
+                .entries
+                .remove(&key)
+                .expect("recency entry owns cached row");
+            self.retained_bytes -= entry.bytes;
+        }
+        if self.entries.capacity() > self.entries.len().saturating_mul(4) {
+            self.entries.shrink_to(self.entries.len().saturating_mul(2));
+        }
+    }
+
     fn clear(&mut self) {
-        self.entries.clear();
+        self.entries = HashMap::new();
+        self.recency.clear();
+        self.clock = 0;
+        self.frame_start = 0;
+        self.retained_bytes = 0;
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct SelectionDrag {
     anchor: BufferOffset,
+    position: Option<Point<Pixels>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -310,6 +448,7 @@ pub struct TextEditorView {
     syntax_generation: Arc<std::sync::atomic::AtomicU64>,
     syntax_executor: gpui::BackgroundExecutor,
     syntax_task: Option<Task<()>>,
+    render_cache_active: bool,
     pending_syntax: Option<syntax_task::SyntaxRequest>,
     highlight_spans: HighlightCache,
     structure_cache: StructureCache,
@@ -319,16 +458,21 @@ pub struct TextEditorView {
     secondary_selections: Vec<Selection>,
     settings: EditorSettings,
     find_query: String,
+    find_regex: bool,
+    find_regex_error: bool,
+    find_pattern_cache: RefCell<Option<search::FindPatternCache>>,
     find_matches: Vec<FindMatch>,
-    // Scroll rendering asks for highlights per visible row. Keep search hits
-    // indexed by line so each row does not scan every match in a large file.
-    find_line_matches: Vec<Range<usize>>,
     active_find_index: Option<usize>,
+    search_labels: Option<EditorSearchLabels>,
+    search_bar: Option<EditorSearchBar>,
     folded_ranges: Vec<FoldRange>,
     fold_revision: u64,
     display_rows_cache: RefCell<Option<DisplayRowsCache>>,
     highlight_chunk_cache: RefCell<HighlightChunkCache>,
+    segment_cache: RefCell<segments::SegmentCache>,
+    wrap_measurements: RefCell<wrap::WrapMeasurements>,
     selection_drag: Option<SelectionDrag>,
+    selection_scroll_task: Option<Task<()>>,
     transparent_background: bool,
     presentation: EditorPresentation,
     border_visible: bool,
@@ -421,6 +565,7 @@ impl TextEditorView {
             syntax_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             syntax_executor: cx.background_executor().clone(),
             syntax_task: None,
+            render_cache_active: true,
             pending_syntax: None,
             language: None,
             language_path: None,
@@ -436,14 +581,21 @@ impl TextEditorView {
             secondary_selections: Vec::new(),
             settings,
             find_query: String::new(),
+            find_regex: false,
+            find_regex_error: false,
+            find_pattern_cache: RefCell::new(None),
             find_matches: Vec::new(),
-            find_line_matches: Vec::new(),
             active_find_index: None,
+            search_labels: None,
+            search_bar: None,
             folded_ranges: Vec::new(),
             fold_revision: 0,
             display_rows_cache: RefCell::new(None),
             highlight_chunk_cache: RefCell::new(HighlightChunkCache::default()),
+            segment_cache: RefCell::new(segments::SegmentCache::default()),
+            wrap_measurements: RefCell::new(wrap::WrapMeasurements::default()),
             selection_drag: None,
+            selection_scroll_task: None,
             transparent_background: false,
             presentation: EditorPresentation::Document,
             border_visible: true,
@@ -464,6 +616,7 @@ impl TextEditorView {
         if focused {
             self.restart_caret_blink(cx);
         } else {
+            self.finish_selection_drag(cx);
             // Dropping the task stops repainting as soon as this editor loses focus.
             self.caret_blink_generation = self.caret_blink_generation.wrapping_add(1);
             self.caret_blink_task = None;
@@ -554,6 +707,7 @@ impl TextEditorView {
             .apply_transaction(EditTransaction::single(TextEdit::new(range, text)))
             .is_ok()
         {
+            self.finish_selection_drag(cx);
             self.cursor
                 .set_selection(Selection::caret(BufferOffset::ZERO));
             self.secondary_selections.clear();
@@ -562,8 +716,10 @@ impl TextEditorView {
             self.request_syntax(None, true, cx);
             self.clear_folds_after_buffer_change();
             self.refresh_find_matches();
-            self.viewport
-                .clamp(self.document_row_count(), self.metrics.line_height);
+            if self.render_cache_active {
+                self.viewport
+                    .clamp(self.document_row_count(), self.metrics.line_height);
+            }
             self.restart_caret_blink_if_focused(cx);
             cx.notify();
         }
@@ -602,6 +758,7 @@ impl TextEditorView {
         // Inline mode removes only visual chrome. Buffer, cursor, undo, IME,
         // and selection ownership remain on this editor instance.
         self.presentation = presentation;
+        self.viewport.scroll_past_end = presentation == EditorPresentation::Document;
         self.display_rows_cache.borrow_mut().take();
         self.viewport
             .clamp(self.document_row_count(), self.metrics.line_height);
@@ -644,11 +801,13 @@ impl TextEditorView {
         self.settings = settings;
         if tab_changed {
             self.request_syntax(None, false, cx);
-        } else if self.syntax_task.is_none() {
+        } else if self.render_cache_active && self.syntax_task.is_none() {
             self.refresh_foldable_ranges();
         }
-        self.viewport
-            .clamp(self.document_row_count(), self.metrics.line_height);
+        if self.render_cache_active {
+            self.viewport
+                .clamp(self.document_row_count(), self.metrics.line_height);
+        }
         self.refresh_find_matches();
         cx.notify();
     }
@@ -711,9 +870,12 @@ impl TextEditorView {
         background_active: bool,
         cx: &mut Context<Self>,
     ) {
-        self.pending_layout_anchor = Some(self.scroll_anchor());
+        if self.render_cache_active {
+            self.pending_layout_anchor = Some(self.scroll_anchor());
+        }
         self.appearance = EditorAppearance::from_theme(tokens);
         self.language_notice_tokens = *tokens;
+        self.apply_search_theme(tokens, cx);
         // Embedded editors can follow the typography of their owning surface.
         self.appearance.font_family = font_family;
         self.appearance.font_fallback_family = font_fallback_family;
@@ -726,8 +888,10 @@ impl TextEditorView {
         // Tauri wires Settings.ide.wordWrap into CodeMirror's lineWrapping
         // compartment. Keep that as editor settings, not a one-off render flag.
         self.settings.soft_wrap = word_wrap;
-        self.viewport
-            .clamp(self.document_row_count(), self.metrics.line_height);
+        if self.render_cache_active {
+            self.viewport
+                .clamp(self.document_row_count(), self.metrics.line_height);
+        }
         cx.notify();
     }
 
@@ -974,7 +1138,7 @@ impl TextEditorView {
         if range.is_empty() && replacement.is_empty() {
             return;
         }
-        let row_edit = self.unwrapped_row_edit(range, &replacement);
+        let row_edit = self.prepare_row_edit(range, &replacement);
         let caret = BufferOffset(range.start.0 + replacement.len());
         let syntax_edit = self
             .language
@@ -992,10 +1156,12 @@ impl TextEditorView {
             self.marked_text = None;
             self.save_status = EditorSaveStatus::Dirty;
             self.clear_folds_after_buffer_change();
-            self.restore_unwrapped_rows_after_edit(row_edit);
+            self.restore_rows_after_edit(row_edit);
             self.refresh_find_matches();
-            self.viewport
-                .clamp(self.document_row_count(), self.metrics.line_height);
+            if self.render_cache_active {
+                self.viewport
+                    .clamp(self.document_row_count(), self.metrics.line_height);
+            }
             cx.notify();
         }
     }
@@ -1055,8 +1221,10 @@ impl TextEditorView {
             self.request_syntax(None, true, cx);
             self.clear_folds_after_buffer_change();
             self.refresh_find_matches();
-            self.viewport
-                .clamp(self.document_row_count(), self.metrics.line_height);
+            if self.render_cache_active {
+                self.viewport
+                    .clamp(self.document_row_count(), self.metrics.line_height);
+            }
             cx.notify();
         }
     }
@@ -1107,40 +1275,6 @@ impl TextEditorView {
             selections.dedup();
         }
         selections
-    }
-
-    fn build_find_line_matches(&self) -> Vec<Range<usize>> {
-        let mut ranges = Vec::with_capacity(self.buffer.line_count());
-        let mut first_match = 0;
-        let mut last_match = 0;
-
-        for line in 0..self.buffer.line_count() {
-            let Some(line_start) = self.buffer.line_start_offset(line).map(|offset| offset.0)
-            else {
-                ranges.push(0..0);
-                continue;
-            };
-            let line_end = self
-                .buffer
-                .line_end_offset(line)
-                .map(|offset| offset.0)
-                .unwrap_or(line_start);
-
-            while first_match < self.find_matches.len()
-                && self.find_matches[first_match].range.end.0 <= line_start
-            {
-                first_match += 1;
-            }
-            last_match = last_match.max(first_match);
-            while last_match < self.find_matches.len()
-                && self.find_matches[last_match].range.start.0 < line_end
-            {
-                last_match += 1;
-            }
-            ranges.push(first_match..last_match);
-        }
-
-        ranges
     }
 
     fn handle_scroll(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
@@ -1228,6 +1362,15 @@ impl TextEditorView {
     }
 
     fn measure_code_metrics(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let font_generation = window.text_system().font_generation();
+        {
+            let mut cache = self.highlight_chunk_cache.borrow_mut();
+            if cache.font_generation != font_generation {
+                cache.clear();
+                cache.font_generation = font_generation;
+                self.display_rows_cache.borrow_mut().take();
+            }
+        }
         // GPUI snaps every row's explicit height before layout. Use that same
         // height for scrolling and hit testing to avoid drift at the final row.
         // Preserve the configured value when moving between display scales.
@@ -1244,6 +1387,7 @@ impl TextEditorView {
             self.appearance.font_weight,
         ) || line_height_changed
         {
+            self.highlight_chunk_cache.borrow_mut().clear();
             self.viewport
                 .clamp(self.document_row_count(), self.metrics.line_height);
             cx.notify();
@@ -1268,6 +1412,23 @@ impl TextEditorView {
         window: &mut Window,
     ) -> Option<BufferOffset> {
         let display_row = self.display_row_for_window_y(point.y)?;
+        if matches!(&*self.display_rows(), wrap::DisplayRows::Unwrapped(_))
+            && let Some(segments) = self.line_segments(display_row.line)
+        {
+            let x = f32::from(point.x - self.content_bounds?.origin.x)
+                - self.visible_gutter_width()
+                - self.visible_content_padding_x()
+                + self.viewport.scroll_x_px;
+            let index = segments.at_x(x);
+            let origin = segments.starts[index];
+            let text = self.segment_text(display_row.line, origin.byte, segments.end(index));
+            let byte = origin.byte
+                + self.closest_grapheme_byte_for_x(&text, (x - origin.x).max(0.0), window);
+            return self
+                .buffer
+                .line_col_to_offset(LineCol::new(display_row.line, byte))
+                .ok();
+        }
         let line_text = self.buffer.line_text(display_row.line).unwrap_or_default();
         let byte_start = byte_column_for_visual_column(&line_text, display_row.start_col);
         let byte_end = byte_column_for_visual_column(&line_text, display_row.end_col);
@@ -1294,7 +1455,7 @@ impl TextEditorView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let word = self.buffer.with_text(|text| word_at(text, offset));
+        let word = self.buffer.word_at(offset);
         if word.is_empty() {
             return false;
         }
@@ -1312,7 +1473,11 @@ impl TextEditorView {
         head: BufferOffset,
         cx: &mut Context<Self>,
     ) {
-        self.selection_drag = Some(SelectionDrag { anchor });
+        self.selection_scroll_task = None;
+        self.selection_drag = Some(SelectionDrag {
+            anchor,
+            position: None,
+        });
         self.cursor.set_selection(Selection::new(anchor, head));
         self.secondary_selections.clear();
         self.marked_text = None;
@@ -1325,17 +1490,109 @@ impl TextEditorView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.focus_handle.is_focused(window) {
+            self.finish_selection_drag(cx);
+            return;
+        }
+        let Some(drag) = self.selection_drag.as_mut() else {
+            return;
+        };
+        drag.position = Some(point);
+        if self.update_drag_selection(point, window) {
+            cx.notify();
+        }
+        if self.selection_scroll_delta(point) == 0.0 {
+            self.selection_scroll_task = None;
+        } else if self.selection_scroll_task.is_none() {
+            let executor = cx.background_executor().clone();
+            // The editor owns this loop; release, blur, or dropping the view cancels it.
+            self.selection_scroll_task = Some(cx.spawn_in(window, async move |editor, cx| {
+                loop {
+                    executor.timer(EDITOR_SELECTION_SCROLL_INTERVAL).await;
+                    let keep_scrolling = editor
+                        .update_in(cx, |this, window, cx| {
+                            if !window.is_window_active() || !this.focus_handle.is_focused(window) {
+                                this.finish_selection_drag(cx);
+                                return false;
+                            }
+                            if this.scroll_drag_selection(window, cx) {
+                                return true;
+                            }
+                            this.selection_scroll_task = None;
+                            false
+                        })
+                        .unwrap_or(false);
+                    if !keep_scrolling {
+                        break;
+                    }
+                }
+            }));
+        }
+    }
+
+    fn update_drag_selection(&mut self, point: Point<Pixels>, window: &mut Window) -> bool {
         let Some(drag) = self.selection_drag else {
-            return;
+            return false;
         };
-        let Some(head) = self.offset_for_window_point(point, window) else {
-            return;
+        let Some(bounds) = self.content_bounds else {
+            return false;
         };
-        self.cursor.set_selection(Selection::new(drag.anchor, head));
-        cx.notify();
+        let y = f32::from(point.y - bounds.top())
+            .clamp(0.0, (f32::from(bounds.size.height) - 1.0).max(0.0));
+        let point = gpui::point(point.x, bounds.top() + px(y));
+        let head = self
+            .offset_for_window_point(point, window)
+            .unwrap_or(BufferOffset(self.buffer.len()));
+        let selection = Selection::new(drag.anchor, head);
+        if selection == self.cursor.selection() {
+            return false;
+        }
+        self.cursor.set_selection(selection);
+        true
+    }
+
+    fn selection_scroll_delta(&self, point: Point<Pixels>) -> f32 {
+        let Some(bounds) = self.content_bounds else {
+            return 0.0;
+        };
+        let height = f32::from(bounds.size.height);
+        if height <= 0.0 {
+            return 0.0;
+        }
+        let edge = self.metrics.line_height.min(height / 4.0).max(1.0);
+        let y = f32::from(point.y - bounds.top());
+        let distance = if y < edge {
+            y - edge
+        } else if y > height - edge {
+            y - (height - edge)
+        } else {
+            return 0.0;
+        };
+        (distance / edge).clamp(-3.0, 3.0) * self.metrics.line_height
+    }
+
+    fn scroll_drag_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(point) = self.selection_drag.and_then(|drag| drag.position) else {
+            return false;
+        };
+        let dy = self.selection_scroll_delta(point);
+        let scrolled = self.viewport.scroll_by(
+            0.0,
+            dy,
+            self.max_horizontal_scroll_px(),
+            self.document_row_count(),
+            self.metrics.line_height,
+        );
+        if scrolled {
+            self.scroll_origin = EditorScrollOrigin::User;
+            self.update_drag_selection(point, window);
+            cx.notify();
+        }
+        scrolled
     }
 
     fn finish_selection_drag(&mut self, cx: &mut Context<Self>) {
+        self.selection_scroll_task = None;
         if self.selection_drag.take().is_some() {
             cx.notify();
         }
@@ -1384,6 +1641,30 @@ impl TextEditorView {
             .buffer
             .offset_to_line_col(offset)
             .unwrap_or_else(|_| LineCol::new(0, 0));
+        if matches!(&*self.display_rows(), wrap::DisplayRows::Unwrapped(_))
+            && let Some(segments) = self.line_segments(position.line)
+        {
+            let origin = segments.starts[segments.at_byte(position.column)];
+            let prefix = self.segment_text(position.line, origin.byte, position.column);
+            let x = origin.x
+                + f32::from(
+                    self.shape_coordinate_line(&prefix, window.text_system())
+                        .width(),
+                );
+            return Bounds {
+                origin: bounds.origin
+                    + point(
+                        px(
+                            self.visible_gutter_width() + self.visible_content_padding_x()
+                                - self.viewport.scroll_x_px
+                                + x,
+                        ),
+                        px(position.line as f32 * self.metrics.line_height
+                            - self.vertical_scroll_y_px()),
+                    ),
+                size: gpui::size(px(1.0), px(self.metrics.line_height)),
+            };
+        }
         let line_text = self.buffer.line_text(position.line).unwrap_or_default();
         let visual_column = visual_column_for_byte_column(&line_text, position.column);
         let display_rows = self.display_rows();
@@ -1652,7 +1933,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn fractional_line_height_keeps_the_final_row_inside_the_viewport(
+    fn fractional_line_height_allows_the_final_row_at_the_viewport_top(
         cx: &mut gpui::TestAppContext,
     ) {
         let (editor, cx) = cx.add_window_view(|_, cx| {
@@ -1674,9 +1955,9 @@ mod tests {
                     cx,
                 );
                 for (scale, row_height, scroll_end) in [
-                    (1.0, 17.0, 3237.0),
-                    (2.0, 17.0, 3237.0),
-                    (1.25, 16.8, 3196.8),
+                    (1.0, 17.0, 3400.0),
+                    (2.0, 17.0, 3400.0),
+                    (1.25, 16.8, 3360.0),
                 ] {
                     window.set_scale_factor(scale);
                     editor.measure_code_metrics(window, cx);
@@ -1994,7 +2275,7 @@ mod tests {
             assert!(editor.bracket_index.is_empty());
             assert!(editor.structure_cache.columns_for_line(1).is_empty());
             assert!(editor.find_matches.is_empty());
-            assert!(editor.find_line_matches.is_empty());
+            assert_eq!(editor.find_matches.capacity(), 0);
             assert_eq!(editor.buffer.line_text(0).as_deref(), Some("zfn main() {"));
         });
     }
@@ -2070,6 +2351,7 @@ mod tests {
             end: 4,
             color: 0xff00ff,
             text: gpui::SharedString::from("test"),
+            layout: Default::default(),
         }]);
 
         let inserted = cache.insert(key, chunks.clone());
@@ -2080,23 +2362,54 @@ mod tests {
     }
 
     #[test]
-    fn highlight_chunk_cache_clears_when_scroll_window_exceeds_limit() {
+    fn highlight_chunk_cache_evicts_cold_rows_by_bytes_and_preserves_visible_layouts() {
         let mut cache = HighlightChunkCache::default();
-        for line in 0..HighlightChunkCache::MAX_ENTRIES {
-            cache.insert(cache_key(line), Arc::new(Vec::new()));
+        for line in 0..3 {
+            cache.begin_frame();
+            if line == 2 {
+                cache.get(&cache_key(0)).unwrap();
+            }
+            let text = "x".repeat(HighlightChunkCache::BYTE_BUDGET / 3);
+            cache.insert(
+                cache_key(line),
+                Arc::new(vec![LineChunkSpec {
+                    start: 0,
+                    end: text.len(),
+                    color: 0xff00ff,
+                    text: text.into(),
+                    layout: Default::default(),
+                }]),
+            );
+            cache.finish_frame();
         }
+        assert!(cache.get(&cache_key(1)).is_none());
+        let visible = cache.get(&cache_key(2)).unwrap();
+        assert!(cache.retained_bytes <= HighlightChunkCache::BYTE_BUDGET);
 
-        cache.insert(
-            cache_key(HighlightChunkCache::MAX_ENTRIES),
-            Arc::new(Vec::new()),
-        );
-
-        assert!(cache.get(&cache_key(0)).is_none());
-        assert!(
-            cache
-                .get(&cache_key(HighlightChunkCache::MAX_ENTRIES))
-                .is_some()
-        );
+        // Native layout allocations appear after cache insertion. Even an oversized
+        // visible row must survive this frame, then become eligible once offscreen.
+        visible[0]
+            .layout
+            .set(Arc::new(gpui::LineLayout {
+                runs: vec![gpui::ShapedRun {
+                    font_id: gpui::FontId(0),
+                    glyphs: Vec::with_capacity(
+                        HighlightChunkCache::BYTE_BUDGET / std::mem::size_of::<gpui::ShapedGlyph>()
+                            + 1,
+                    ),
+                }],
+                ..Default::default()
+            }))
+            .unwrap();
+        cache.finish_frame();
+        assert!(cache.retained_bytes > HighlightChunkCache::BYTE_BUDGET);
+        assert!(Arc::ptr_eq(&visible, &cache.get(&cache_key(2)).unwrap()));
+        cache.begin_frame();
+        let recent = cache.get(&cache_key(0)).unwrap();
+        cache.finish_frame();
+        assert!(cache.get(&cache_key(2)).is_none());
+        assert!(Arc::ptr_eq(&recent, &cache.get(&cache_key(0)).unwrap()));
+        assert!(cache.retained_bytes <= HighlightChunkCache::BYTE_BUDGET);
     }
 }
 

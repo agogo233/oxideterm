@@ -26,6 +26,356 @@ Use the same fixture size, warm-up count, measured-run count, terminal dimension
 
 ## In-App Performance Work
 
+### Complete Animation Frame Caching (2026-10-29)
+
+The final playback policy restores decode-once, full-frame reuse for image widgets
+(file/SFTP previews and chat images) and terminal-protocol animations. It replaces
+the intermediate 64 MiB GPU-cache compromise. The separate desktop background/video
+media decoder is unchanged.
+
+- GIF and animated WebP sources decode, resize, rotate, and convert their complete
+  frame sets once per display resolution. Animation storage is raw BGRA, not QOI
+  frames decompressed on each loop. The streaming decoder worker and three-frame
+  sliding CPU cache have been removed.
+- Terminal animations prepare their complete BGRA frame sets, reserving the full
+  pixel allocation before conversion. Static terminal images retain the shared-RGBA
+  optimization. Image admission/eviction fixes and compact search coordinates remain.
+- Every uploaded frame of a visible animation remains in the atlas for subsequent
+  loops, including animations larger than the former 64 MiB limit. Hidden images,
+  superseded resolutions, explicit removal, and renderer resets release their
+  textures. The general image cache still evicts cold resources, not visible players.
+- Deadline-based wakeups remain: image widgets and terminal images request a frame
+  when the next image frame is due rather than continuously at display refresh rate.
+  Hidden views cancel deadline tasks and inactive windows are not notified.
+
+Regression coverage includes stable borrowed pixel addresses across repeated loops;
+17 distinct 4 MiB frames all remaining in the GPU cache; release after hiding/removal;
+independent playback cursors; resizing and rotation; GIF disposal and transparency;
+pause, loading, finite loops and gapless frames. The image suite passed 10 tests
+(four manual benchmarks unrun), the image-cache lifecycle suite passed three tests,
+the atlas reuse test passed, and all 214 terminal-view tests passed.
+
+The macOS ordinary application build passed without test-support features.
+The prior atlas-query build error is fixed across Metal, DirectX, WGPU, headless and
+test implementations. Windows/Linux native builds were not run on this macOS host.
+
+Complete decoded frames and visible GPU frames now scale with animation dimensions
+and frame count. The low-memory animation preparation numbers in the earlier section
+below describe the superseded implementation; the static-image and search results
+still apply. No standalone GUI instance was launched and hardware power was not
+measured. General scrollback compression stays paused.
+
+### Terminal Image Ownership And Search Coordinates (2026-10-29)
+
+Baseline: `b3aae458f`. Measurements use the same machine and optimized profiles as
+the search baseline below, with one warm-up and five recorded samples. General
+scrollback compression remains paused.
+
+The graphics ingress now accounts for decoded image bytes across protocols and
+emits deletion events when evicting images, releasing its Kitty animation sources
+as well as consumer placements. The default ingress allowance is 16 MiB; the
+existing terminal-state safety budget remains in place. PNG/JPEG/GIF dimensions
+are checked before pixel decoding, GIF accumulation is bounded, and GIF frame
+zero shares the primary image allocation. The GIF iterator can temporarily hold
+one additional canvas while detecting EOF. Sixel still uses its decoder's own
+allocation limit before the terminal checks the decoded dimensions.
+
+Terminal rendering shares protocol RGBA canvases. It converts only a requested
+frame/crop to BGRA during texture upload instead of retaining a second complete
+frame set. An upload-workspace reservation follows the render image through
+retirement. Animation controls with unchanged pixels/delays reuse the image;
+new pixel revisions retire old cache entries. Hidden panes release derived image
+resources while retaining protocol data and animation clocks, and late preparation
+results cannot repopulate a suspended cache.
+
+| Image workload | Before | After | Median preparation/ingress time |
+| --- | ---: | ---: | ---: |
+| 100 distinct 1024×1024 PNG uploads, parser-retained pixels | 400 MiB | 16 MiB | 73.04 → 79.89 ms |
+| One 512×256 static image, extra preparation peak heap | 513.30 KiB | 1.52 KiB | 137 → 1 µs |
+| 48 frames at 512×256, extra preparation peak heap | 24.01 MiB | 6.52 KiB | 3,913 → 4 µs |
+
+The upload benchmark counts pixel allocations still held by the parser via weak
+references, not RSS. The preparation benchmark tracks requested Rust heap above
+the already-created protocol source. Its 48-frame source remains 24 MiB; a requested
+frame needs a temporary 512 KiB conversion buffer during upload. GPU textures and
+first-paint latency are outside these measurements. Conversion moves to upload;
+the preparation-time improvement is not an end-to-end rendering speedup. Admission
+and eviction add about 9% to this small-PNG ingress workload.
+
+Search row mappings use 12-byte checked coordinates for ordinary rows, promoting
+only rows whose offsets/columns require `usize`. ASCII rows retain no map object.
+The benchmark uses the real background-search and result-reconciliation paths,
+20,000 history rows at 400 columns plus 40 screen rows. All paired match counts agree.
+
+| Search workload | Extra peak heap before → after | Median scan + resolution before → after |
+| --- | ---: | ---: |
+| ASCII, regex hit | 18.67 → 18.26 MiB | 6.79 → 6.64 ms |
+| Alternating cell colors, regex hit | 18.67 → 18.26 MiB | 38.11 → 35.09 ms |
+| CJK + combining marks, regex miss | 115.38 → 69.88 MiB | 43.62 → 42.46 ms |
+| CJK + combining marks, regex hit | 119.79 → 74.13 MiB | 71.04 → 67.26 ms |
+| CJK + combining marks, cross-line literal | 119.79 → 74.13 MiB | 53.61 → 48.98 ms |
+
+Validation: 194 terminal-core tests passed, with five existing ignored cases;
+26 graphics-protocol tests passed, with the manual benchmark separately executed.
+The final map-storage refinement passed all five focused search tests. The terminal
+view suite passed 212 tests and retained the previously reproduced failure in
+`terminal_background_animation_plays_and_pauses` at `app/render.rs:3027`.
+The final cache lifecycle tests and the GPUI shared-RGBA upload test passed.
+The native application build passed. Native image-playback inspection was stopped
+at the user's request; no interactive image-playback acceptance is claimed.
+
+Reproduction commands:
+
+```sh
+cargo test -p oxideterm-terminal-graphics --release image_retention_benchmark -- --ignored --nocapture
+cargo bench -p oxideterm-gpui-terminal --bench image_cache
+cargo bench -p oxideterm-terminal --bench history_search
+```
+
+Raw paired output is under `target/memory-evaluation/`: `images-before.txt`,
+`images-after.txt`, `image-cache-before.csv`, `image-cache-after.csv`,
+`search-mapping-before.csv`, and `search-mapping-after.csv`.
+
+### Shared Background-Search Text (2026-10-28)
+
+The background search path now retains one text owner per matched logical line, or one
+owner for the complete cross-line subject. Rows carry byte ranges into that owner instead
+of keeping a second copy of every row's text. Extraction still holds the terminal lock
+for at most 32 rows at a time; a reusable chunk string separates that bounded copy from
+growth of the complete subject outside the lock. Immutable Unicode column adjustments
+use exactly sized boxed slices rather than retaining vector growth capacity.
+
+Arbitrary cross-line regex semantics remain unchanged: no fixed search window or match
+limit was introduced. Stable row identities, screen-content checks, neighbor context,
+written spaces, wide cells and combining marks still determine result validation.
+
+Measured on the same Apple M5 / macOS 26.6.2 / Rust 1.97.0 setup as below, optimized bench
+profile, one warm-up and five measured samples. The fixture contains 20,000 history rows
+at 400 columns plus 40 screen rows. The baseline is the original search implementation
+at `f11dff350`; the earlier hidden-cache changes do not participate in this backend fixture.
+Queries are compiled before measurement, matching the UI's compiled-query reuse. Peak
+heap is additional requested Rust heap above the populated terminal and compiled query,
+covering both scanning and result reconciliation. It excludes allocator slack and RSS.
+Time is the median sum of scanning and reconciliation; the CSV also separates both stages.
+
+| Workload | Peak before | Peak after | Time before | Time after |
+| --- | ---: | ---: | ---: | ---: |
+| Full ASCII, regex miss | 22.40 MiB | 14.26 MiB | 3.60 ms | 3.18 ms |
+| Full ASCII, regex hit | 27.11 MiB | 18.67 MiB | 7.34 ms | 6.85 ms |
+| Full ASCII, cross-line literal | 27.11 MiB | 18.67 MiB | 3.86 ms | 3.36 ms |
+| Alternating per-cell colors, regex miss | 24.54 MiB | 14.26 MiB | 31.82 ms | 37.17 ms |
+| Alternating per-cell colors, regex hit | 29.25 MiB | 18.67 MiB | 35.78 ms | 40.52 ms |
+| CJK + combining marks, regex miss | 161.11 MiB | 115.38 MiB | 50.35 ms | 44.52 ms |
+| CJK + combining marks, regex hit | 165.82 MiB | 119.79 MiB | 75.05 ms | 71.13 ms |
+| CJK + combining marks, cross-line literal | 165.82 MiB | 119.79 MiB | 58.78 ms | 54.02 ms |
+
+Retained because memory is the priority: the alternating-color cases cost about 3–5 ms
+more per search, while plain text and mixed Unicode regex searches improve. Dense ASCII
+literal results still consume about 68 MiB at peak for 280,546 hits; result objects are
+not capped or discarded. Unicode mapping data remains the largest mixed-text allocation.
+
+All paired benchmark result counts are unchanged. The complete terminal-core unit suite
+passed with its existing ignored cases left ignored; all 11 selected terminal-view search
+tests passed, including SSH search refresh during output, cancellation, manual-scroll
+preservation and result selection near the viewport. The real backend Unicode case now
+also checks a dot-all regex spanning three rows against explicit column ranges. Formatting
+and diff checks passed. This batch does not change the pre-existing animation-test failure
+recorded below.
+
+Raw data: `target/memory-evaluation/search-before.csv`, `search-shared.csv` (text sharing
+before tightening coordinate allocations), and `search-after.csv`.
+
+```sh
+cargo bench -p oxideterm-terminal --bench history_search
+cargo test -p oxideterm-terminal --lib
+cargo test -p oxideterm-gpui-terminal search
+```
+
+### Hidden Terminal Caches And Rejected Palette Expansion (2026-10-28)
+
+Baseline: `f11dff350`, Apple M5, macOS 26.6.2, Rust 1.97.0. The homepage redesign
+was reverted before this work. Only hidden terminal text-cache reclamation was retained;
+both expanded-history-attribute candidates were rejected and their production changes removed.
+
+Hidden tabs now release retained row layouts, text shaping/paint caches, highlights and
+link layouts. Visibility follows the tab host, including every split pane and detached
+window, rather than keyboard focus. App locking releases these caches in all panes.
+Session state, selection, scroll position, search state, and image animation clocks remain
+owned by the pane. Visible panes rebuild text caches on demand. Images and background
+media are not evicted by this change.
+
+The native `terminal_tab_switch_frame` benchmark opens eight playback terminals and presents
+32 batches of 16 distinct log lines in each before cycling between tabs. Both revisions
+use the same tracking allocator and workload. The heap measurement is the requested Rust
+heap increment after setup with seven tabs hidden; it excludes native font allocations,
+GPU resources and allocator size classes. It is a setup measurement, not process RSS.
+Frame measurements use native text shaping and the Metal headless renderer, with ten
+Criterion samples, one second of warm-up and two seconds of measurement.
+
+| Measurement | Before | Retained candidate |
+| --- | ---: | ---: |
+| Eight-tab requested heap increment | 60.02 MiB | 35.25 MiB |
+| Tab-switch iteration estimate | 0.894 ms | 1.299 ms |
+| Tab-switch dirty-to-draw p99 | 3.557 ms | 3.330 ms |
+| Continuous playback-output iteration estimate | 0.835 ms | 0.816 ms |
+
+The heap reduction is 24.77 MiB (41.3%) in this fixture. Switching pays about 0.405 ms
+for rebuilding discarded layouts; all measured tab-switch frames remained inside the
+120 Hz frame budget. Continuous playback output showed no statistically significant change.
+This measures rendering and playback parsing, not end-to-end PTY or SSH throughput.
+
+History experiments used the existing 20,000-line, 400-column benchmark, extended with
+17- and 64-color indexed palettes. Values below are medians of five measured samples
+after one warm-up. The generic candidate used a hash table beyond 16 attributes; the
+restricted candidate used direct indexed-color lookup and kept the old complex-color fallback.
+
+| Input / candidate | Retained heap | Steady output | Narrow to 200 columns and restore |
+| --- | ---: | ---: | ---: |
+| 17 colors / baseline | 189.65 MiB | 160.58 ms | 24.31 ms |
+| 17 colors / generic table | 72.77 MiB | 231.01 ms | 132.36 ms |
+| 17 colors / direct palette | 72.77 MiB | 179.25 ms | 59.48 ms |
+| 64 colors / baseline | 189.65 MiB | 160.12 ms | 23.77 ms |
+| 64 colors / generic table | 87.11 MiB | 265.42 ms | 200.80 ms |
+| 64 colors / direct palette | 87.11 MiB | 179.92 ms | 67.12 ms |
+| Unique RGB per cell / baseline | 189.65 MiB | 212.14 ms | 26.11 ms |
+| Unique RGB per cell / generic table | 189.65 MiB | 430.12 ms | 288.42 ms |
+
+Both candidates saved memory on repeated palettes, but their output and narrowing costs
+were unacceptable for this iteration. The existing 16-attribute admission policy remains.
+
+Validation: 212 of 213 terminal-view tests passed, including hidden output/search/selection/
+scroll preservation and release/rebuild of cached text. The extended application test for
+split panes, background tabs, detached windows, return-to-main and app-lock visibility passed.
+The existing `terminal_background_animation_plays_and_pauses` test failed at `app/render.rs:3027`;
+running it with both modified terminal source files restored to HEAD reproduced the same
+failure (`false` versus expected `true`). Its test and animation implementation were not changed.
+Formatting and diff checks passed. Interactive testing in a user's live SSH sessions was not run.
+
+Local raw results: `target/memory-evaluation/history-before.csv`, `history-candidate.csv`,
+`history-palette.csv`, `tabs-before.txt`, `tabs-after.txt`, and `animation-baseline.txt`.
+The rejected direct-palette patch is retained there as `rejected-palette.patch`.
+
+```sh
+cargo bench -p alacritty_terminal --bench history
+cargo bench -p oxideterm-gpui-terminal --features bench --bench terminal_render -- \
+  'terminal_(tab_switch_frame|playback_output_frame)' \
+  --sample-size 10 --warm-up-time 1 --measurement-time 2
+```
+
+### Text-Run History And Sequential Reads (2026-10-26)
+
+The third-stage baseline is the completed eight-byte implementation, saved before production edits in `target/text-history/baseline-src/` and `phase2.patch`. Both revisions were measured on the same Apple M5, ARM64 macOS 26.6.2, Rust 1.97.0, optimized bench profile, with one warm-up and five measured samples. Values below are medians; MB means 1,000,000 requested heap bytes.
+
+```sh
+cargo bench --locked -p alacritty_terminal --bench history
+cargo bench --locked -p oxideterm-terminal --bench history_search
+```
+
+The kernel harness retains 20,000 history rows and 40 screen rows. It fills 20,040 lines and writes another 20,040 at the limit. The width round trips are original → double → original, followed by original → half → original. The latter exercises actual reflow and the existing history-limit eviction policy. The expanded baseline was rebuilt from its saved source in `target/text-history/baseline-crate/`, using the same local VTE fork, dependency versions, release settings and harness, without replacing the working source.
+
+| Workload | Retained heap before → after (MB) | Steady output before → after (ms) | Double-width round trip (ms) | Half-width reflow round trip (ms) |
+| --- | ---: | ---: | ---: | ---: |
+| Short ASCII, 120 columns | 16.83 → 8.31 | 5.19 → 4.74 | 1.13 → 1.41 | 11.81 → 12.57 |
+| Short ASCII, 400 columns | 17.37 → 8.84 | 5.17 → 4.63 | 1.57 → 1.29 | 0.87 → 0.97 |
+| Pseudorandom full ASCII, 400 columns | 70.65 → 15.50 | 24.35 → 23.10 | 3.47 → 2.63 | 29.26 → 28.57 |
+| Full ASCII, ten runs of eight colors | 72.89 → 21.26 | 30.69 → 29.14 | 4.17 → 3.66 | 33.48 → 29.69 |
+| Full ASCII, two colors alternating every cell | 70.97 → 71.50 | 162.06 → 156.91 | 4.15 → 4.63 | 63.90 → 60.69 |
+| Full ASCII, distinct RGB per column | 198.33 → 198.86 | 216.70 → 217.11 | 35.71 → 37.67 | 24.49 → 26.98 |
+| Full CJK/ASCII with combining marks | 72.69 → 73.23 | 143.84 → 139.38 | 1.90 → 2.72 | 53.65 → 53.20 |
+
+Ordinary full-line retained heap is **15.50 MB**, a **78.1% reduction** from the eight-byte baseline. The ten-run color case retains **21.26 MB**. After the double-width round trip these retain 14.34 MB and 20.74 MB, with peaks of 20.32 MB and 26.38 MB respectively. Reading and kernel searching leave retained heap unchanged in every case. These counters cover the terminal/parser allocations, excluding the prebuilt input, allocator size classes, desktop UI and GPU allocations.
+
+#### Background search uses the real runtime path
+
+The runtime harness calls `TerminalSearchSource::search_matches_with_options`, including bounded row copying, matching and result resolution. Each case has 20,000 history rows at 400 columns. ASCII content repeats the alphabet to provide a known literal match; styles vary independently. The literal query `zabcdefghijklm` has matches in the ASCII cases and none in the Unicode case. The other queries are a literal miss and the regex miss `[A-Z]{12}`.
+
+| Workload | Literal miss before → after (ms) | Literal query before → after (ms) | Regex miss before → after (ms) |
+| --- | ---: | ---: | ---: |
+| Full ASCII alphabet sequence, 400 columns | 36.81 → 2.63 | 49.00 → 14.42 | 37.96 → 3.84 |
+| Full ASCII, ten runs of eight colors | 38.94 → 2.76 | 50.55 → 13.87 | 40.18 → 3.94 |
+| Full ASCII, two colors alternating every cell | 37.46 → 31.02 | 49.60 → 41.98 | 38.78 → 31.51 |
+| Full CJK/ASCII with combining marks | 47.67 → 44.64 | 47.07 → 42.88 | 51.97 → 47.45 |
+
+Eligible ASCII text is copied directly, including exact implicit tails and occupied-column limits. Width markers, NUL normalization and combining characters use cell iteration. The 32-row lock chunks, lock-free matching and row-identity reconciliation are unchanged.
+
+Kernel regex traversal and plain text extraction are measured separately:
+
+| Workload | Read all rows before → after (ms) | Forward kernel search (ms) | Reverse kernel search (ms) |
+| --- | ---: | ---: | ---: |
+| Short ASCII, 120 columns | 2.59 → 1.22 | 13.82 → 13.95 | 13.53 → 13.91 |
+| Short ASCII, 400 columns | 7.99 → 3.17 | 50.39 → 45.94 | 48.40 → 46.27 |
+| Pseudorandom full ASCII, 400 columns | 7.78 → 3.45 | 45.85 → 45.73 | 45.16 → 45.99 |
+| Full ASCII, ten runs of eight colors | 7.79 → 3.43 | 46.01 → 51.48 | 45.39 → 50.60 |
+| Full ASCII, two colors alternating every cell | 7.88 → 6.00 | 46.07 → 46.88 | 45.25 → 45.80 |
+| Full ASCII, distinct RGB per column | 7.50 → 5.75 | 42.95 → 44.39 | 43.50 → 48.02 |
+| Full CJK/ASCII with combining marks | 9.42 → 7.53 | 42.98 → 44.34 | 46.24 → 49.79 |
+
+Ordinary and ten-run colored output now improve on the eight-byte baseline for steady output and both resize workloads. Remaining costs are workload-specific: distinct-RGB half-width reflow rises from 24.49 to 26.98 ms; mixed Unicode double-width resizing rises from 1.90 to 2.72 ms; colored kernel regex traversal rises from 46.01 to 51.48 ms forward. Runtime background search improves in all measured cases.
+
+#### Storage and hot paths
+
+- Writable screen cells remain 24 bytes. History selects UTF-8 primary characters plus exact attribute/flag runs, eight-byte indexed cells, or full cells. Every stored primary character still corresponds to one Alacritty cell, including wide-character placeholders; no grapheme-width inference changes terminal contents.
+- Text admission compares retained capacities with indexed/full-cell costs. Run discovery is bounded at 16 runs to keep conversion and repeated reflow costs bounded. More fragmented rows prefer indexed cells; their attribute table retains its 16-entry work limit. Dense width/combining metadata keeps the Unicode benchmark indexed. This is a conversion-work policy as well as a memory comparison.
+- Repeated-tail compression remains in every representation. Recycled rows can switch between text and indexed storage without keeping obsolete content. Indexed/dense cases incur approximately 0.53 MB of additional row metadata at this workload size.
+- Row iteration has native forward/backward state; ASCII skipping is constant time and Unicode scans retain byte offsets. Grid iteration keeps a seek cursor and caches the current view. Sequential folds process attribute runs without repeating storage dispatch per cell.
+- ASCII input checks wide-cell overlap directly in the writable screen span. The earlier generic history iterator in this check was responsible for much of the output regression. The isolated 20,040-conversion probe is approximately unchanged for full ASCII (5.54 → 5.65 ms), while the complete output path improves from 24.35 to 23.10 ms.
+- Shrinking decodes the removed stored span; writable mutations expand the affected row. Run-wise decoding uses an exactly sized destination. Initial run boundaries are retained during admission rather than rediscovered during encoding. Empty repeated tails are not expanded.
+
+Paired raw results are `target/text-history/conversion-baseline.csv` / `accepted.csv` and `search-baseline.csv` / `search-accepted.csv`. The kernel CSV includes fill, isolated conversion, forward/reverse search, read, retained heap and resize-peak measurements. Earlier files in that directory preserve the diagnosed iterator, conversion and resize regressions; they are not the accepted results.
+
+Validation passed **603 tests**: 149 kernel unit tests, 45 upstream reference recordings, 193 runtime unit tests, five real-PTY integration tests and 211 terminal-view tests. Coverage includes mixed-direction iteration, ASCII skips, Unicode positions, wide placeholders, combining marks, hyperlinks, underline colors, copy-on-write after decoding, representation reuse, implicit tails, serialization, search across automatic wraps and lock-chunk boundaries, and resizing. Five existing ignored runtime tests and the manual serial-device test remain unrun. Native graphical-window interaction and frame latency remain manual acceptance checks.
+
+### Shared-Attribute History (2026-10-26)
+
+The second-stage baseline is the completed repeated-tail implementation below, not the original upstream grid. Its source snapshot is retained locally at `target/packed-history/tail-baseline-src/`, with the baseline harness at `target/packed-history/baseline-harness.rs`. The benchmark now includes deterministic pseudorandom full lines, eight foreground colors in 40-column runs, distinct RGB colors at every column, and CJK/ASCII mixed with a combining mark in each four-column group. Each line ends with an SGR reset and CRLF. These inputs differ from the first-stage repeated-digit corpus, so use the paired baseline in this section.
+
+Run `cargo bench --locked -p alacritty_terminal --bench history`. Hardware, toolchain, history limit, screen height, warm-up and five measured samples are unchanged from the first stage. Each sample fills 20,000 history rows, writes another 20,040 lines, reads the retained text, searches the complete buffer for a missing regex, then doubles and restores the width. Search measures the kernel's `RegexSearch` traversal, not the desktop background-search UI.
+
+| Workload | Retained heap before → after (MB) | Steady output before → after (ms) | Search before → after (ms) | Width round trip before → after (ms) |
+| --- | ---: | ---: | ---: | ---: |
+| Short ASCII, 120 columns | 36.09 → 16.83 | 5.36 → 4.95 | 12.74 → 13.80 | 1.13 → 0.90 |
+| Short ASCII, 400 columns | 36.63 → 17.37 | 5.20 → 4.88 | 40.83 → 45.49 | 1.14 → 1.01 |
+| Pseudorandom full ASCII, 400 columns | 196.47 → 70.65 | 18.04 → 24.05 | 40.12 → 46.23 | 23.30 → 3.37 |
+| Full ASCII, eight foreground colors | 196.47 → 72.89 | 23.45 → 30.32 | 40.31 → 46.34 | 22.81 → 4.14 |
+| Full ASCII, distinct RGB color per column | 196.47 → 198.33 | 206.06 → 211.16 | 40.32 → 43.67 | 22.91 → 36.06 |
+| Full CJK/ASCII with combining marks | 340.75 → 72.69 | 103.03 → 142.53 | 37.37 → 42.98 | 25.72 → 1.56 |
+
+The ordinary full-line target is met: 70.65 MB after steady output and 69.84 MB after resizing, with a 74.83 MB resize peak. The eight-color case retains 72.89 MB (72.40 MB after resizing; 77.38 MB peak). Reading and searching do not increase retained heap in any case. The measurements exclude the input corpus, allocator size classes, desktop UI and GPU resources.
+
+There is a throughput tradeoff. Relative to the repeated-tail baseline, ordinary full-line steady output takes about 33% longer and its search about 15% longer; mixed combining-character output also costs more CPU. Width changes are substantially faster for packed rows. High-entropy color rows keep dense cells and incur extra conversion-attempt/read-view overhead, including slower resizing. These results do not establish a no-regression performance claim.
+
+History uses eight-byte character/flags/attribute-index entries and row-local exact colors and extension references. Attribute construction stops at 16 distinct entries and requires at least 25% estimated savings; rejected rows keep the dense or repeated-tail representation. This work budget deliberately leaves some potentially compressible high-style-count rows unpacked. Mutable access restores only the affected row, while scrolling recycles both packed allocations and dense screen buffers. Narrowing invalidates cached rejection decisions because removed columns may contain the costly attributes.
+
+Raw paired results: `target/packed-history/baseline.csv` and `accepted.csv`. The final harness also records heap after search and resize. Intermediate files retain the conversion, allocation-reuse, and read-view-only diagnostic measurements; the temporary encoding-disabled diagnostic was restored before validation.
+
+Validation: 147 kernel unit tests, 45 upstream reference recordings, 192 runtime unit tests, five real-PTY integration tests, and 211 terminal-view tests passed (600 total). Five existing ignored runtime tests remain unrun. New tests cover packed character/flag fidelity, exact RGB/named colors, links, combining marks, underline colors, copy-on-write after unpacking, capacity reclamation, high-entropy rejection, and reconsideration after narrowing. The narrowing regression was demonstrated failing before its correction. Native graphical-window interaction and desktop frame latency remain manual checks.
+
+### Repeated-Tail History: First-Stage Baseline (2026-10-26)
+
+The first-stage history benchmark exercised the parser and grid directly, without launching the desktop. Its archived measurements below used the original three-case harness; the command now runs the expanded second-stage workloads:
+
+```sh
+cargo bench --locked -p alacritty_terminal --bench history
+```
+
+Baseline: `f2593f3bd6d950b5a4bd8be88c2932e82a69bd25`, with the same benchmark harness added before changing storage. Environment: Apple M5, ARM64, macOS 26.6.2, Rust 1.97.0, Cargo's optimized bench profile. Each case has 40 screen rows and a 20,000-row history limit. One warm-up precedes five samples. Short lines contain 66 ASCII characters; the full-line case contains 400. Each sample fills the terminal with 20,040 lines, writes another 20,040 lines at the history limit, reads all retained rows, then doubles and restores the column count.
+
+Heap figures count live requested allocations owned by the terminal and parser, excluding the prebuilt input. They do not include allocator size classes, GPU resources, or the rest of the desktop process. The measured `Cell` size is 24 bytes. Reading all history left the retained allocation count unchanged in every sample.
+
+| Workload | Retained heap before → after (MB) | Change | Steady output before → after (ms) | Width round trip before → after (ms) |
+| --- | ---: | ---: | ---: | ---: |
+| Short lines, 120 columns | 61.26 → 36.09 | −41.1% | 5.37 → 4.51 | 10.72 → 0.64 |
+| Short lines, 400 columns | 196.20 → 36.63 | −81.3% | 5.11 → 3.91 | 29.21 → 0.73 |
+| Full lines, 400 columns | 196.20 → 196.47 | +0.14% | 17.74 → 15.31 | 29.35 → 23.32 |
+
+Times are medians of five samples on each revision. The final run follows the constant-time row-iterator skipping correction and the complete regression tests. Earlier 120-column runs showed timing variability (steady-output medians 6.16 and 4.23 ms); their samples remain available alongside the final 4.51 ms result. The final full-line run also contains an outlier, retained in the raw data. These are kernel operation timings, not GPU frame or native window latency measurements.
+
+Peak live allocations during resizing fell from 120.58 to 38.01 MB for short120, 390.19 to 38.56 MB for short400, and 390.19 to 199.24 MB for full400. The full-line case has no repeated tail to compact at its original width, so it retains full cells plus a small per-row metadata cost. The short-line savings come from exact repeated-tail storage and reuse of dense screen allocations. Shrinking an implicit default tail does not materialize it.
+
+Raw local samples for the table are in `target/compact-history/baseline.csv` and `verified.csv`. Intermediate measurements (`initial.csv`, `resize-fixed.csv`, `final.csv`, and `final-repeat.csv`) in the same directory record the initial full-line resize regression, its correction, and repeated timing observations before final validation.
+
+Validation passed 144 terminal-kernel unit tests, 45 upstream reference recordings, 192 terminal-runtime unit tests, five real-PTY integration tests, and 211 terminal-view tests. Five pre-existing ignored runtime tests were not run (performance probes and the external tmux-control scenario). Added coverage checks compact-row memory retention and buffer reuse, Unicode and link metadata, colored-tail resize semantics, stable row identity, reference serialization, and runtime search/snapshot reads across resizing. Native graphical-window interaction remains a manual acceptance check.
+
 ### Command-Aware Output At The Scrollback Limit
 
 The headless GPUI renderer benchmark feeds real shell-integration events as well as text:

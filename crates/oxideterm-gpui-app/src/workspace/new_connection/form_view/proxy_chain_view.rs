@@ -178,6 +178,43 @@ impl WorkspaceApp {
                     );
                 }
             }
+            NewConnectionSelect::TunnelHost => {
+                let selected_id = self
+                    .ssh_tunnels
+                    .form
+                    .as_ref()
+                    .and_then(|form| form.host_id.as_deref());
+                let connections = self.connection_store.connection_infos();
+                if connections.is_empty() {
+                    popup = popup.child(
+                        div()
+                            .p_2()
+                            .text_size(px(self.tokens.metrics.ui_text_sm))
+                            .text_color(rgb(self.tokens.ui.text_muted))
+                            .child(self.i18n.t("ssh_tunnel.choose_host")),
+                    );
+                }
+                for host in connections {
+                    let selected = selected_id == Some(host.id.as_str());
+                    let label = format!(
+                        "{} · {}@{}:{}",
+                        host.name, host.username, host.host, host.port
+                    );
+                    popup = popup.child(select_option_action(
+                        select_option(&self.tokens, label, selected),
+                        false,
+                        false,
+                        cx.listener(move |this, _, _, cx| {
+                            this.close_new_connection_select(cx);
+                            if let Some(form) = this.ssh_tunnels.form.as_mut() {
+                                form.host_id = Some(host.id.clone());
+                            }
+                            cx.stop_propagation();
+                            cx.notify();
+                        }),
+                    ));
+                }
+            }
             NewConnectionSelect::JumpSavedConnection => {
                 let selected_connection_id = self
                     .connection_form_state(cx)
@@ -941,6 +978,53 @@ impl WorkspaceApp {
                     ));
                 }
             }
+            NewConnectionSelect::TelnetInputLineEnding
+            | NewConnectionSelect::TelnetOutputLineEnding => {
+                use oxideterm_connections::SerialLineEnding;
+                let output = select_id == NewConnectionSelect::TelnetOutputLineEnding;
+                let selected = self
+                    .connection_form_state(cx)
+                    .form
+                    .as_ref()
+                    .map(|form| {
+                        if output {
+                            form.telnet_output_line_ending
+                        } else {
+                            form.telnet_input_line_ending
+                        }
+                    })
+                    .unwrap_or_default();
+                for value in [
+                    SerialLineEnding::None,
+                    SerialLineEnding::Lf,
+                    SerialLineEnding::CrLf,
+                    SerialLineEnding::Cr,
+                ] {
+                    popup = popup.child(select_option_action(
+                        select_option(
+                            &self.tokens,
+                            self.connection_line_ending_label(value),
+                            selected == value,
+                        ),
+                        false,
+                        false,
+                        cx.listener(move |this, _, _, cx| {
+                            this.close_new_connection_select(cx);
+                            this.update_connection_form_state(cx, |state| {
+                                if let Some(form) = state.form.as_mut() {
+                                    if output {
+                                        form.telnet_output_line_ending = value;
+                                    } else {
+                                        form.telnet_input_line_ending = value;
+                                    }
+                                }
+                            });
+                            cx.stop_propagation();
+                            cx.notify();
+                        }),
+                    ));
+                }
+            }
             NewConnectionSelect::SerialFlowControl => {
                 let selected = self
                     .connection_form_state(cx)
@@ -1137,6 +1221,7 @@ impl WorkspaceApp {
                                 self.i18n.t("ssh.form.proxy_jump_kbi_hint"),
                             ))
                             .child(self.render_connection_checkbox(
+                                "jump-kerberos",
                                 self.i18n.t("ssh.form.kerberos_preferred"),
                                 jump_form.gssapi_enabled,
                                 |form| {
@@ -1265,6 +1350,7 @@ impl WorkspaceApp {
                                         cx,
                                     ))
                                     .child(self.render_connection_checkbox(
+                                        "jump-empty-password",
                                         self.i18n.t("ssh.form.use_empty_password"),
                                         jump_form.empty_password,
                                         |form| {
@@ -1297,6 +1383,7 @@ impl WorkspaceApp {
                                     ))
                             })
                             .child(self.render_connection_checkbox(
+                                "jump-agent-forwarding",
                                 self.i18n.t("ssh.form.agent_forwarding"),
                                 jump_form.agent_forwarding,
                                 |form| {
@@ -1307,6 +1394,7 @@ impl WorkspaceApp {
                                 cx,
                             ))
                             .child(self.render_connection_checkbox(
+                                "jump-legacy-ssh",
                                 self.i18n.t("ssh.form.legacy_ssh_compatibility"),
                                 jump_form.legacy_ssh_compatibility,
                                 |form| {

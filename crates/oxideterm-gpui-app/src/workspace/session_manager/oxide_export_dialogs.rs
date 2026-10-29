@@ -39,7 +39,13 @@ impl WorkspaceApp {
         else {
             return div().into_any_element();
         };
-        let connections = self.connection_store.connections();
+        let connections = self
+            .session_manager
+            .read(cx)
+            .oxide_export_dialog
+            .as_ref()
+            .map(|dialog| Arc::clone(&dialog.connection_rows))
+            .unwrap_or_else(|| Arc::from([]));
         dismissible_dialog_backdrop()
             .on_mouse_down(
                 MouseButton::Left,
@@ -187,6 +193,7 @@ impl WorkspaceApp {
             Some((LucideIcon::Key, self.i18n.t("export.credential_material"))),
             vec![
                 self.render_oxide_option_row(
+                    "export-passwords",
                     self.i18n.t("export.include_passwords"),
                     self.i18n.t("export.include_passwords_description"),
                     include_passwords,
@@ -203,6 +210,7 @@ impl WorkspaceApp {
                     cx,
                 ),
                 self.render_oxide_option_row(
+                    "export-embed-keys",
                     self.i18n.t("export.embed_keys"),
                     self.i18n.t("export.embed_keys_description"),
                     embed_keys,
@@ -219,6 +227,7 @@ impl WorkspaceApp {
                     cx,
                 ),
                 self.render_oxide_option_row(
+                    "export-key-passphrases",
                     self.i18n.t("export.include_key_passphrases"),
                     self.i18n.t("export.include_key_passphrases_description"),
                     include_key_passphrases,
@@ -235,6 +244,7 @@ impl WorkspaceApp {
                     cx,
                 ),
                 self.render_oxide_option_row(
+                    "export-managed-keys",
                     self.i18n.t("export.include_managed_keys"),
                     self.i18n.t("export.include_managed_keys_description"),
                     include_managed_keys,
@@ -257,6 +267,7 @@ impl WorkspaceApp {
                     .opacity(if include_managed_keys { 1.0 } else { 0.45 })
                     .child(
                         self.render_oxide_option_row(
+                            "export-managed-key-passphrases",
                             self.i18n.t("export.include_managed_key_passphrases"),
                             self.i18n
                                 .t("export.include_managed_key_passphrases_description"),

@@ -1,5 +1,6 @@
 [workspace]
 members = [
+  "crates/oxideterm-image-decoder",
   "crates/oxideterm-background-media",
   "crates/oxideterm-gpui-background",
   "crates/fernomade/crypto",
@@ -101,7 +102,7 @@ gpui-pre-windows = { path = "crates/gpui-ce/gpui_windows" }
 gpui-pre-linux = { path = "crates/gpui-ce/gpui_linux" }
 gpui-pre-wgpu = { path = "crates/gpui-ce/gpui_wgpu" }
 # Keep the SSH protocol fork independent from application lint and test targets.
-russh = { git = "https://github.com/AnalyseDeCircuit/russh", rev = "df41ee42819999db363e67309bbde0955a43e693" }
+russh = { git = "https://github.com/AnalyseDeCircuit/russh", rev = "e115f85e095b2f6fb5dc171988e720048fe1dd7c" }
 russh-sftp = { path = "crates/russh-sftp" }
 vte = { path = "crates/vte" }
 
@@ -109,7 +110,7 @@ vte = { path = "crates/vte" }
 edition = "2024"
 license = "GPL-3.0-only"
 publish = false
-version = "2.2.3"
+version = "2.2.6"
 
 [workspace.dependencies]
 accesskit = { version = "0.24.0", features = ["enumn"] }
@@ -208,10 +209,10 @@ rand = "0.8"
 rand10 = { package = "rand", version = "0.10" }
 # `system-proxy` lets the application proxy's explicit System mode read OS proxy
 # settings instead of only inheriting environment variables.
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "socks", "stream", "system-proxy"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots", "socks", "stream", "system-proxy"] }
 rmcp = { version = "3.1.2", default-features = false, features = ["server", "transport-streamable-http-server"] }
 rmp-serde = "1"
-russh = "=0.63.0"
+russh = "=0.65.0"
 scap = { version = "0.0.8-zed", package = "zed-scap", default-features = false }
 schemars = { version = "1.0", features = ["indexmap2"] }
 semver = { version = "1.0", features = ["serde"] }
@@ -359,7 +360,7 @@ opt-level = 3
 
 [profile.dev]
 opt-level = 0
-debug = 1
+debug = "line-tables-only"
 incremental = true
 split-debuginfo = "unpacked"
 
@@ -382,4 +383,14 @@ opt-level = 2
 opt-level = 2
 
 [profile.dev.package.oxideterm-background-media]
+opt-level = 2
+
+[profile.dev.package.oxideterm-image-decoder]
+opt-level = 2
+
+# GIF playback now decodes frames as they are presented, not only during initial loading.
+[profile.dev.package.gif]
+opt-level = 2
+
+[profile.dev.package.weezl]
 opt-level = 2

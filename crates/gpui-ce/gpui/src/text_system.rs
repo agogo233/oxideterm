@@ -301,6 +301,11 @@ impl TextSystem {
         Ok(())
     }
 
+    /// Revision of the installed fonts, for consumers retaining shaped text across frames.
+    pub fn font_generation(&self) -> usize {
+        self.font_generation.load(Ordering::Acquire)
+    }
+
     /// Takes the receiver for missing-glyph reports.
     ///
     /// Only one receiver is available for each text system. Returns `None` when
@@ -326,8 +331,9 @@ impl TextSystem {
         self.missing_glyph_reporter.report(missing_glyphs);
     }
 
-    /// Get the FontId for the configure font family and style.
-    fn font_id(&self, font: &Font) -> Result<FontId> {
+    /// Gets the configured font family and style without the default fallback stack.
+    /// Failed lookups are cached and invalidated when fonts are added.
+    pub fn font_id(&self, font: &Font) -> Result<FontId> {
         fn clone_font_id_result(font_id: &Result<FontId>) -> Result<FontId> {
             match font_id {
                 Ok(font_id) => Ok(*font_id),

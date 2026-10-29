@@ -195,6 +195,10 @@ impl IdeSurface {
     }
 
     pub fn copy_active_editor_selection(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.is_markdown_preview() {
+            self.copy_markdown_selection(cx);
+            return true;
+        }
         let Some(editor) = self.active_editor() else {
             return false;
         };
@@ -204,6 +208,9 @@ impl IdeSurface {
     }
 
     pub fn cut_active_editor_selection(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.is_markdown_preview() {
+            return true;
+        }
         let Some(editor) = self.active_editor() else {
             return false;
         };
@@ -211,6 +218,9 @@ impl IdeSurface {
     }
 
     pub fn paste_into_active_editor(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.is_markdown_preview() {
+            return true;
+        }
         let Some(editor) = self.active_editor() else {
             return false;
         };
@@ -221,6 +231,10 @@ impl IdeSurface {
     }
 
     pub fn select_all_in_active_editor(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.is_markdown_preview() {
+            self.select_all_markdown(cx);
+            return true;
+        }
         let Some(editor) = self.active_editor() else {
             return false;
         };
@@ -231,26 +245,34 @@ impl IdeSurface {
     }
 
     pub fn open_active_editor_search(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.active_editor().is_none() {
-            return false;
+        if let Some(tab_id) = self.workspace.active_tab() {
+            self.show_markdown_source(tab_id, cx);
         }
-        self.open_editor_search(cx);
-        true
+        let Some(editor) = self.active_editor() else {
+            return false;
+        };
+        editor.update(cx, |editor, cx| editor.open_search(cx))
     }
 
     pub fn select_next_active_editor_search_match(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.active_editor().is_none() {
-            return false;
+        if self.is_markdown_preview() {
+            return true;
         }
-        self.select_next_editor_search_match(cx);
+        let Some(editor) = self.active_editor() else {
+            return false;
+        };
+        editor.update(cx, |editor, cx| editor.select_next_find_match(cx));
         true
     }
 
     pub fn select_previous_active_editor_search_match(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.active_editor().is_none() {
-            return false;
+        if self.is_markdown_preview() {
+            return true;
         }
-        self.select_previous_editor_search_match(cx);
+        let Some(editor) = self.active_editor() else {
+            return false;
+        };
+        editor.update(cx, |editor, cx| editor.select_previous_find_match(cx));
         true
     }
 
@@ -276,7 +298,10 @@ impl IdeSurface {
         self.root_path = Some(root_path);
         self.load_state = IdeLoadState::Ready;
         self.editors.clear();
+        self.markdown_previews.clear();
         self.loading_file_tabs.clear();
+        self.file_open_errors.clear();
+        self.pending_saves.clear();
         for buffer in buffers {
             self.create_editor(buffer.tab_id, &buffer.location, buffer.text.clone(), cx);
         }
@@ -292,7 +317,6 @@ impl IdeSurface {
         self.node_id = Some(result.node_id);
         self.git_branch = result.git_branch;
         self.load_state = IdeLoadState::Ready;
-        self.agent_opt_in_open = self.runtime_settings.agent_mode == NodeAgentMode::Ask;
         self.clear_search_cache();
         self.resume_agent_sampling(cx);
         cx.emit(IdeSurfaceEvent::ProjectOpened);
@@ -403,6 +427,7 @@ impl IdeSurface {
     }
 
     fn start_agent_watch_if_ready(&mut self, cx: &mut Context<Self>) {
+        if !self.fs.supports_watching() { return; }
         if !self.mount.is_visible() {
             self.stop_agent_watch(cx);
             return;
@@ -819,136 +844,11 @@ impl IdeSurface {
                 && event.keystroke.key.eq_ignore_ascii_case("f")
         };
         if matches {
-            self.open_editor_search(cx);
+            self.open_active_editor_search(cx);
             cx.stop_propagation();
         }
     }
 
-    fn handle_editor_search_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
-        if !self.editor_search.open {
-            return;
-        }
-        let mut handled = true;
-        match event.keystroke.key.as_str() {
-            "escape" => self.close_editor_search(cx),
-            "enter" => {
-                if event.keystroke.modifiers.shift {
-                    self.select_previous_editor_search_match(cx);
-                } else {
-                    self.select_next_editor_search_match(cx);
-                }
-            }
-            "tab" => {
-                self.editor_search.replace_focused =
-                    self.editor_search.replace_open && !self.editor_search.replace_focused;
-                cx.notify();
-            }
-            "backspace" => {
-                if self.editor_search.replace_focused {
-                    if self.editor_search.replacement.pop().is_some() {
-                        cx.notify();
-                    }
-                } else if self.editor_search.query.pop().is_some() {
-                    self.apply_editor_search_query(cx);
-                }
-            }
-            _ => {
-                handled = false;
-                if let Some(text) = event.keystroke.key_char.as_deref()
-                    && !text.is_empty()
-                    && !text.chars().any(char::is_control)
-                    && !event.keystroke.modifiers.platform
-                    && !event.keystroke.modifiers.control
-                {
-                    handled = true;
-                    if self.editor_search.replace_focused {
-                        self.editor_search.replacement.push_str(text);
-                        cx.notify();
-                    } else {
-                        self.editor_search.query.push_str(text);
-                        self.apply_editor_search_query(cx);
-                    }
-                }
-            }
-        }
-        if handled {
-            cx.stop_propagation();
-        }
-    }
-
-    fn open_editor_search(&mut self, cx: &mut Context<Self>) {
-        self.editor_search.open = true;
-        self.editor_search.replace_focused = false;
-        self.apply_editor_search_query(cx);
-        cx.notify();
-    }
-
-    fn close_editor_search(&mut self, cx: &mut Context<Self>) {
-        self.editor_search.open = false;
-        self.editor_search.query.clear();
-        self.editor_search.replacement.clear();
-        self.editor_search.replace_open = false;
-        self.editor_search.replace_focused = false;
-        if let Some(editor) = self.active_editor() {
-            editor.update(cx, |editor, cx| editor.set_find_query("", cx));
-        }
-        cx.notify();
-    }
-
-    fn apply_editor_search_query(&mut self, cx: &mut Context<Self>) {
-        if let Some(editor) = self.active_editor() {
-            let query = self.editor_search.query.clone();
-            let case_sensitive = self.editor_search.case_sensitive;
-            editor.update(cx, |editor, cx| {
-                editor.set_find_case_sensitive(case_sensitive, cx);
-                editor.set_find_query(query, cx);
-            });
-        }
-        cx.notify();
-    }
-
-    fn toggle_editor_search_replace(&mut self, cx: &mut Context<Self>) {
-        self.editor_search.replace_open = !self.editor_search.replace_open;
-        if !self.editor_search.replace_open {
-            self.editor_search.replace_focused = false;
-        }
-        cx.notify();
-    }
-
-    fn toggle_editor_search_case_sensitive(&mut self, cx: &mut Context<Self>) {
-        self.editor_search.case_sensitive = !self.editor_search.case_sensitive;
-        self.apply_editor_search_query(cx);
-    }
-
-    fn select_next_editor_search_match(&mut self, cx: &mut Context<Self>) {
-        if let Some(editor) = self.active_editor() {
-            editor.update(cx, |editor, cx| editor.select_next_find_match(cx));
-        }
-    }
-
-    fn select_previous_editor_search_match(&mut self, cx: &mut Context<Self>) {
-        if let Some(editor) = self.active_editor() {
-            editor.update(cx, |editor, cx| editor.select_previous_find_match(cx));
-        }
-    }
-
-    fn replace_current_editor_search_match(&mut self, cx: &mut Context<Self>) {
-        if let Some(editor) = self.active_editor() {
-            let replacement = self.editor_search.replacement.clone();
-            editor.update(cx, |editor, cx| {
-                editor.replace_current_find_match(replacement, cx)
-            });
-        }
-    }
-
-    fn replace_all_editor_search_matches(&mut self, cx: &mut Context<Self>) {
-        if let Some(editor) = self.active_editor() {
-            let replacement = self.editor_search.replacement.clone();
-            editor.update(cx, |editor, cx| {
-                editor.replace_all_find_matches(replacement, cx)
-            });
-        }
-    }
 
     fn open_search_match(&mut self, hit: IdeSearchMatch, cx: &mut Context<Self>) {
         let Some(node_id) = self.node_id.clone() else {
@@ -968,6 +868,7 @@ impl IdeSurface {
     }
 
     fn go_to_symbol_definition(&mut self, word: String, cx: &mut Context<Self>) {
+        if !self.fs.supports_symbols() { return; }
         let Some(root_path) = self.root_path.clone() else {
             return;
         };
@@ -1061,6 +962,7 @@ impl IdeSurface {
         else {
             return;
         };
+        self.show_markdown_source(tab_id, cx);
         if let Some(editor) = self.editors.get(&tab_id) {
             editor.update(cx, |editor, cx| editor.set_find_query(query, cx));
         }
@@ -1086,6 +988,7 @@ impl IdeSurface {
         else {
             return;
         };
+        self.show_markdown_source(tab_id, cx);
         if let Some(editor) = self.editors.get(&tab_id) {
             editor.update(cx, |editor, cx| {
                 editor.reveal_line_column(reveal.line, reveal.column, cx)
@@ -1168,6 +1071,7 @@ impl IdeSurface {
             .map(|tab| tab.id)
         {
             let _ = self.workspace.set_active_tab(tab_id);
+            self.sync_tab_render_caches(cx);
             self.apply_pending_reconnect_dirty_for_tab(tab_id, cx);
             self.apply_pending_search_query_for_location(&location, cx);
             self.apply_pending_editor_reveal_for_location(&location, cx);
@@ -1192,6 +1096,7 @@ impl IdeSurface {
             }
         };
         self.loading_file_tabs.insert(tab_id);
+        self.sync_tab_render_caches(cx);
         self.loading_paths.insert(key.clone());
         let fs = self.fs.clone();
         let generation = self.generation;
@@ -1228,45 +1133,54 @@ impl IdeSurface {
                 }
                 this.loading_paths.remove(&key);
                 this.loading_file_tabs.remove(&tab_id);
-                match result {
-                    Ok(result) => {
-                        if this
-                            .workspace
-                            .buffer(tab_id)
-                            .is_none_or(|current| current.location != result.location)
-                        {
-                            cx.notify();
-                            return;
-                        }
-                        let dirty_text = remote_path(&result.location)
-                            .and_then(|path| this.pending_restore_dirty_contents.remove(path));
-                        let text: Arc<str> = result.text.into();
-                        let _ = this.workspace.replace_buffer_text(tab_id, text.clone());
-                        let _ = this.workspace.set_file_format(tab_id, result.format);
-                        let _ = this.workspace.mark_saved(tab_id, result.version);
-                        this.create_editor(tab_id, &result.location, text, cx);
-                        if let Some(dirty_text) = dirty_text {
-                            this.apply_reconnect_dirty_text(tab_id, dirty_text, cx);
-                        }
-                        this.apply_pending_search_query_for_location(&result.location, cx);
-                        this.apply_pending_editor_reveal_for_location(&result.location, cx);
-                    }
-                    Err(error) => {
-                        if this
-                            .workspace
-                            .buffer(tab_id)
-                            .is_some_and(|current| current.location == location)
-                        {
-                            let _ = this.workspace.request_close_tab(tab_id);
-                            this.editors.remove(&tab_id);
-                        }
-                        this.last_error = Some(this.file_error_message(&error));
-                    }
-                }
+                this.complete_file_open(tab_id, location, result, cx);
                 cx.notify();
             });
         })
         .detach();
+    }
+
+    fn complete_file_open(
+        &mut self,
+        tab_id: EditorTabId,
+        location: IdeLocation,
+        result: Result<FileOpenResult, IdeFileError>,
+        cx: &mut Context<Self>,
+    ) {
+        match result {
+            Ok(result) => {
+                if self
+                    .workspace
+                    .buffer(tab_id)
+                    .is_none_or(|current| current.location != result.location)
+                {
+                    cx.notify();
+                    return;
+                }
+                let dirty_text = remote_path(&result.location)
+                    .and_then(|path| self.pending_restore_dirty_contents.remove(path));
+                let text: Arc<str> = result.text.into();
+                let _ = self.workspace.replace_buffer_text(tab_id, text.clone());
+                let _ = self.workspace.set_file_format(tab_id, result.format);
+                let _ = self.workspace.mark_saved(tab_id, result.version);
+                self.create_editor(tab_id, &result.location, text, cx);
+                if let Some(dirty_text) = dirty_text {
+                    self.apply_reconnect_dirty_text(tab_id, dirty_text, cx);
+                }
+                self.apply_pending_search_query_for_location(&result.location, cx);
+                self.apply_pending_editor_reveal_for_location(&result.location, cx);
+            }
+            Err(error) => {
+                if self
+                    .workspace
+                    .buffer(tab_id)
+                    .is_some_and(|current| current.location == location)
+                {
+                    self.file_open_errors.insert(tab_id, error);
+                }
+            }
+        }
+        cx.notify();
     }
 
     fn create_editor(
@@ -1276,6 +1190,7 @@ impl IdeSurface {
         text: Arc<str>,
         cx: &mut Context<Self>,
     ) {
+        self.file_open_errors.remove(&tab_id);
         let tokens = self.tokens;
         let runtime_settings = self.runtime_settings.clone();
         let language_path = match location {
@@ -1286,8 +1201,13 @@ impl IdeSurface {
         let surface = cx.weak_entity();
         let save_surface = surface.clone();
         let symbol_surface = surface;
+        let cache_active = self.mount.is_visible()
+            && self.workspace.active_tab() == Some(tab_id)
+            && !self.is_markdown_preview();
         let editor = cx.new(|cx| {
             let mut editor = TextEditorView::new(text, &tokens, cx);
+            editor.set_render_cache_active(cache_active, cx);
+            editor.set_search_labels(self.labels.editor_search.clone());
             editor.set_context_menu_labels(EditorContextMenuLabels {
                 copy: self.labels.editor_copy.clone(),
                 cut: self.labels.editor_cut.clone(),
@@ -1320,7 +1240,14 @@ impl IdeSurface {
             }));
             editor
         });
-        self.editors.insert(tab_id, editor);
+        if self.editors.insert(tab_id, editor).is_some()
+            && let Some(state) = self.markdown_previews.get_mut(&tab_id)
+        {
+            state.release_cache();
+            state.source_version = None;
+            state.suspended_selection = None;
+        }
+        self.sync_tab_render_caches(cx);
     }
 
     fn apply_pending_reconnect_dirty_for_tab(
@@ -1375,6 +1302,7 @@ impl IdeSurface {
     }
 
     fn activate_tab(&mut self, tab_id: EditorTabId, cx: &mut Context<Self>) {
+        self.finish_markdown_selection();
         let previous = self.workspace.active_tab();
         if previous == Some(tab_id) {
             return;
@@ -1384,11 +1312,11 @@ impl IdeSurface {
         if self.runtime_settings.auto_save
             && let Some(previous_tab_id) = previous
             && self.is_tab_dirty(previous_tab_id, cx)
-            && !self.saving_tabs.contains(&previous_tab_id)
         {
             self.save_tab_with_source(previous_tab_id, oxideterm_audit::AuditSource::System, cx);
         }
         let _ = self.workspace.set_active_tab(tab_id);
+        self.sync_tab_render_caches(cx);
         cx.notify();
     }
 
@@ -1396,8 +1324,11 @@ impl IdeSurface {
         self.sync_editor_to_workspace(tab_id, cx);
         match self.workspace.request_close_tab(tab_id) {
             Ok(None) => {
-                self.editors.remove(&tab_id);
+                self.remove_editor(tab_id);
+                self.sync_tab_render_caches(cx);
                 self.loading_file_tabs.remove(&tab_id);
+                self.file_open_errors.remove(&tab_id);
+                self.pending_saves.remove(&tab_id);
                 if self
                     .conflict_state
                     .as_ref()
@@ -2005,7 +1936,9 @@ impl IdeSurface {
             match self.workspace.close_clean_tabs_under(&entry.location) {
                 Ok(closed_tabs) => {
                     for tab_id in closed_tabs {
-                        self.editors.remove(&tab_id);
+                        self.remove_editor(tab_id);
+                        self.file_open_errors.remove(&tab_id);
+                        self.pending_saves.remove(&tab_id);
                     }
                 }
                 Err(error) => {
@@ -2132,6 +2065,9 @@ impl IdeSurface {
     }
 
     fn resolve_dirty_close(&mut self, decision: DirtyCloseDecision, cx: &mut Context<Self>) {
+        if decision == DirtyCloseDecision::Cancel {
+            self.shell_return_requested = false;
+        }
         let Some(request) = self.workspace.pending_close().cloned() else {
             return;
         };
@@ -2144,7 +2080,9 @@ impl IdeSurface {
                 let closing_tab = request.tab_id;
                 let resolved = self.workspace.resolve_dirty_close(request.id, decision);
                 if matches!(resolved, Ok(None)) && decision == DirtyCloseDecision::Discard {
-                    self.editors.remove(&closing_tab);
+                    self.remove_editor(closing_tab);
+                    self.file_open_errors.remove(&closing_tab);
+                    self.pending_saves.remove(&closing_tab);
                     if self
                         .conflict_state
                         .as_ref()
@@ -2156,6 +2094,7 @@ impl IdeSurface {
                 cx.notify();
             }
         }
+        self.advance_shell_return(cx);
     }
 
     fn save_tab(&mut self, tab_id: EditorTabId, cx: &mut Context<Self>) {
@@ -2183,43 +2122,62 @@ impl IdeSurface {
         source: oxideterm_audit::AuditSource,
         cx: &mut Context<Self>,
     ) {
+        if let Some(request) = self.prepare_file_save(tab_id, source, cx) {
+            self.dispatch_file_save(request, cx);
+        }
+    }
+
+    fn prepare_file_save(
+        &mut self,
+        tab_id: EditorTabId,
+        source: oxideterm_audit::AuditSource,
+        cx: &mut Context<Self>,
+    ) -> Option<FileSaveRequest> {
         let close_request = self.save_after_close.take();
-        if !self.ensure_remote_actions_ready(cx) {
-            return;
+        if !self.ensure_remote_actions_ready(cx)
+            || self.loading_file_tabs.contains(&tab_id)
+            || self.file_open_errors.contains_key(&tab_id)
+        {
+            return None;
         }
-        if self.loading_file_tabs.contains(&tab_id) {
-            return;
-        }
-        let Some(buffer) = self.workspace.buffer(tab_id).cloned() else {
-            return;
-        };
-        let title = self
-            .workspace
-            .tabs()
-            .iter()
-            .find(|tab| tab.id == tab_id)
-            .map(|tab| tab.title.clone())
-            .unwrap_or_else(|| buffer.location.display_name());
-        let local_mtime = buffer.version.modified_millis.map(|millis| millis / 1000);
-        if self.saving_tabs.contains(&tab_id) {
-            return;
-        }
-        self.saving_tabs.insert(tab_id);
-        let fs = self.fs.clone();
-        let backend_runtime = self.backend_runtime.clone();
-        let generation = self.generation;
-        let saved_location = buffer.location.clone();
-        let saved_text = buffer.text.clone();
-        let saved_revision = buffer.revision;
-        let saved_format = buffer.format.clone();
+        let buffer = self.workspace.buffer(tab_id)?.clone();
         let audit_request = oxideterm_audit::AuditContext::current_request().or_else(|| {
             oxideterm_audit::AuditContext::current().map(|mut context| {
                 context.source = source;
                 context
             })
         });
+        if self.saving_tabs.contains(&tab_id) {
+            self.pending_saves
+                .entry(tab_id)
+                .and_modify(|pending| {
+                    pending.source = source;
+                    pending.audit_request = audit_request.clone();
+                    pending.close_request = close_request.or(pending.close_request);
+                })
+                .or_insert(PendingFileSave {
+                    audit_request: audit_request.clone(),
+                    source,
+                    close_request,
+                });
+            return None;
+        }
+        self.saving_tabs.insert(tab_id);
         cx.notify();
+        Some(FileSaveRequest {
+            audit_request,
+            tab_id,
+            buffer,
+            close_request,
+        })
+    }
 
+    fn dispatch_file_save(&mut self, request: FileSaveRequest, cx: &mut Context<Self>) {
+        let fs = self.fs.clone();
+        let backend_runtime = self.backend_runtime.clone();
+        let generation = self.generation;
+        let buffer = request.buffer.clone();
+        let audit_request = request.audit_request.clone();
         cx.spawn(async move |weak, cx| {
             let mode = if fs.capabilities().atomic_write {
                 WriteMode::AtomicReplace
@@ -2271,82 +2229,157 @@ impl IdeSurface {
                 if this.generation != generation {
                     return;
                 }
-                this.saving_tabs.remove(&tab_id);
-                if this
-                    .workspace
-                    .buffer(tab_id)
-                    .is_none_or(|current| current.location != saved_location)
-                {
-                    return;
+                if let Some(next) = this.complete_file_save(request, result, cx) {
+                    this.dispatch_file_save(next, cx);
                 }
-                match result {
-                    Ok(version) => {
-                        this.clear_search_cache();
-                        let clean_after_save = if let Some(request_id) = close_request {
-                            this.workspace
-                                .complete_dirty_close_after_save_at_revision(
-                                    request_id,
-                                    saved_text,
-                                    saved_revision,
-                                    saved_format,
-                                    version,
-                                )
-                                .unwrap_or(false)
-                        } else {
-                            this.workspace
-                                .complete_save_at_revision(
-                                    tab_id,
-                                    saved_text,
-                                    saved_revision,
-                                    saved_format,
-                                    version,
-                                )
-                                .unwrap_or(false)
-                        };
-                        if close_request.is_some() && clean_after_save {
-                            this.editors.remove(&tab_id);
-                        } else if clean_after_save && let Some(editor) = this.editors.get(&tab_id) {
-                            editor.update(cx, |editor, cx| editor.mark_saved_external(cx));
-                        }
-                    }
-                    Err((error, remote_version)) if error.kind == IdeFileErrorKind::Conflict => {
-                        this.conflict_state = Some(ConflictState {
-                            tab_id,
-                            title,
-                            local_mtime,
-                            remote_mtime: remote_version
-                                .and_then(|version| version.modified_millis)
-                                .map(|millis| millis / 1000),
-                            close_request,
-                            error_message: None,
-                        });
-                        if let Some(editor) = this.editors.get(&tab_id) {
-                            editor.update(cx, |editor, cx| {
-                                editor.mark_save_failed_external(
-                                    this.labels.conflict_title.clone(),
-                                    cx,
-                                )
-                            });
-                        }
-                    }
-                    Err((error, _)) => {
-                        let message = format!(
-                            "{}: {}",
-                            this.labels.save_failed,
-                            this.file_error_message(&error)
-                        );
-                        this.last_error = Some(message.clone());
-                        if let Some(editor) = this.editors.get(&tab_id) {
-                            editor.update(cx, |editor, cx| {
-                                editor.mark_save_failed_external(message, cx)
-                            });
-                        }
-                    }
-                }
+                this.advance_shell_return(cx);
                 cx.notify();
             });
         })
         .detach();
+    }
+
+    fn complete_file_save(
+        &mut self,
+        request: FileSaveRequest,
+        result: Result<SavedFileVersion, (IdeFileError, Option<SavedFileVersion>)>,
+        cx: &mut Context<Self>,
+    ) -> Option<FileSaveRequest> {
+        let FileSaveRequest {
+            tab_id,
+            buffer,
+            close_request,
+            ..
+        } = request;
+        self.saving_tabs.remove(&tab_id);
+        if self
+            .workspace
+            .buffer(tab_id)
+            .is_none_or(|current| current.location != buffer.location)
+        {
+            self.pending_saves.remove(&tab_id);
+            return None;
+        }
+        // Edits made during upload must be compared with the submitted snapshot, not marked saved.
+        self.sync_editor_to_workspace(tab_id, cx);
+        let title = self
+            .workspace
+            .tabs()
+            .iter()
+            .find(|tab| tab.id == tab_id)
+            .map(|tab| tab.title.clone())
+            .unwrap_or_else(|| buffer.location.display_name());
+        let local_mtime = buffer.version.modified_millis.map(|millis| millis / 1000);
+        let close_request = close_request.filter(|id| {
+            self.workspace
+                .pending_close()
+                .is_some_and(|request| request.id == *id)
+        });
+        let saved_text = buffer.text;
+        let saved_revision = buffer.revision;
+        let saved_format = buffer.format;
+        let mut next = None;
+        match result {
+            Ok(version) => {
+                let pending = self.pending_saves.remove(&tab_id);
+                self.clear_search_cache();
+                let clean_after_save = if let Some(request_id) = close_request {
+                    self.workspace
+                        .complete_dirty_close_after_save_at_revision(
+                            request_id,
+                            saved_text,
+                            saved_revision,
+                            saved_format,
+                            version,
+                        )
+                        .unwrap_or(false)
+                } else {
+                    self.workspace
+                        .complete_save_at_revision(
+                            tab_id,
+                            saved_text,
+                            saved_revision,
+                            saved_format,
+                            version,
+                        )
+                        .unwrap_or(false)
+                };
+                if close_request.is_some() && clean_after_save {
+                    self.remove_editor(tab_id);
+                    self.file_open_errors.remove(&tab_id);
+                } else if clean_after_save && let Some(editor) = self.editors.get(&tab_id) {
+                    editor.update(cx, |editor, cx| editor.mark_saved_external(cx));
+                }
+                next = self.prepare_pending_save(tab_id, pending, cx);
+            }
+            Err((error, remote_version)) if error.kind == IdeFileErrorKind::Conflict => {
+                self.conflict_state = Some(ConflictState {
+                    tab_id,
+                    title,
+                    local_mtime,
+                    remote_mtime: remote_version
+                        .and_then(|version| version.modified_millis)
+                        .map(|millis| millis / 1000),
+                    close_request,
+                    error_message: None,
+                });
+                if let Some(editor) = self.editors.get(&tab_id) {
+                    editor.update(cx, |editor, cx| {
+                        editor.mark_save_failed_external(self.labels.conflict_title.clone(), cx)
+                    });
+                }
+            }
+            Err((error, _)) => {
+                let message = format!(
+                    "{}: {}",
+                    self.labels.save_failed,
+                    self.file_error_message(&error)
+                );
+                self.last_error = Some(message.clone());
+                if let Some(editor) = self.editors.get(&tab_id) {
+                    editor.update(cx, |editor, cx| {
+                        editor.mark_save_failed_external(message, cx)
+                    });
+                }
+            }
+        }
+
+        self.pending_saves.remove(&tab_id);
+        next
+    }
+
+    fn prepare_pending_save(
+        &mut self,
+        tab_id: EditorTabId,
+        pending: Option<PendingFileSave>,
+        cx: &mut Context<Self>,
+    ) -> Option<FileSaveRequest> {
+        let mut pending = pending?;
+        pending.close_request = pending.close_request.filter(|id| {
+            self.workspace
+                .pending_close()
+                .is_some_and(|request| request.id == *id)
+        });
+        let buffer = self.workspace.buffer(tab_id)?;
+        if !buffer.is_dirty() {
+            if let Some(request) = pending.close_request {
+                let version = buffer.version.clone();
+                if self
+                    .workspace
+                    .complete_dirty_close_after_save(request, version)
+                    .is_ok()
+                {
+                    self.remove_editor(tab_id);
+                    self.file_open_errors.remove(&tab_id);
+                }
+            }
+            return None;
+        }
+        // Only an explicit save request schedules another upload; intermediate edits coalesce.
+        self.save_after_close = pending.close_request;
+        let mut request = self.prepare_file_save(tab_id, pending.source, cx)?;
+        request.audit_request = pending.audit_request;
+        Some(request)
     }
 
     fn clear_conflict(&mut self, cx: &mut Context<Self>) {
@@ -2466,6 +2499,8 @@ impl IdeSurface {
                 {
                     return;
                 }
+                this.sync_editor_to_workspace(conflict.tab_id, cx);
+                let pending = this.pending_saves.remove(&conflict.tab_id);
                 match result {
                     Ok(version) => {
                         this.clear_search_cache();
@@ -2492,11 +2527,15 @@ impl IdeSurface {
                                 .unwrap_or(false)
                         };
                         if conflict.close_request.is_some() && clean_after_save {
-                            this.editors.remove(&conflict.tab_id);
+                            this.remove_editor(conflict.tab_id);
                         } else if clean_after_save
                             && let Some(editor) = this.editors.get(&conflict.tab_id)
                         {
                             editor.update(cx, |editor, cx| editor.mark_saved_external(cx));
+                        }
+                        if let Some(next) = this.prepare_pending_save(conflict.tab_id, pending, cx)
+                        {
+                            this.dispatch_file_save(next, cx);
                         }
                     }
                     Err(error) => {
@@ -2520,6 +2559,7 @@ impl IdeSurface {
                         }
                     }
                 }
+                this.advance_shell_return(cx);
                 cx.notify();
             });
         })
@@ -3143,6 +3183,450 @@ fn ide_plugin_file_path(location: &IdeLocation) -> String {
 mod shared_text_tests {
     use super::*;
     use gpui::TestAppContext;
+
+    fn ready_surface(cx: &mut TestAppContext) -> Entity<IdeSurface> {
+        cx.new(|cx| {
+            let router =
+                oxideterm_ssh::NodeRouter::new(oxideterm_ssh::SshConnectionRegistry::default());
+            let backend = Arc::new(
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap(),
+            );
+            let mut surface = IdeSurface::new(
+                NodeAgentIdeFileSystem::new(router, NodeAgentMode::Disabled),
+                oxideterm_theme::default_tokens(),
+                IdeLabels::default(),
+                IdeRuntimeSettings::default(),
+                backend,
+                cx,
+            );
+            surface.node_id = Some("save-test".into());
+            surface.root_path = Some("/repo".into());
+            surface.load_state = IdeLoadState::Ready;
+            let location = IdeLocation::remote("save-test", "/repo/text.txt");
+            surface
+                .workspace
+                .open_project(IdeLocation::remote("save-test", "/repo"), "repo");
+            surface
+                .workspace
+                .open_file(location.clone(), "original", SavedFileVersion::unknown())
+                .unwrap();
+            let tab = surface.workspace.active_tab().unwrap();
+            surface.create_editor(tab, &location, "original".into(), cx);
+            surface
+        })
+    }
+
+    fn edit_and_prepare(
+        surface: &mut IdeSurface,
+        text: &str,
+        cx: &mut Context<IdeSurface>,
+    ) -> Option<FileSaveRequest> {
+        let tab = surface.workspace.active_tab().unwrap();
+        surface.editors[&tab].update(cx, |editor, cx| editor.replace_text_external(text, cx));
+        surface.sync_editor_to_workspace(tab, cx);
+        surface.prepare_file_save(tab, oxideterm_audit::AuditSource::User, cx)
+    }
+
+    #[gpui::test]
+    fn save_completion_coalesces_requests_and_preserves_unrequested_edits(cx: &mut TestAppContext) {
+        let surface = ready_surface(cx);
+        surface.update(cx, |surface, cx| {
+            let tab = surface.workspace.active_tab().unwrap();
+            let first = edit_and_prepare(surface, "A", cx).unwrap();
+            assert!(edit_and_prepare(surface, "A", cx).is_none());
+            assert!(
+                surface
+                    .complete_file_save(first, Ok(SavedFileVersion::unknown()), cx)
+                    .is_none()
+            );
+            assert_eq!(
+                surface.workspace.buffer(tab).unwrap().saved_text.as_ref(),
+                "A"
+            );
+            let first = edit_and_prepare(surface, "B", cx).unwrap();
+            for text in ["C", "D"] {
+                assert!(edit_and_prepare(surface, text, cx).is_none());
+            }
+            surface.editors[&tab].update(cx, |editor, cx| {
+                editor.replace_text_external("latest E", cx)
+            });
+            let version = SavedFileVersion {
+                etag: Some("saved-B".into()),
+                ..SavedFileVersion::unknown()
+            };
+            let next = surface
+                .complete_file_save(first, Ok(version.clone()), cx)
+                .unwrap();
+            assert_eq!(next.buffer.text.as_ref(), "latest E");
+            assert_eq!(next.buffer.version, version);
+            assert_eq!(
+                surface.workspace.buffer(tab).unwrap().saved_text.as_ref(),
+                "B"
+            );
+            assert!(
+                surface
+                    .complete_file_save(next, Ok(SavedFileVersion::unknown()), cx)
+                    .is_none()
+            );
+            assert_eq!(
+                surface.workspace.buffer(tab).unwrap().saved_text.as_ref(),
+                "latest E"
+            );
+            assert!(!surface.is_tab_dirty(tab, cx));
+
+            let request = edit_and_prepare(surface, "F", cx).unwrap();
+            surface.editors[&tab].update(cx, |editor, cx| {
+                editor.replace_text_external("unsaved G", cx)
+            });
+            assert!(
+                surface
+                    .complete_file_save(request, Ok(SavedFileVersion::unknown()), cx)
+                    .is_none()
+            );
+            let buffer = surface.workspace.buffer(tab).unwrap();
+            assert_eq!(buffer.saved_text.as_ref(), "F");
+            assert_eq!(buffer.text.as_ref(), "unsaved G");
+            assert!(surface.is_tab_dirty(tab, cx));
+        });
+    }
+
+    #[gpui::test]
+    fn save_failure_stops_pending_uploads_and_keeps_latest_text_dirty(cx: &mut TestAppContext) {
+        for kind in [IdeFileErrorKind::Other, IdeFileErrorKind::Conflict] {
+            let surface = ready_surface(cx);
+            surface.update(cx, |surface, cx| {
+                let tab = surface.workspace.active_tab().unwrap();
+                let request = edit_and_prepare(surface, "first", cx).unwrap();
+                assert!(edit_and_prepare(surface, "latest", cx).is_none());
+                assert!(
+                    surface
+                        .complete_file_save(
+                            request,
+                            Err((IdeFileError::new(kind, "fixture failure"), None)),
+                            cx
+                        )
+                        .is_none()
+                );
+                let buffer = surface.workspace.buffer(tab).unwrap();
+                assert_eq!(buffer.text.as_ref(), "latest");
+                assert_eq!(buffer.saved_text.as_ref(), "original");
+                assert!(surface.is_tab_dirty(tab, cx));
+                assert_eq!(
+                    surface.conflict_state.is_some(),
+                    kind == IdeFileErrorKind::Conflict
+                );
+                assert!(surface.pending_saves.is_empty());
+            });
+        }
+    }
+
+    #[gpui::test]
+    fn queued_save_and_close_waits_for_latest_requested_content(cx: &mut TestAppContext) {
+        for (edit_during_save, cancel_close) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
+            let surface = ready_surface(cx);
+            surface.update(cx, |surface, cx| {
+                let tab = surface.workspace.active_tab().unwrap();
+                let first = edit_and_prepare(surface, "first", cx).unwrap();
+                if edit_during_save {
+                    surface.editors[&tab]
+                        .update(cx, |editor, cx| editor.replace_text_external("latest", cx));
+                    surface.sync_editor_to_workspace(tab, cx);
+                }
+                let close = surface.workspace.request_close_tab(tab).unwrap().unwrap();
+                surface.save_after_close = Some(close.id);
+                assert!(
+                    surface
+                        .prepare_file_save(tab, oxideterm_audit::AuditSource::User, cx)
+                        .is_none()
+                );
+                if cancel_close {
+                    surface
+                        .workspace
+                        .resolve_dirty_close(close.id, DirtyCloseDecision::Cancel)
+                        .unwrap();
+                }
+                let next = surface.complete_file_save(first, Ok(SavedFileVersion::unknown()), cx);
+                if edit_during_save {
+                    let next = next.unwrap();
+                    assert_eq!(next.buffer.text.as_ref(), "latest");
+                    assert!(
+                        surface
+                            .complete_file_save(next, Ok(SavedFileVersion::unknown()), cx)
+                            .is_none()
+                    );
+                } else {
+                    assert!(next.is_none());
+                }
+                if cancel_close {
+                    assert_eq!(surface.workspace.tabs()[0].id, tab);
+                    assert_eq!(
+                        surface.workspace.buffer(tab).unwrap().saved_text.as_ref(),
+                        if edit_during_save { "latest" } else { "first" }
+                    );
+                    assert!(!surface.is_tab_dirty(tab, cx));
+                } else {
+                    assert!(surface.workspace.tabs().is_empty());
+                    assert!(surface.editors.is_empty());
+                }
+            });
+        }
+    }
+
+    struct IdeSurfaceFixture(Entity<IdeSurface>, Entity<IdeModalLayer>);
+    impl IdeSurfaceFixture {
+        fn new(surface: Entity<IdeSurface>, cx: &mut Context<Self>) -> Self {
+            let modal = cx.new(|cx| IdeModalLayer::new(surface.clone(), cx));
+            Self(surface, modal)
+        }
+    }
+    impl Render for IdeSurfaceFixture {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .relative()
+                .size_full()
+                .child(self.0.clone())
+                .child(self.1.clone())
+        }
+    }
+
+    #[gpui::test]
+    fn clicking_document_whitespace_focuses_editor_and_inserts_at_end(cx: &mut TestAppContext) {
+        let surface = ready_surface(cx);
+        let (_, cx) = cx.add_window_view(|_, cx| IdeSurfaceFixture::new(surface.clone(), cx));
+        cx.simulate_resize(gpui::size(px(1000.0), px(650.0)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let blank = gpui::point(px(800.0), px(500.0));
+        cx.simulate_click(blank, gpui::Modifiers::default());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.simulate_input("tail");
+        surface.read_with(cx, |surface, cx| {
+            assert_eq!(
+                surface.active_editor().unwrap().read(cx).buffer().text(),
+                "originaltail"
+            );
+        });
+        cx.simulate_mouse_move(blank, None, gpui::Modifiers::default());
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            assert_eq!(window.cursor_style_for_test(), gpui::CursorStyle::IBeam);
+        });
+    }
+
+    #[gpui::test]
+    fn modals_take_focus_isolate_background_and_restore_editor(cx: &mut TestAppContext) {
+        let surface = ready_surface(cx);
+        let (_, cx) = cx.add_window_view(|_, cx| IdeSurfaceFixture::new(surface.clone(), cx));
+        cx.simulate_resize(gpui::size(px(1000.0), px(650.0)));
+        let editor = surface.read_with(cx, |surface, _| surface.active_editor().unwrap());
+        cx.update(|window, cx| {
+            window.focus(&editor.read(cx).focus_handle(cx), cx);
+            window.draw(cx).clear(cx);
+        });
+        surface.update(cx, |surface, cx| {
+            surface.request_tree_name_input(
+                TreeNameInputKind::NewFile,
+                IdeLocation::remote("save-test", "/repo/text.txt"),
+                "text.txt".into(),
+                false,
+                cx,
+            );
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.simulate_input("新文件");
+        cx.simulate_keystrokes("tab");
+        cx.simulate_click(gpui::point(px(20.0), px(20.0)), gpui::Modifiers::default());
+        cx.simulate_input("名");
+        surface.read_with(cx, |surface, cx| {
+            assert_eq!(surface.tree_name_input.as_ref().unwrap().value, "新文件名");
+            assert_eq!(editor.read(cx).buffer().text(), "original");
+        });
+        surface.update(cx, |surface, cx| {
+            surface.agent_remove_confirm_open = true;
+            cx.notify();
+        });
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            surface.update(cx, |surface, cx| {
+                gpui::EntityInputHandler::replace_text_in_range(
+                    surface, None, "queued", window, cx,
+                );
+                assert_eq!(surface.tree_name_input.as_ref().unwrap().value, "新文件名");
+            });
+        });
+        cx.simulate_keystrokes("escape");
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.simulate_keystrokes("escape");
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.simulate_input("x");
+        editor.read_with(cx, |editor, _| {
+            assert_eq!(editor.buffer().text(), "xoriginal")
+        });
+
+        // Non-text confirmations must not inherit the editor's platform input handler.
+        for kind in [
+            modal::IdeModal::FolderSwitch,
+            modal::IdeModal::AgentRemove,
+            modal::IdeModal::Delete,
+            modal::IdeModal::Conflict,
+            modal::IdeModal::DirtyClose,
+        ] {
+            surface.update(cx, |surface, cx| {
+                let tab = surface.workspace.active_tab().unwrap();
+                match kind {
+                    modal::IdeModal::FolderSwitch => surface.folder_switch_confirm_open = true,
+                    modal::IdeModal::AgentRemove => surface.agent_remove_confirm_open = true,
+                    modal::IdeModal::Delete => surface.request_delete_tree_item(
+                        IdeLocation::remote("save-test", "/repo/text.txt"),
+                        "text.txt".into(),
+                        false,
+                        cx,
+                    ),
+                    modal::IdeModal::Conflict => {
+                        surface.conflict_state = Some(ConflictState {
+                            tab_id: tab,
+                            title: "text.txt".into(),
+                            local_mtime: None,
+                            remote_mtime: None,
+                            close_request: None,
+                            error_message: None,
+                        })
+                    }
+                    modal::IdeModal::DirtyClose => {
+                        surface.sync_editor_to_workspace(tab, cx);
+                        surface.workspace.request_close_tab(tab).unwrap();
+                    }
+                    _ => unreachable!(),
+                }
+                cx.notify();
+            });
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            cx.simulate_input("blocked");
+            cx.simulate_keystrokes("backspace tab");
+            editor.read_with(cx, |editor, _| {
+                assert_eq!(editor.buffer().text(), "xoriginal", "modal leaked input")
+            });
+            cx.simulate_keystrokes("escape");
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            surface.read_with(cx, |surface, _| assert!(!surface.has_modal()));
+            cx.update(|window, cx| assert!(editor.read(cx).focus_handle(cx).is_focused(window)));
+        }
+    }
+
+    #[gpui::test]
+    fn platform_text_reaches_editor_and_tree_name_dialogs(cx: &mut TestAppContext) {
+        let surface = ready_surface(cx);
+        let (_, cx) = cx.add_window_view(|_, cx| IdeSurfaceFixture::new(surface.clone(), cx));
+        cx.simulate_resize(gpui::size(px(1000.0), px(650.0)));
+        let editor = surface.read_with(cx, |surface, _| surface.active_editor().unwrap());
+        cx.update(|window, app| {
+            window.focus(&editor.read(app).focus_handle(app), app);
+            window.draw(app).clear(app);
+        });
+        cx.simulate_input("abc中");
+        editor.read_with(cx, |editor, _| {
+            assert_eq!(editor.buffer().text(), "abc中original")
+        });
+        cx.simulate_keystrokes("backspace");
+        editor.read_with(cx, |editor, _| {
+            assert_eq!(editor.buffer().text(), "abcoriginal")
+        });
+        for kind in [
+            TreeNameInputKind::NewFile,
+            TreeNameInputKind::NewFolder,
+            TreeNameInputKind::Rename,
+        ] {
+            cx.update(|window, app| {
+                surface.update(app, |surface, cx| {
+                    surface.request_tree_name_input(
+                        kind,
+                        IdeLocation::remote("save-test", "/repo/text.txt"),
+                        "text.txt".into(),
+                        false,
+                        cx,
+                    );
+                });
+                window.draw(app).clear(app);
+            });
+            cx.simulate_input("abc中");
+            surface.read_with(cx, |surface, _| {
+                assert_eq!(
+                    surface.tree_name_input.as_ref().unwrap().value,
+                    if kind == TreeNameInputKind::Rename {
+                        "abc中.txt"
+                    } else {
+                        "abc中"
+                    }
+                );
+            });
+            cx.simulate_keystrokes("backspace");
+            surface.read_with(cx, |surface, _| {
+                assert_eq!(
+                    surface.tree_name_input.as_ref().unwrap().value,
+                    if kind == TreeNameInputKind::Rename {
+                        "abc.txt"
+                    } else {
+                        "abc"
+                    }
+                );
+            });
+        }
+    }
+
+    #[gpui::test]
+    fn failed_file_open_keeps_its_tab_and_renders_in_the_content_area(cx: &mut TestAppContext) {
+        let surface = ready_surface(cx);
+        let binary_tab = surface.update(cx, |surface, cx| {
+            let location = IdeLocation::remote("save-test", "/repo/program.bin");
+            surface
+                .workspace
+                .open_file(location.clone(), "", SavedFileVersion::unknown())
+                .unwrap();
+            let tab = surface.workspace.active_tab().unwrap();
+            surface.complete_file_open(
+                tab,
+                location,
+                Err(IdeFileError::new(
+                    IdeFileErrorKind::Binary,
+                    "File is binary",
+                )),
+                cx,
+            );
+            assert_eq!(
+                surface.workspace.tabs().last().unwrap().title,
+                "program.bin"
+            );
+            assert!(
+                surface
+                    .prepare_file_save(tab, oxideterm_audit::AuditSource::User, cx)
+                    .is_none()
+            );
+            tab
+        });
+        let (_, cx) = cx.add_window_view(|_, cx| IdeSurfaceFixture::new(surface.clone(), cx));
+        cx.simulate_resize(gpui::size(px(1000.0), px(650.0)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.debug_bounds("ide-file-open-error").is_some());
+        assert!(cx.debug_bounds("ide-workspace-error").is_none());
+        surface.update(cx, |surface, cx| {
+            let text_tab = surface.workspace.tabs()[0].id;
+            surface.activate_tab(text_tab, cx);
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.debug_bounds("ide-file-open-error").is_none());
+        surface.update(cx, |surface, cx| surface.activate_tab(binary_tab, cx));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.debug_bounds("ide-file-open-error").is_some());
+        surface.update(cx, |surface, cx| {
+            surface.close_tab(binary_tab, cx);
+            assert_eq!(surface.workspace.tabs()[0].title, "text.txt");
+            assert!(!surface.file_open_errors.contains_key(&binary_tab));
+        });
+    }
 
     #[gpui::test]
     fn editor_and_workspace_share_versions_without_overwriting_saved_text(cx: &mut TestAppContext) {

@@ -1,4 +1,4 @@
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use gpui::{
     App, Bounds, Corners, DecorationRun, Hsla, PathBuilder, Pixels, Point, RenderImage, Rgba,
@@ -143,7 +143,7 @@ pub(crate) fn paint_command_mark_overlay(
     origin: gpui::Point<Pixels>,
     cols: usize,
     metrics: &TerminalMetrics,
-    command_mark_gutter_width: f32,
+    decorations: bool,
     window: &mut Window,
 ) {
     let x = 0.0;
@@ -154,29 +154,17 @@ pub(crate) fn paint_command_mark_overlay(
     let accent = command_mark_accent(overlay);
     let bounds = Bounds::new(origin + point(px(x), px(y)), size(px(width), px(height)));
 
-    if let Some(fill_color) = command_mark_fill(overlay) {
+    if decorations && let Some(fill_color) = command_mark_fill(overlay) {
         window.paint_quad(fill(bounds, fill_color));
     }
 
-    if command_mark_gutter_width > 0.0 {
-        let edge_width = if overlay.selected { 3.0 } else { 2.0 };
-        let edge_x = command_mark_edge_x(command_mark_gutter_width, edge_width);
-        window.paint_quad(fill(
-            Bounds::new(
-                origin + point(px(edge_x), px(y)),
-                size(px(edge_width), px(height)),
-            ),
-            accent,
-        ));
-    }
-
-    if overlay.selected && overlay.has_top {
+    if decorations && overlay.selected && overlay.has_top {
         window.paint_quad(fill(
             Bounds::new(origin + point(px(x), px(y)), size(px(width), px(1.0))),
             accent,
         ));
     }
-    if overlay.selected && overlay.has_bottom {
+    if decorations && overlay.selected && overlay.has_bottom {
         window.paint_quad(fill(
             Bounds::new(
                 origin + point(px(x), px((y + height - 1.0).max(y))),
@@ -187,11 +175,90 @@ pub(crate) fn paint_command_mark_overlay(
     }
 }
 
-fn command_mark_edge_x(gutter_width: f32, edge_width: f32) -> f32 {
-    if gutter_width <= edge_width {
-        return 0.0;
+pub(super) fn paint_command_gutter(
+    overlay: &TerminalCommandMarkOverlay,
+    origin: Point<Pixels>,
+    metrics: &TerminalMetrics,
+    width: f32,
+    theme: &TerminalUiTheme,
+    window: &mut Window,
+) {
+    let line_height = metrics.line_height_f32();
+    let box_size = (width - 2.0).max(2.0).min(line_height * 0.55);
+    // Thicken inside the existing cell while keeping the start box hollow at small sizes.
+    let stroke = (box_size / 4.0).clamp(1.0, 2.0);
+    let center_x = -width / 2.0;
+    let center_y = (overlay.start_row as f32 + 0.5) * line_height;
+    let left = center_x - box_size / 2.0;
+    let top = center_y - box_size / 2.0;
+    let right = left + box_size;
+    let bottom = top + box_size;
+    let scale = window.scale_factor();
+    let color = if overlay.exit_code.is_some_and(|code| code != 0) && !overlay.stale {
+        rgba((theme.tokens.ui.error << 8) | 0xcc)
+    } else if overlay.hovered || overlay.selected {
+        rgba((theme.tokens.ui.accent << 8) | 0xe6)
+    } else {
+        rgba((theme.foreground << 8) | 0xb0)
+    };
+    // Snap every edge in window coordinates so the outline stays crisp
+    // at fractional font sizes and display scale factors.
+    let mut rect = |x: f32, y: f32, w: f32, h: f32| {
+        if w <= 0.0 || h <= 0.0 {
+            return;
+        }
+        let x0 = ((f32::from(origin.x) + x) * scale).round() / scale;
+        let y0 = ((f32::from(origin.y) + y) * scale).round() / scale;
+        let x1 = ((f32::from(origin.x) + x + w) * scale).round() / scale;
+        let y1 = ((f32::from(origin.y) + y + h) * scale).round() / scale;
+        window.paint_quad(fill(
+            Bounds::new(point(px(x0), px(y0)), size(px(x1 - x0), px(y1 - y0))),
+            color,
+        ));
+    };
+
+    // Avoid overlapping translucent strokes, which would darken corners and joins.
+    if overlay.has_top {
+        if overlay.collapsed {
+            rect(left, top, box_size, box_size);
+        } else {
+            rect(left, top, box_size, stroke);
+            rect(left, bottom - stroke, box_size, stroke);
+            rect(left, top + stroke, stroke, box_size - 2.0 * stroke);
+            rect(
+                right - stroke,
+                top + stroke,
+                stroke,
+                box_size - 2.0 * stroke,
+            );
+        }
     }
-    -gutter_width + (gutter_width - edge_width) / 2.0
+
+    let line_top = if overlay.has_top {
+        bottom
+    } else {
+        overlay.start_row as f32 * line_height
+    };
+    let finished = overlay.has_bottom && !overlay.running;
+    let line_bottom = if finished {
+        ((overlay.end_row as f32 + 0.5) * line_height).max(line_top + 2.0 * stroke)
+    } else {
+        (overlay.end_row + 1) as f32 * line_height
+    };
+    rect(
+        center_x - stroke / 2.0,
+        line_top,
+        stroke,
+        line_bottom - line_top - if finished { stroke } else { 0.0 },
+    );
+    if finished {
+        rect(
+            center_x - stroke / 2.0,
+            line_bottom - stroke,
+            right - center_x + stroke / 2.0,
+            stroke,
+        );
+    }
 }
 
 fn command_mark_accent(overlay: &TerminalCommandMarkOverlay) -> Rgba {
@@ -242,6 +309,7 @@ pub(crate) fn paint_terminal_image(
     origin: gpui::Point<Pixels>,
     metrics: &TerminalMetrics,
     window: &mut Window,
+    cx: &mut App,
 ) {
     let bounds = Bounds::new(
         origin
@@ -260,10 +328,16 @@ pub(crate) fn paint_terminal_image(
         return;
     };
     let data = image.image.snapshot.data.as_deref();
-    let frame_index =
-        terminal_image_frame_index(render_image, data, image.image.animation_started_at);
-    if terminal_image_should_request_frame(render_image, data, image.image.animation_started_at) {
-        window.request_animation_frame();
+    let (frame_index, next_frame) = terminal_image_playback(
+        render_image,
+        data,
+        image
+            .image
+            .animation_started_at
+            .map(|start| start.elapsed()),
+    );
+    if let Some(delay) = next_frame.filter(|_| window.is_window_active()) {
+        window.request_animation_frame_after(delay, cx);
     }
     let _ = window.paint_image(
         bounds,
@@ -275,128 +349,144 @@ pub(crate) fn paint_terminal_image(
     );
 }
 
-fn terminal_image_frame_index(
+fn terminal_image_playback(
     render_image: &RenderImage,
     data: Option<&TerminalImageData>,
-    started_at: Option<Instant>,
-) -> usize {
+    elapsed: Option<Duration>,
+) -> (usize, Option<Duration>) {
     let frame_count = render_image.frame_count();
     if frame_count <= 1 {
-        return 0;
+        return (0, None);
     }
-
-    let Some(data) = data else {
-        return 0;
+    let Some(data) = data else { return (0, None) };
+    let current = data.animation.current_frame.min(frame_count - 1);
+    let Some(elapsed) = elapsed.filter(|_| data.animation.running) else {
+        return (current, None);
     };
-    if !data.animation.running {
-        return data.animation.current_frame.min(frame_count - 1);
-    }
-    let Some(started_at) = started_at else {
-        return data.animation.current_frame.min(frame_count - 1);
+    let delay = |index: usize| {
+        if data.frames.get(index).is_some_and(|frame| frame.gapless) {
+            Duration::ZERO
+        } else {
+            Duration::from(render_image.delay(index))
+        }
     };
-    let elapsed = started_at.elapsed();
-    let mut cycle_duration = Duration::ZERO;
-    let frame_delays = (0..frame_count)
-        .map(|index| terminal_image_frame_delay(data, render_image, index))
-        .inspect(|delay| {
-            if let Some(delay) = delay {
-                cycle_duration += *delay;
-            }
-        })
-        .collect::<Vec<_>>();
-    if cycle_duration.is_zero() {
-        return data.animation.current_frame.min(frame_count - 1);
+    let cycle: Duration = (0..frame_count).map(delay).sum();
+    if cycle.is_zero() {
+        return (current, None);
     }
-
-    let elapsed_ms = elapsed.as_millis();
-    if data.animation.loading && elapsed_ms >= cycle_duration.as_millis() {
-        return last_displayable_frame(&frame_delays).unwrap_or(frame_count - 1);
-    }
-    if let Some(loop_limit) = data.animation.loop_limit {
-        let total_duration = cycle_duration.as_millis() * u128::from(loop_limit);
-        if elapsed_ms >= total_duration {
-            return last_displayable_frame(&frame_delays).unwrap_or(frame_count - 1);
-        }
-    }
-
-    let elapsed_in_cycle = elapsed_ms % cycle_duration.as_millis();
-    let mut frame_end_ms = 0;
-    for (index, delay) in frame_delays.iter().enumerate() {
-        let Some(delay) = delay else {
-            continue;
-        };
-        frame_end_ms += delay.as_millis();
-        if elapsed_in_cycle < frame_end_ms {
-            return index;
-        }
-    }
-    frame_count - 1
-}
-
-fn terminal_image_frame_delay(
-    data: &TerminalImageData,
-    render_image: &RenderImage,
-    frame_index: usize,
-) -> Option<Duration> {
-    if data
-        .frames
-        .get(frame_index)
-        .is_some_and(|frame| frame.gapless)
+    let last = || {
+        (0..frame_count)
+            .rev()
+            .find(|index| !delay(*index).is_zero())
+            .unwrap_or(frame_count - 1)
+    };
+    if (0..frame_count)
+        .filter(|index| !delay(*index).is_zero())
+        .take(2)
+        .count()
+        == 1
     {
-        return None;
+        return (last(), None);
     }
-    let delay = Duration::from(render_image.delay(frame_index));
-    (!delay.is_zero()).then_some(delay)
+    if (data.animation.loading && elapsed >= cycle)
+        || data
+            .animation
+            .loop_limit
+            .is_some_and(|limit| elapsed.as_nanos() >= cycle.as_nanos() * u128::from(limit))
+    {
+        return (last(), None);
+    }
+    let position = elapsed.as_nanos() % cycle.as_nanos();
+    let mut end = 0;
+    for index in 0..frame_count {
+        end += delay(index).as_nanos();
+        if position < end {
+            // One frame's delay is bounded by the protocol's u32 millisecond value.
+            return (index, Some(Duration::from_nanos((end - position) as u64)));
+        }
+    }
+    (last(), None)
 }
 
-fn terminal_image_should_request_frame(
-    render_image: &RenderImage,
-    data: Option<&TerminalImageData>,
-    started_at: Option<Instant>,
-) -> bool {
-    if render_image.frame_count() <= 1 {
-        return false;
-    }
-    let Some(data) = data else {
-        return false;
-    };
-    if !data.animation.running {
-        return false;
-    }
-    if !data.animation.loading && data.animation.loop_limit.is_none() {
-        return true;
-    }
-    let Some(started_at) = started_at else {
-        return true;
-    };
-    let Some(cycle_duration) = terminal_image_cycle_duration(data, render_image) else {
-        return false;
-    };
-    let elapsed_ms = started_at.elapsed().as_millis();
-    if data.animation.loading {
-        return elapsed_ms < cycle_duration.as_millis();
-    }
-    data.animation
-        .loop_limit
-        .is_none_or(|limit| elapsed_ms < cycle_duration.as_millis() * u128::from(limit))
-}
+#[cfg(test)]
+mod animation_tests {
+    use super::*;
+    use oxideterm_terminal::{TerminalImageAnimationState, TerminalImageId, TerminalImageProtocol};
 
-fn terminal_image_cycle_duration(
-    data: &TerminalImageData,
-    render_image: &RenderImage,
-) -> Option<Duration> {
-    let cycle_duration = (0..render_image.frame_count())
-        .filter_map(|index| terminal_image_frame_delay(data, render_image, index))
-        .fold(Duration::ZERO, |total, delay| total + delay);
-    (!cycle_duration.is_zero()).then_some(cycle_duration)
-}
-
-fn last_displayable_frame(frame_delays: &[Option<Duration>]) -> Option<usize> {
-    frame_delays
-        .iter()
-        .enumerate()
-        .rev()
-        .find_map(|(index, delay)| delay.is_some().then_some(index))
+    #[test]
+    fn frame_deadlines_preserve_pause_loading_and_finite_loops() {
+        let image = RenderImage::new(vec![
+            image::Frame::from_parts(
+                image::RgbaImage::new(1, 1),
+                0,
+                0,
+                image::Delay::from_numer_denom_ms(100, 1),
+            ),
+            image::Frame::from_parts(
+                image::RgbaImage::new(1, 1),
+                0,
+                0,
+                image::Delay::from_numer_denom_ms(200, 1),
+            ),
+        ]);
+        let mut data = TerminalImageData {
+            id: TerminalImageId(1),
+            protocol: TerminalImageProtocol::Kitty,
+            version: 1,
+            width: 1,
+            height: 1,
+            rgba: vec![0; 4].into(),
+            frames: Vec::new(),
+            name: None,
+            animation: TerminalImageAnimationState {
+                running: true,
+                ..Default::default()
+            },
+        };
+        for (elapsed, frame, remaining) in [
+            (0, 0, 100),
+            (99, 0, 1),
+            (100, 1, 200),
+            (299, 1, 1),
+            (300, 0, 100),
+        ] {
+            assert_eq!(
+                terminal_image_playback(&image, Some(&data), Some(Duration::from_millis(elapsed))),
+                (frame, Some(Duration::from_millis(remaining)))
+            );
+        }
+        data.animation.loop_limit = Some(2);
+        assert_eq!(
+            terminal_image_playback(&image, Some(&data), Some(Duration::from_millis(600))),
+            (1, None)
+        );
+        data.animation.loading = true;
+        assert_eq!(
+            terminal_image_playback(&image, Some(&data), Some(Duration::from_millis(300))),
+            (1, None)
+        );
+        data.animation.running = false;
+        data.animation.current_frame = 1;
+        assert_eq!(
+            terminal_image_playback(&image, Some(&data), Some(Duration::ZERO)),
+            (1, None)
+        );
+        data.animation.running = true;
+        data.animation.loading = false;
+        data.animation.loop_limit = None;
+        data.frames = (0..2)
+            .map(|index| oxideterm_terminal::TerminalImageFrame {
+                rgba: vec![0; 4].into(),
+                delay_ms_numerator: 100,
+                delay_ms_denominator: 1,
+                gapless: index == 0,
+            })
+            .collect();
+        assert_eq!(
+            terminal_image_playback(&image, Some(&data), Some(Duration::ZERO)),
+            (1, None)
+        );
+    }
 }
 
 pub(crate) fn paint_text_run(

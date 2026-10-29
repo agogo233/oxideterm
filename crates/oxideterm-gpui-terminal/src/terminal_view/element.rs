@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, VecDeque, hash_map::DefaultHasher},
+    collections::{HashMap, HashSet, VecDeque, hash_map::DefaultHasher},
     hash::{Hash, Hasher},
     ops::Range,
     sync::{Arc, OnceLock},
@@ -12,7 +12,7 @@ use gpui::{
     Pixels, SharedString, Style, TextRun, Window, fill, point, px, relative, rgb, rgba, size,
 };
 use oxideterm_terminal::{
-    TerminalColor, TerminalCommandMark, TerminalCursorShape, TerminalSearchMatch, TerminalSnapshot,
+    TerminalCommandMark, TerminalCursorShape, TerminalSearchMatch, TerminalSnapshot,
 };
 use oxideterm_terminal_semantic::{
     CompiledSemanticScheme, SemanticLineRole, SemanticScheme, SemanticShellDialect,
@@ -91,6 +91,8 @@ pub(crate) struct TerminalElement {
     scroll_y_offset: Pixels,
     scroll_x_offset: Pixels,
     command_mark_gutter_width: f32,
+    command_mark_decorations: bool,
+    collapsed_commands: HashSet<String>,
 }
 
 #[derive(Clone)]
@@ -163,6 +165,7 @@ pub(crate) struct TerminalCommandMarkOverlay {
     pub(crate) hovered: bool,
     pub(crate) running: bool,
     pub(crate) exit_code: Option<i32>,
+    pub(crate) collapsed: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -352,6 +355,11 @@ where
         self.insertion_order.push_back(key);
         (value, false)
     }
+
+    fn clear(&mut self) {
+        self.entries = HashMap::new();
+        self.insertion_order = VecDeque::new();
+    }
 }
 
 pub(crate) struct TerminalLayoutCache {
@@ -440,6 +448,15 @@ impl TerminalLayoutCache {
 
     pub(crate) fn performance(&self) -> TerminalLayoutPerformance {
         self.performance
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.rows.clear();
+        self.highlights.clear();
+        self.links.clear();
+        self.performance = TerminalLayoutPerformance::default();
+        self.cache_hits = 0;
+        self.cache_misses = 0;
     }
 }
 
@@ -564,6 +581,8 @@ impl TerminalElement {
             scroll_y_offset: px(0.0),
             scroll_x_offset: px(0.0),
             command_mark_gutter_width: 0.0,
+            command_mark_decorations: true,
+            collapsed_commands: HashSet::new(),
         }
     }
 
@@ -646,6 +665,12 @@ impl TerminalElement {
 
     pub(crate) fn transparent_background(mut self, transparent_background: bool) -> Self {
         self.transparent_background = transparent_background;
+        self
+    }
+
+    pub(crate) fn command_folding(mut self, collapsed: HashSet<String>, decorations: bool) -> Self {
+        self.collapsed_commands = collapsed;
+        self.command_mark_decorations = decorations;
         self
     }
 
@@ -807,6 +832,7 @@ impl TerminalElement {
             &self.command_marks,
             self.selected_command_mark_id.as_deref(),
             self.hovered_command_mark_id.as_deref(),
+            &self.collapsed_commands,
         );
         let mut selections = Vec::new();
         let mut images = self
@@ -1143,7 +1169,7 @@ impl TerminalElement {
                     &mut selections,
                     paint_col,
                     cell_width,
-                    to_hsla(TerminalColor::rgb(0x2d, 0x4f, 0x7f)),
+                    self.theme.selection_background,
                 );
             } else if let Some(rect) = current_selection.take() {
                 selections.push(rect);
@@ -1274,6 +1300,7 @@ impl TerminalElement {
         self.theme.background.hash(&mut hasher);
         self.theme.foreground.hash(&mut hasher);
         self.theme.header_foreground.hash(&mut hasher);
+        self.theme.selection_background.hash(&mut hasher);
         self.hash_semantic_layout(logical_line.range.clone(), semantic_role, &mut hasher);
         self.bidi_enabled.hash(&mut hasher);
         self.detect_file_paths_as_links.hash(&mut hasher);
@@ -1555,10 +1582,15 @@ fn extend_or_push_row_rect(
     color: Hsla,
 ) {
     if let Some(rect) = current
-        && rect.col + rect.cells == col
+        && col <= rect.col + rect.cells
+        && rect.col <= col + cells
         && rect.color == color
     {
-        rect.cells += cells;
+        // A wide glyph and its spacer overlap by one column. Union their
+        // coverage instead of painting translucent selection color twice.
+        let end = (rect.col + rect.cells).max(col + cells);
+        rect.col = rect.col.min(col);
+        rect.cells = end - rect.col;
         return;
     }
 
@@ -1808,16 +1840,20 @@ fn command_mark_overlays_for_rows(
     marks: &[TerminalCommandMark],
     selected_command_mark_id: Option<&str>,
     hovered_command_mark_id: Option<&str>,
+    collapsed_commands: &HashSet<String>,
 ) -> Vec<TerminalCommandMarkOverlay> {
     let viewport_start = snapshot
         .scrollback_lines
         .saturating_sub(snapshot.display_offset);
-    let viewport_end = viewport_start.saturating_add(snapshot.rows.saturating_sub(1));
+    let viewport_end = viewport_start.saturating_add(snapshot.lines.len().saturating_sub(1));
     let mut overlays = Vec::new();
 
     for mark in marks {
         let start_line = mark.start_line;
         let end_line = mark.end_line.unwrap_or_else(|| {
+            if mark.output_start.is_some() {
+                return snapshot_absolute_cursor_line(snapshot).max(mark.start_line);
+            }
             snapshot_prompt_block_start_line(snapshot, snapshot_absolute_cursor_line(snapshot))
                 .saturating_sub(1)
                 .max(mark.start_line)
@@ -1833,13 +1869,14 @@ fn command_mark_overlays_for_rows(
         overlays.push(TerminalCommandMarkOverlay {
             start_row: visible_start_line.saturating_sub(viewport_start),
             end_row: visible_end_line.saturating_sub(viewport_start),
-            has_top: start_line >= viewport_start,
+            has_top: start_line >= viewport_start && !mark.command_line_clipped,
             has_bottom: end_line <= viewport_end,
             stale: mark.stale,
             selected,
             hovered,
             running: !mark.is_closed,
             exit_code: mark.exit_code,
+            collapsed: collapsed_commands.contains(&mark.command_id),
         });
     }
 
@@ -2252,7 +2289,7 @@ impl Element for TerminalElement {
                     .iter()
                     .filter(|image| image.image.snapshot.z_index < 0)
                 {
-                    paint_terminal_image(image, origin, &self.metrics, window);
+                    paint_terminal_image(image, origin, &self.metrics, window, cx);
                 }
                 for rect in &layout.selection_matches {
                     paint_terminal_rect(rect, origin, &self.metrics, window);
@@ -2266,7 +2303,7 @@ impl Element for TerminalElement {
                         origin,
                         self.snapshot.cols,
                         &self.metrics,
-                        self.command_mark_gutter_width,
+                        self.command_mark_decorations,
                         window,
                     );
                 }
@@ -2314,7 +2351,7 @@ impl Element for TerminalElement {
                     .iter()
                     .filter(|image| image.image.snapshot.z_index >= 0)
                 {
-                    paint_terminal_image(image, origin, &self.metrics, window);
+                    paint_terminal_image(image, origin, &self.metrics, window, cx);
                 }
                 for rect in &layout.highlight_underlines {
                     paint_terminal_underline(rect, origin, &self.metrics, window);
@@ -2324,6 +2361,27 @@ impl Element for TerminalElement {
                 }
             },
         );
+        // Gutter glyphs sit to the left of the grid mask. Keep text clipped to
+        // the grid and paint the gutter separately within the full viewport.
+        if self.command_mark_gutter_width > 0.0 {
+            window.with_content_mask(
+                Some(ContentMask {
+                    bounds: viewport_mask_bounds,
+                }),
+                |window| {
+                    for overlay in &layout.command_mark_overlays {
+                        paint_command_gutter(
+                            overlay,
+                            origin,
+                            &self.metrics,
+                            self.command_mark_gutter_width,
+                            &self.theme,
+                            window,
+                        );
+                    }
+                },
+            );
+        }
         if let Some(input) = &self.input {
             let input_origin = viewport_origin - point(self.scroll_x_offset, px(0.0));
             let content_bounds = terminal_content_bounds_for_rows(
@@ -2562,6 +2620,90 @@ mod cache_tests {
         let changed_layout = changed.layout_for_rows(0..1, Some(&mut cache));
         let changed_cache = &changed_layout.cached_rows[0].layout.text_runs[0].cache;
         assert!(!Arc::ptr_eq(first_cache, changed_cache));
+
+        let retired = Arc::downgrade(first_cache);
+        drop(first);
+        drop(second);
+        drop(changed_layout);
+        cache.clear();
+        assert!(
+            retired.upgrade().is_none(),
+            "hidden rows must release retained glyph data"
+        );
+        let rebuilt = stable.layout_for_rows(0..1, Some(&mut cache));
+        assert_eq!(
+            rebuilt.cached_rows[0]
+                .layout
+                .text_runs
+                .iter()
+                .map(|run| run.text.as_ref())
+                .collect::<String>(),
+            "cached"
+        );
+    }
+
+    #[test]
+    fn selection_uses_theme_color_and_refreshes_cached_rows() {
+        use crate::terminal_view::selection::{TerminalGridPoint, TerminalSelectionMode};
+
+        // Each wide glyph has a second, blank grid cell in the backend snapshot.
+        let mut row = row_with_text_and_cursor(0, "a中 文 b", 5);
+        row.cells_mut()[1].wide = true;
+        row.cells_mut()[3].wide = true;
+        row.refresh_signature();
+        let mut selected = element(snapshot(0, vec![row]));
+        selected.snapshot.cols = 6;
+        selected.selection = Some(TerminalSelection {
+            anchor: TerminalGridPoint { line: 0, col: 0 },
+            head: TerminalGridPoint { line: 0, col: 5 },
+            mode: TerminalSelectionMode::Simple,
+        });
+        let mut tokens =
+            oxideterm_theme::ThemeTokens::from_builtin(oxideterm_theme::theme_by_id("paper-oxide"));
+        let mut cache = TerminalLayoutCache::default();
+        for (color, expected) in [
+            (
+                tokens.terminal.selection_background,
+                rgb(0x8f6251).alpha(0.2),
+            ),
+            ("#123456", rgb(0x123456)),
+            ("#12345680", rgba(0x12345680)),
+            ("rgb(17, 34, 51)", rgb(0x112233)),
+        ] {
+            tokens.terminal.selection_background = color;
+            selected.theme = TerminalUiTheme::from_tokens(tokens);
+            let layout = selected.layout_for_rows(0..1, Some(&mut cache));
+            let rects = &layout.cached_rows[0].layout.selections;
+            assert_eq!(
+                rects
+                    .iter()
+                    .map(|rect| (rect.col, rect.cells))
+                    .collect::<Vec<_>>(),
+                vec![(0, 6)],
+                "{color}: each selected grid cell must be painted once"
+            );
+            assert_eq!(rects[0].color, Hsla::from(expected), "{color}");
+        }
+        for (start, end, expected) in [(0, 1, (0, 3)), (2, 5, (2, 4))] {
+            selected.selection = Some(TerminalSelection {
+                anchor: TerminalGridPoint {
+                    line: 0,
+                    col: start,
+                },
+                head: TerminalGridPoint { line: 0, col: end },
+                mode: TerminalSelectionMode::Simple,
+            });
+            let layout = selected.layout_for_rows(0..1, Some(&mut cache));
+            assert_eq!(
+                layout.cached_rows[0]
+                    .layout
+                    .selections
+                    .iter()
+                    .map(|rect| (rect.col, rect.cells))
+                    .collect::<Vec<_>>(),
+                vec![expected]
+            );
+        }
     }
 
     #[test]

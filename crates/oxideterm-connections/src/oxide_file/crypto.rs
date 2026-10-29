@@ -343,6 +343,7 @@ where
     // Connection archives can contain authentication material, so every
     // serializer supplied here must return a buffer that is wiped on drop.
     if payload.version <= 1
+        && payload.plugin_profiles.is_empty()
         && payload.app_settings_json.is_none()
         && payload.plugin_settings.is_empty()
         && payload.portable_secrets.is_empty()
@@ -381,6 +382,11 @@ where
         hasher.update(encoded.as_slice());
     }
 
+    if !payload.plugin_profiles.is_empty() {
+        hasher.update(b"plugin-connections-v1");
+        let encoded = Zeroizing::new(rmp_serde::to_vec_named(&payload.plugin_profiles)?);
+        hasher.update(encoded.as_slice());
+    }
     Ok(format!("sha256:{:x}", hasher.finalize()))
 }
 
@@ -487,6 +493,8 @@ struct ConnectionOptionsBeforeSshAlgorithms<'a> {
     legacy_ssh_compatibility: bool,
     #[serde(skip_serializing_if = "bool_is_false")]
     dedicated_new_terminal_connection: bool,
+    #[serde(skip_serializing_if = "bool_is_false")]
+    open_sftp_on_connect: bool,
     #[serde(skip_serializing_if = "x11_options_are_default")]
     x11_forwarding: &'a ConnectionX11ForwardingOptions,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -508,6 +516,7 @@ impl<'a> From<&'a ConnectionOptions> for ConnectionOptionsBeforeSshAlgorithms<'a
             agent_forwarding_socket: options.agent_forwarding_socket.as_deref(),
             legacy_ssh_compatibility: options.legacy_ssh_compatibility,
             dedicated_new_terminal_connection: options.dedicated_new_terminal_connection,
+            open_sftp_on_connect: options.open_sftp_on_connect,
             x11_forwarding: &options.x11_forwarding,
             post_connect_command: options.post_connect_command.as_deref(),
             terminal: &options.terminal,
@@ -541,6 +550,7 @@ mod tests {
 
     fn payload_with_default_ssh_algorithms() -> EncryptedPayload {
         EncryptedPayload {
+            plugin_profiles: Vec::new(),
             totp_credentials: Vec::new(),
             version: 1,
             connections: vec![EncryptedConnection {

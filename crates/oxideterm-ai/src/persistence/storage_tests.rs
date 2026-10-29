@@ -5,6 +5,71 @@ use redb::ReadableTableMetadata;
 // durable writes of oversized messages share CPU and disk with other CI tests.
 const WRITER_TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
+#[test]
+#[cfg(target_os = "macos")]
+#[ignore = "manual redb page-cache memory and read/write comparison"]
+fn database_page_cache_memory() {
+    #[repr(C)]
+    #[derive(Default)]
+    struct Stats {
+        blocks: u32,
+        live: usize,
+        peak: usize,
+        allocated: usize,
+    }
+    unsafe extern "C" {
+        fn malloc_zone_statistics(zone: *mut std::ffi::c_void, stats: *mut Stats);
+    }
+    fn live() -> usize {
+        let mut stats = Stats::default();
+        unsafe { malloc_zone_statistics(std::ptr::null_mut(), &mut stats) };
+        stats.live
+    }
+    const TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("payload");
+    let directory = tempfile::tempdir().unwrap();
+    for budget in [
+        1024 * 1024 * 1024,
+        HISTORY_PAGE_CACHE_BYTES,
+        64 * 1024 * 1024,
+        8 * 1024 * 1024,
+    ] {
+        let path = directory.path().join(format!("cache-{budget}.redb"));
+        let baseline = live();
+        let db = Database::builder()
+            .set_cache_size(budget)
+            .create(&path)
+            .unwrap();
+        let start = std::time::Instant::now();
+        for batch in 0..16u64 {
+            let tx = db.begin_write().unwrap();
+            {
+                let mut table = tx.open_table(TABLE).unwrap();
+                for key in batch * 128..(batch + 1) * 128 {
+                    table
+                        .insert(key, vec![key as u8; 65536].as_slice())
+                        .unwrap();
+                }
+            }
+            tx.commit().unwrap();
+        }
+        let write_ms = start.elapsed().as_secs_f64() * 1000.0;
+        let start = std::time::Instant::now();
+        for _ in 0..2 {
+            let tx = db.begin_read().unwrap();
+            let table = tx.open_table(TABLE).unwrap();
+            for key in 0..2048u64 {
+                let value = table.get(key).unwrap().unwrap();
+                assert_eq!(value.value(), vec![key as u8; 65536]);
+            }
+        }
+        eprintln!(
+            "DATABASE_CACHE budget={budget} live_delta={} write_ms={write_ms:.3} scans_ms={:.3}",
+            live().saturating_sub(baseline),
+            start.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+}
+
 fn empty_conversation() -> AiConversation {
     let mut state = AiChatState::default();
     state.create_conversation("history".into(), Some("Original".into()), 1, None);
@@ -20,6 +85,106 @@ fn put(index: usize, revision: u64) -> HistoryMutation {
         message: message(index),
         revision,
     }
+}
+
+#[test]
+fn image_input_storage_reopens_exports_and_releases_only_the_last_reference() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("images.redb");
+    let store = ConversationStore::open(path.clone()).unwrap();
+    let image = crate::AiImageAttachment::new(
+        "screenshot.png".into(),
+        "image/png".into(),
+        200,
+        100,
+        b"pixel",
+        b"thumb",
+    )
+    .unwrap();
+    let id = image.id.clone();
+    let mut first = message(0);
+    first.content.clear();
+    crate::set_message_images(&mut first, vec![image.clone()]);
+    store
+        .apply(vec![
+            HistoryMutation::Create {
+                conversation: empty_conversation(),
+                revision: 1,
+            },
+            HistoryMutation::PutMessage {
+                conversation_id: "history".into(),
+                branch_id: "main".into(),
+                message: first,
+                revision: 2,
+            },
+        ])
+        .unwrap();
+    let mut second = message(1);
+    crate::set_message_images(&mut second, vec![image.preview_only()]);
+    store
+        .apply(vec![HistoryMutation::PutMessage {
+            conversation_id: "history".into(),
+            branch_id: "main".into(),
+            message: second,
+            revision: 3,
+        }])
+        .unwrap();
+    drop(store);
+    let store = ConversationStore::open(path).unwrap();
+    let first = store.message_by_id("history", "main", "message-0").unwrap();
+    assert_eq!(crate::message_images(&first)[0], image.preview_only());
+    let page = store.message_page("history", "main", None, 50).unwrap();
+    let descriptor = &page.messages[0];
+    let view = store
+        .message_view("history", &descriptor.storage_id, descriptor.revision, None)
+        .unwrap();
+    assert_eq!(
+        crate::message_images(&view.message)[0],
+        image.preview_only()
+    );
+    assert_eq!(
+        store.image_bytes("history", &id).unwrap().as_ref(),
+        b"pixel"
+    );
+    let model = store
+        .model_context("history", "main", 10000, "openai", "gpt-4o")
+        .unwrap();
+    assert_eq!(
+        crate::message_images(&model.messages[0])[0].data.as_deref(),
+        Some("cGl4ZWw=")
+    );
+    assert_eq!(model.messages[0].model.as_deref(), Some("gpt-4o"));
+    let exported = store.export_conversation("history", "main").unwrap();
+    assert_eq!(crate::message_images(&exported.messages[0])[0], image);
+    store
+        .apply(vec![HistoryMutation::Fork {
+            conversation_id: "history".into(),
+            source_branch: "main".into(),
+            branch_id: "retry".into(),
+            through_sequence: Some(0),
+            revision: 4,
+        }])
+        .unwrap();
+    store
+        .apply(vec![HistoryMutation::DeleteBranch {
+            conversation_id: "history".into(),
+            branch_id: "main".into(),
+            revision: 5,
+        }])
+        .unwrap();
+    assert_eq!(
+        store.image_bytes("history", &id).unwrap().as_ref(),
+        b"pixel"
+    );
+    store
+        .apply(vec![HistoryMutation::DeleteMessage {
+            conversation_id: "history".into(),
+            branch_id: "retry".into(),
+            message_id: "message-0".into(),
+            revision: 6,
+        }])
+        .unwrap();
+    assert!(store.image_bytes("history", &id).is_err());
 }
 
 #[test]
@@ -1684,10 +1849,12 @@ fn model_context_reads_beyond_the_ui_page_and_keeps_complete_tool_groups() {
         "message-12"
     );
     let full = store
-        .model_context("history", "main", usize::MAX, "openai")
+        .model_context("history", "main", usize::MAX, "openai", "gpt-4o")
         .unwrap();
     assert_eq!(full.messages[0].id, "message-0");
-    let recent = store.model_context("history", "main", 1, "openai").unwrap();
+    let recent = store
+        .model_context("history", "main", 1, "openai", "gpt-4o")
+        .unwrap();
     assert_eq!(
         recent
             .messages
@@ -1758,6 +1925,7 @@ fn archives_keep_all_originals_and_branch_text_out_of_the_loaded_message() {
         original_count: Some(2105),
         compacted_at_ms: Some(2),
         original_user_count: None,
+        images: Vec::new(),
         original_ref: None,
         original_messages: Some((0..2105).map(message).collect()),
     });
@@ -1889,6 +2057,7 @@ fn compaction_references_the_retained_suffix_and_preserves_appends_and_later_for
         kind: "compaction-anchor".into(),
         original_count: None,
         original_user_count: None,
+        images: Vec::new(),
         compacted_at_ms: Some(8),
         original_messages: None,
         original_ref: None,

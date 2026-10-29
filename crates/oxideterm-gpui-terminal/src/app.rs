@@ -55,12 +55,17 @@ use oxideterm_terminal_recording::{
     TerminalRecordingTheme,
 };
 
+mod command_folding;
 mod image_cache;
 mod ime;
 mod interactions;
 mod paste;
 mod render;
 mod scrollbar;
+mod timestamp_hover;
+mod trigger_interaction;
+
+use timestamp_hover::TerminalTextHover;
 
 use crate::modem_worker::{
     ModemPromptSelection, ModemWorkerEvent, ModemWorkerJob, ModemWorkerProgress,
@@ -175,10 +180,19 @@ pub enum TerminalPaneEvent {
     ContextActionRequested,
     // Match payloads remain pane-owned; Workspace drains them using the source pane identity.
     TriggerMatchesAvailable,
+    TriggerInteractionRequested,
+    // Dropped OS paths stay pane-owned until Workspace routes them to SFTP.
+    ExternalPathsDropped,
     // Search completion is asynchronous; Workspace reads the latest pane-owned status.
     SearchStatusChanged,
+    // The pane retains the hovered value; Workspace owns tooltip timing and placement.
+    HoverTooltipChanged,
     // Persistence stays workspace-owned because panes do not own saved connection profiles.
     SerialLineEndingsChanged {
+        input: Option<SerialLineEnding>,
+        output: Option<SerialLineEnding>,
+    },
+    TelnetLineEndingsChanged {
         input: Option<SerialLineEnding>,
         output: Option<SerialLineEnding>,
     },
@@ -290,6 +304,7 @@ pub struct TerminalSearchStatus {
     pub query: Option<String>,
     pub active_match: Option<usize>,
     pub match_count: usize,
+    pub invalid_regex: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -471,6 +486,7 @@ pub struct TerminalPane {
     snapshot: TerminalSnapshot,
     render_mode: TermMode,
     snapshot_dirty: bool,
+    render_cache_visible: bool,
     snapshot_deferred_since: Option<Instant>,
     snapshot_generation: u64,
     next_snapshot_line_id: u64,
@@ -493,6 +509,7 @@ pub struct TerminalPane {
     context_menu: Option<TerminalContextMenu>,
     context_menu_presence: oxideterm_gpui_ui::motion::ExitPresence,
     context_action_requested: Option<TerminalContextAction>,
+    archive_path_requested: Option<Zeroizing<String>>,
     plugin_text_actions: Vec<TerminalPluginTextAction>,
     pending_plugin_text: Option<(TerminalPluginTextAction, zeroize::Zeroizing<String>)>,
     pending_trigger_matches: VecDeque<oxideterm_terminal_triggers::TriggerMatched>,
@@ -502,23 +519,38 @@ pub struct TerminalPane {
     #[cfg(test)]
     test_accepts_input: bool,
     input_locked: bool,
+    shell_ide_preparing: bool,
+    shell_ide_progress: Option<(String, Option<f32>)>,
     marked_text: Option<String>,
     /// IME caret inside `marked_text`, in UTF-16 units; only read while composing.
     marked_text_caret_utf16: Option<usize>,
     privilege_prompt_inline_hint: Option<String>,
     privilege_prompt_submit_requested: bool,
     search_query: Option<String>,
+    search_options: oxideterm_terminal::TerminalSearchOptions,
+    search_pattern: Option<Arc<oxideterm_terminal::TerminalSearchQuery>>,
+    search_invalid_regex: bool,
     terminal_content_revision: u64,
     search_cache: Option<TerminalSearchCache>,
     search_generation: Arc<AtomicU64>,
     search_task: Option<gpui::Task<()>>,
     selected_search_match: Option<usize>,
+    search_navigation_needs_viewport_anchor: bool,
     pending_search_reveal: bool,
     hovered_link: Option<TerminalLinkRange>,
+    timestamp_hover: Option<TerminalTextHover>,
+    archive_hover: Option<TerminalTextHover>,
+    interactive_trigger_rules: Option<Arc<oxideterm_terminal_triggers::CompiledTriggerSet>>,
+    interactive_trigger_hover: Option<trigger_interaction::TriggerHover>,
+    trigger_interaction_requested:
+        Option<(oxideterm_terminal_triggers::TriggerMatched, Option<usize>)>,
     hovered_command_mark_id: Option<String>,
+    command_folding: command_folding::CommandFolding,
+    command_reflow_pending: bool,
     selecting: bool,
     free_type_drag: Option<FreeTypeDragState>,
     last_mouse_report_point: Option<TerminalPoint>,
+    mouse_paste_button: Option<gpui::MouseButton>,
     title: SharedString,
     cwd: Option<String>,
     cwd_source: Option<TerminalWorkingDirectorySource>,
@@ -575,6 +607,9 @@ pub struct TerminalPane {
     last_cursor_blink: Instant,
     last_terminal_input: Instant,
     last_terminal_activity: Instant,
+    /// Paths dropped from the OS onto an SSH pane. The workspace drains this
+    /// after `ExternalPathsDropped` so the terminal crate never owns SFTP policy.
+    dropped_external_paths: Vec<std::path::PathBuf>,
     last_drain_budget_exhausted: bool,
     scheduler_wake_sender: Sender<()>,
     process_info_refresh_in_flight: bool,
@@ -621,6 +656,7 @@ pub(crate) struct TerminalContextMenu {
     pub x: f32,
     pub y: f32,
     pub serial_transfer_menu: bool,
+    pub trigger: Option<trigger_interaction::TriggerMenu>,
     pub target: TerminalPoint,
     pub has_selection: bool,
     pub reference_line: usize,
@@ -648,12 +684,14 @@ pub(crate) enum FreeTypeDragAction {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TerminalContextAction {
+    ConvertToShellIde,
     Reconnect,
     PluginTextTool,
     SendSelectionToAi,
     FillCommandBarFromSelection,
     OpenSearch,
     OpenSessionTriggers,
+    PreviewArchiveCommand,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1218,6 +1256,7 @@ impl TerminalPane {
             snapshot,
             render_mode,
             snapshot_dirty: false,
+            render_cache_visible: true,
             snapshot_deferred_since: None,
             snapshot_generation: 1,
             next_snapshot_line_id,
@@ -1236,6 +1275,7 @@ impl TerminalPane {
             context_menu: None,
             context_menu_presence: oxideterm_gpui_ui::motion::ExitPresence::visible(),
             context_action_requested: None,
+            archive_path_requested: None,
             plugin_text_actions: Vec::new(),
             pending_plugin_text: None,
             pending_trigger_matches: VecDeque::new(),
@@ -1245,22 +1285,36 @@ impl TerminalPane {
             #[cfg(test)]
             test_accepts_input: false,
             input_locked: false,
+            shell_ide_preparing: false,
+            shell_ide_progress: None,
             marked_text: None,
             marked_text_caret_utf16: None,
             privilege_prompt_inline_hint: None,
             privilege_prompt_submit_requested: false,
             search_query: None,
+            search_options: Default::default(),
+            search_pattern: None,
+            search_invalid_regex: false,
             terminal_content_revision: 1,
             search_cache: None,
             search_generation: Arc::new(AtomicU64::new(0)),
             search_task: None,
             selected_search_match: None,
+            search_navigation_needs_viewport_anchor: false,
             pending_search_reveal: false,
             hovered_link: None,
+            timestamp_hover: None,
+            archive_hover: None,
+            interactive_trigger_rules: None,
+            interactive_trigger_hover: None,
+            trigger_interaction_requested: None,
             hovered_command_mark_id: None,
+            command_folding: command_folding::CommandFolding::default(),
+            command_reflow_pending: false,
             selecting: false,
             free_type_drag: None,
             last_mouse_report_point: None,
+            mouse_paste_button: None,
             title: SharedString::from("OxideTerm"),
             cwd: None,
             cwd_source: None,
@@ -1319,6 +1373,7 @@ impl TerminalPane {
             last_cursor_blink: Instant::now(),
             last_terminal_input: Instant::now(),
             last_terminal_activity: Instant::now(),
+            dropped_external_paths: Vec::new(),
             last_drain_budget_exhausted: false,
             scheduler_wake_sender,
             process_info_refresh_in_flight: false,
@@ -1444,6 +1499,30 @@ impl TerminalPane {
         if self.selection.is_none() {
             self.selecting = false;
             self.selection_autoscroll_position = None;
+        }
+    }
+
+    pub fn render_cache_visible(&self) -> bool {
+        self.render_cache_visible
+    }
+
+    pub fn set_render_cache_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if self.render_cache_visible == visible {
+            return;
+        }
+        self.render_cache_visible = visible;
+        if visible {
+            cx.notify();
+        } else {
+            // Protocol pixels and animation clocks survive; display resources can be rebuilt.
+            self.layout_cache.lock().clear();
+            let images = self.image_cache.suspend();
+            // Defer until the current window is back in App.windows too.
+            cx.defer(move |cx| {
+                for image in images {
+                    cx.drop_image(image, None);
+                }
+            });
         }
     }
 
@@ -1653,6 +1732,20 @@ impl TerminalPane {
     pub fn can_switch_working_directory_from_chrome(&self) -> bool {
         let mode = self.terminal.lock().mode();
         !mode.contains(TermMode::ALT_SCREEN) && !mode.intersects(TermMode::MOUSE_MODE)
+    }
+
+    pub fn can_sync_working_directory(&self) -> bool {
+        // SFTP can target an unfocused pane. Only submit to a recognized empty
+        // shell prompt, never append to a draft or feed a foreground program.
+        let mode = self.terminal.lock().mode();
+        self.terminal_accepts_input()
+            && self.autosuggest_prompt_active
+            && self.history_input_available(mode)
+            && !self.input_tracker.untracked
+            && self.input_tracker.value.is_empty()
+            && self.marked_text.is_none()
+            && self.pending_paste.is_none()
+            && self.tmux_prompt.is_none()
     }
 
     pub fn command_marks(&self) -> Vec<TerminalCommandMark> {
@@ -1913,6 +2006,10 @@ impl TerminalPane {
         self.context_action_requested.take()
     }
 
+    pub fn take_archive_path_request(&mut self) -> Option<Zeroizing<String>> {
+        self.archive_path_requested.take()
+    }
+
     pub fn set_plugin_text_actions(&mut self, actions: Vec<TerminalPluginTextAction>) {
         self.plugin_text_actions = actions;
     }
@@ -1948,6 +2045,7 @@ impl TerminalPane {
     }
 
     pub fn set_preferences(&mut self, preferences: TerminalUiPreferences, cx: &mut Context<Self>) {
+        self.clear_terminal_hover(cx);
         let mut preferences = preferences;
         self.preference_overrides.apply_to(&mut preferences);
         if self.preferences.autosuggest_enabled != preferences.autosuggest_enabled {
@@ -1990,11 +2088,18 @@ impl TerminalPane {
             || self.preferences.font_weight.to_bits() != preferences.font_weight.to_bits()
             || self.preferences.line_height.to_bits() != preferences.line_height.to_bits();
         let next_settings = TerminalUiSettings::from_preferences(&preferences);
+        if self.preferences.command_folding_enabled != preferences.command_folding_enabled {
+            // Remove the visual mapping before resizing the grid for the gutter.
+            // The underlying output remains available when folding is disabled.
+            self.command_folding = command_folding::CommandFolding::default();
+            self.clear_smooth_scroll_remainder();
+            self.clear_terminal_interactions(cx);
+            self.set_selection(None);
+            self.snapshot_dirty = true;
+        }
         if !next_settings.command_marks_enabled {
-            // Hiding marks must not discard the completion facts or aliases of a running command.
+            // This preference controls decoration, not command actions or folding.
             self.command_marks_render_cache_dirty = true;
-            self.selected_command_mark_id = None;
-            self.hovered_command_mark_id = None;
         }
         if !next_settings.current_directory_awareness_enabled {
             self.pending_cwd = None;
@@ -2156,7 +2261,12 @@ impl TerminalPane {
     }
 
     pub fn shutdown(&mut self) {
-        self.terminal.lock().shutdown();
+        let mut terminal = self.terminal.lock();
+        // A shell IDE owns this exact PTY until its agent has restored the shell.
+        // Removing the pane relinquishes its Arc; it must not cancel the IDE lease.
+        if !terminal.shell_channel_owned() {
+            terminal.shutdown();
+        }
     }
 
     pub fn lifecycle(&self) -> TerminalLifecycle {
@@ -2462,6 +2572,42 @@ impl TerminalPane {
         self.set_serial_runtime_options(options, cx);
     }
 
+    fn cycle_telnet_line_ending(&mut self, output: bool, cx: &mut Context<Self>) {
+        let mut terminal = self.terminal.lock();
+        let Some(mut options) = terminal.telnet_line_endings() else {
+            return;
+        };
+        let value = if output {
+            &mut options.output
+        } else {
+            &mut options.input
+        };
+        *value = match *value {
+            SerialLineEnding::None => SerialLineEnding::Lf,
+            SerialLineEnding::Lf => SerialLineEnding::CrLf,
+            SerialLineEnding::CrLf => SerialLineEnding::Cr,
+            SerialLineEnding::Cr => SerialLineEnding::None,
+        };
+        if let Err(error) = terminal.set_telnet_line_endings(options) {
+            if let Some(sink) = &self.preferences.notice_sink {
+                sink(TerminalNotice {
+                    title: self.preferences.serial_control_labels.line_ending.clone(),
+                    description: Some(error.to_string()),
+                    status_text: None,
+                    progress: None,
+                    variant: TerminalNoticeVariant::Error,
+                });
+            }
+            return;
+        }
+        drop(terminal);
+        cx.emit(TerminalPaneEvent::TelnetLineEndingsChanged {
+            input: (!output).then_some(options.input),
+            output: output.then_some(options.output),
+        });
+        cx.notify();
+    }
+
     fn cycle_serial_output_line_ending(&mut self, cx: &mut Context<Self>) {
         let Some(mut options) = self.terminal.lock().serial_runtime_options() else {
             return;
@@ -2493,10 +2639,30 @@ impl TerminalPane {
         selected_match: Option<usize>,
         cx: &mut Context<Self>,
     ) -> TerminalSearchStatus {
+        self.set_search_query_with_options(query, self.search_options, selected_match, cx)
+    }
+
+    pub fn set_search_query_with_options(
+        &mut self,
+        query: Option<String>,
+        options: oxideterm_terminal::TerminalSearchOptions,
+        selected_match: Option<usize>,
+        cx: &mut Context<Self>,
+    ) -> TerminalSearchStatus {
+        self.search_generation.fetch_add(1, Ordering::AcqRel);
+        self.search_task = None;
+        self.search_options = options;
+        let compiled = query
+            .as_deref()
+            .filter(|query| !query.is_empty())
+            .map(|query| oxideterm_terminal::TerminalSearchQuery::new(query, options));
+        self.search_invalid_regex = compiled.as_ref().is_some_and(Result::is_err);
+        self.search_pattern = compiled.and_then(Result::ok).map(Arc::new);
         self.search_query = query;
         self.search_cache = None;
         self.selected_search_match = selected_match.or(Some(0));
         self.pending_search_reveal = true;
+        self.search_navigation_needs_viewport_anchor = false;
         self.schedule_search_refresh(cx);
         cx.notify();
         self.search_status()
@@ -2519,6 +2685,7 @@ impl TerminalPane {
                 .selected_search_match
                 .filter(|index| *index < match_count),
             match_count,
+            invalid_regex: self.search_invalid_regex,
         }
     }
 
@@ -2535,6 +2702,7 @@ impl TerminalPane {
     }
 
     fn mark_terminal_content_changed(&mut self, cx: &mut Context<Self>) {
+        self.clear_terminal_interactions(cx);
         self.selection_highlight_cache = None;
         self.terminal_content_revision = self.terminal_content_revision.wrapping_add(1).max(1);
         self.search_cache = None;
@@ -2542,6 +2710,11 @@ impl TerminalPane {
     }
 
     fn schedule_search_refresh(&mut self, cx: &mut Context<Self>) {
+        // Output joins the pending refresh instead of postponing it indefinitely.
+        // Query changes cancel the task before scheduling a replacement.
+        if self.search_task.is_some() {
+            return;
+        }
         let generation = self
             .search_generation
             .fetch_add(1, Ordering::AcqRel)
@@ -2558,11 +2731,10 @@ impl TerminalPane {
             self.pending_search_reveal = false;
             return;
         };
-        let Some(search_source) = self.terminal.lock().search_source() else {
+        let Some(pattern) = self.search_pattern.clone() else {
             return;
         };
         let cancellation = self.search_generation.clone();
-        let content_revision = self.terminal_content_revision;
         self.search_task = Some(cx.spawn(async move |weak, cx| {
             cx.background_executor()
                 .timer(TERMINAL_SEARCH_DEBOUNCE)
@@ -2570,32 +2742,51 @@ impl TerminalPane {
             if cancellation.load(Ordering::Acquire) != generation {
                 return;
             }
+            let Ok(Some((search_source, content_revision))) = weak.update(cx, |this, _| {
+                this.terminal
+                    .lock()
+                    .search_source()
+                    .map(|source| (source, this.terminal_content_revision))
+            }) else {
+                let _ = weak.update(cx, |this, _| this.search_task = None);
+                return;
+            };
             let worker_cancellation = cancellation.clone();
-            let worker_query = query.clone();
             let search_task = cx.background_executor().spawn(async move {
                 let started = Instant::now();
                 let is_cancelled = || worker_cancellation.load(Ordering::Acquire) != generation;
-                let matches = search_source.search_matches(&worker_query, &is_cancelled);
+                let matches = search_source.search(&pattern, &is_cancelled);
                 (matches, started.elapsed())
             });
             let (matches, elapsed) = search_task.await;
             let _ = weak.update(cx, |this, cx| {
                 if this.search_generation.load(Ordering::Acquire) != generation
-                    || this.terminal_content_revision != content_revision
                     || this.search_query.as_deref() != Some(query.as_str())
                 {
                     return;
                 }
-                let matches: Arc<[TerminalSearchMatch]> = matches.into();
+                this.search_task = None;
+                let dirty = this.terminal_content_revision != content_revision;
+                let source = this.terminal.lock().search_source();
+                let Some(source) = source else {
+                    return;
+                };
+                // Reconcile by stable row identity instead of discarding every busy-buffer scan.
+                let matches: Arc<[TerminalSearchMatch]> =
+                    source.resolve_search_result(matches).into();
                 this.search_cache = Some(TerminalSearchCache {
                     query,
-                    content_revision,
+                    content_revision: this.terminal_content_revision,
                     matches: matches.clone(),
                 });
                 this.render_stats.search_micros =
                     elapsed.as_micros().min(u128::from(u64::MAX)) as u64;
                 this.selected_search_match = if matches.is_empty() {
                     None
+                } else if this.pending_search_reveal {
+                    let snapshot = this.terminal.lock().snapshot();
+                    this.snapshot = this.stamp_snapshot(snapshot);
+                    this.nearest_search_match(&matches)
                 } else {
                     this.selected_search_match
                         .or(Some(0))
@@ -2608,6 +2799,9 @@ impl TerminalPane {
                 }
                 cx.emit(TerminalPaneEvent::SearchStatusChanged);
                 cx.notify();
+                if dirty {
+                    this.schedule_search_refresh(cx);
+                }
             });
         }));
     }
@@ -2680,6 +2874,10 @@ impl TerminalPane {
             return true;
         }
         false
+    }
+
+    pub fn take_dropped_external_paths(&mut self) -> Vec<std::path::PathBuf> {
+        std::mem::take(&mut self.dropped_external_paths)
     }
 
     pub fn send_command_line(&mut self, command: &str, cx: &mut Context<Self>) -> bool {
@@ -2780,7 +2978,11 @@ impl TerminalPane {
         // history so remote output cannot escape through an unrelated observer.
         let write_result = {
             let mut terminal = self.terminal.lock();
-            if self.input_locked || self.terminal_exited || !terminal.is_interactive() {
+            if self.input_locked
+                || self.shell_ide_preparing
+                || self.terminal_exited
+                || !terminal.is_interactive()
+            {
                 return false;
             }
             terminal.write_text(&input)
@@ -2799,9 +3001,14 @@ impl TerminalPane {
     pub fn set_trigger_rules(
         &mut self,
         rules: Option<Arc<oxideterm_terminal_triggers::CompiledTriggerSet>>,
+        cx: &mut Context<Self>,
     ) {
+        self.clear_terminal_interactions(cx);
+        self.interactive_trigger_rules = rules.clone().filter(|rules| rules.has_interactions());
         self.pending_trigger_matches.clear();
-        self.terminal.lock().set_trigger_rules(rules);
+        self.terminal
+            .lock()
+            .set_trigger_rules(rules.filter(|rules| rules.has_output_triggers()));
     }
 
     pub fn take_trigger_matches(&mut self) -> Vec<oxideterm_terminal_triggers::TriggerMatched> {
@@ -2821,7 +3028,11 @@ impl TerminalPane {
         // plugin hook, then bypass text recording and command observation.
         let write_result = {
             let mut terminal = self.terminal.lock();
-            if self.input_locked || self.terminal_exited || !terminal.is_interactive() {
+            if self.input_locked
+                || self.shell_ide_preparing
+                || self.terminal_exited
+                || !terminal.is_interactive()
+            {
                 return false;
             }
             if terminal.kind() == TerminalSessionKind::Serial {
@@ -2863,7 +3074,11 @@ impl TerminalPane {
         // must share the same terminal-session lock after interception.
         let write_result = {
             let mut terminal = self.terminal.lock();
-            if self.input_locked || self.terminal_exited || !terminal.is_interactive() {
+            if self.input_locked
+                || self.shell_ide_preparing
+                || self.terminal_exited
+                || !terminal.is_interactive()
+            {
                 return false;
             }
             match std::str::from_utf8(&bytes) {
@@ -3093,6 +3308,27 @@ impl TerminalPane {
         sent
     }
 
+    pub fn set_shell_ide_progress(
+        &mut self,
+        progress: (String, Option<f32>),
+        cx: &mut Context<Self>,
+    ) {
+        if self.shell_ide_preparing {
+            self.shell_ide_progress = Some(progress);
+            cx.notify();
+        }
+    }
+
+    pub fn set_shell_ide_preparing(&mut self, preparing: bool, cx: &mut Context<Self>) {
+        if !preparing {
+            self.shell_ide_progress = None;
+        }
+        if self.shell_ide_preparing != preparing {
+            self.shell_ide_preparing = preparing;
+            cx.notify();
+        }
+    }
+
     pub fn set_input_locked(&mut self, locked: bool, cx: &mut Context<Self>) {
         if self.input_locked == locked {
             return;
@@ -3122,8 +3358,7 @@ impl TerminalPane {
         self.snapshot = self.stamp_snapshot(snapshot);
         self.mark_terminal_content_changed(cx);
         self.set_selection(None);
-        self.search_query = None;
-        self.selected_search_match = None;
+        self.set_search_query(None, None, cx);
         self.reset_command_marks_for_terminal_reset();
         cx.notify();
     }
@@ -3460,7 +3695,7 @@ impl TerminalPane {
 
     fn clear_command_mark_selection_for_tui_mode(&mut self, mode: TermMode) -> bool {
         if self.selected_command_mark_id.is_none() && self.hovered_command_mark_id.is_none()
-            || command_mark_ui_available(self.settings.command_marks_enabled, mode)
+            || command_mark_ui_available(true, mode)
         {
             return false;
         }
@@ -3474,20 +3709,20 @@ impl TerminalPane {
 
     fn smooth_scroll_display_offset(&self) -> f32 {
         if !self.settings.smooth_scroll {
-            return self.snapshot.display_offset as f32;
+            return self.visible_scroll_offset() as f32;
         }
 
         let line_height = self.metrics.line_height_f32();
         if line_height <= f32::EPSILON {
-            return self.snapshot.display_offset as f32;
+            return self.visible_scroll_offset() as f32;
         }
 
         // The terminal state still scrolls in whole rows. The paint layer keeps
         // the remaining wheel distance in pixels, so the scrollbar must use the
         // same fractional row offset to move with smooth-scrolling content.
-        let display_offset = self.snapshot.display_offset as f32
+        let display_offset = self.visible_scroll_offset() as f32
             + f32::from(self.smooth_scroll_offset_px) / line_height;
-        display_offset.clamp(0.0, self.snapshot.scrollback_lines as f32)
+        display_offset.clamp(0.0, self.visible_scroll_history() as f32)
     }
 
     fn next_drain_budget(&self) -> TerminalDrainBudget {
@@ -3911,7 +4146,7 @@ impl TerminalPane {
                     }
                     TerminalCommandMarkEvent::Closed(mut mark) => {
                         if let Some(frontend_command_id) =
-                            self.command_mark_id_aliases.remove(&mark.command_id)
+                            self.command_mark_id_aliases.get(&mark.command_id).cloned()
                         {
                             mark.command_id = frontend_command_id;
                         }
@@ -3934,6 +4169,9 @@ impl TerminalPane {
                             .retain_mut(|mark| mark.trim_history(lines));
                         self.command_fact_ledger.trim_history(lines);
                     }
+                    TerminalCommandMarkEvent::Reflowed { cols, rows, marks } => {
+                        self.apply_reflowed_command_marks(cols, rows, marks);
+                    }
                 }
                 if let Some(selected_id) = &self.selected_command_mark_id
                     && !self
@@ -3952,6 +4190,7 @@ impl TerminalPane {
                     self.hovered_command_mark_id = None;
                 }
                 self.command_marks_render_cache_dirty = true;
+                self.prune_command_mark_aliases();
                 TerminalEventEffect::notify()
             }
             TerminalEvent::CwdChanged { cwd, host } => {
@@ -4000,6 +4239,7 @@ impl TerminalPane {
         self.focused = focused;
         if !focused {
             self.win32_pressed_keys.clear();
+            self.mouse_paste_button = None;
         }
         if !focused && self.context_menu.take().is_some() {
             // Menu actions refer to this pane's selection and command snapshot. Drop them
@@ -4015,11 +4255,29 @@ impl TerminalPane {
     }
 
     fn send_protocol_bytes(&mut self, bytes: &[u8], cx: &mut Context<Self>) -> bool {
+        self.send_terminal_bytes(bytes, false, cx)
+    }
+
+    fn send_terminal_bytes(
+        &mut self,
+        bytes: &[u8],
+        user_input: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if !self.terminal_accepts_input() {
             return false;
         }
 
-        if self.terminal.lock().write_protocol_bytes(bytes).is_ok() {
+        let result = {
+            let mut terminal = self.terminal.lock();
+            // Telnet's user newline policy must not rewrite mouse reports or protocol replies.
+            if user_input && terminal.kind() == TerminalSessionKind::Telnet {
+                terminal.write_input(bytes)
+            } else {
+                terminal.write_protocol_bytes(bytes)
+            }
+        };
+        if result.is_ok() {
             if let Some(recorder) = self.recorder.as_mut() {
                 recorder.record_input(&String::from_utf8_lossy(bytes));
             }
@@ -4067,7 +4325,7 @@ impl TerminalPane {
         } else {
             &bytes
         };
-        if self.send_protocol_bytes(wire_bytes, cx) {
+        if self.send_terminal_bytes(wire_bytes, true, cx) {
             if bytes.as_slice() == semantic_bytes
                 && let Some((key, _)) = encoded_key
             {
@@ -4278,6 +4536,9 @@ impl TerminalPane {
     }
 
     fn terminal_accepts_input(&self) -> bool {
+        if self.shell_ide_preparing {
+            return false;
+        }
         #[cfg(test)]
         if self.test_accepts_input {
             return !self.input_locked;
@@ -4287,6 +4548,9 @@ impl TerminalPane {
     }
 
     fn terminal_accepts_input_with_interactive_state(&self, terminal_interactive: bool) -> bool {
+        if self.shell_ide_preparing {
+            return false;
+        }
         #[cfg(test)]
         if self.test_accepts_input {
             // Unit tests can exercise input routing without creating a live PTY.
@@ -4320,7 +4584,7 @@ impl TerminalPane {
         let bytes = Zeroizing::new(bytes);
         let mode = self.terminal.lock().mode();
         self.delete_free_type_selection_if_active(mode, cx);
-        if self.send_protocol_bytes(&bytes, cx) {
+        if self.send_terminal_bytes(&bytes, true, cx) {
             self.observe_user_input("text", &bytes, cx);
             self.restore_live_output_after_user_input();
             return true;
@@ -4399,6 +4663,9 @@ impl TerminalPane {
         scale_factor: f32,
         cx: &mut Context<Self>,
     ) {
+        if self.bounds != Some(bounds) {
+            self.clear_terminal_interactions(cx);
+        }
         self.bounds = Some(bounds);
         self.viewport_scale_factor_bits = Some(scale_factor.to_bits());
         let cell_width = self.metrics.cell_width_f32();
@@ -4473,7 +4740,12 @@ impl TerminalPane {
         if self.last_pty_resize == Some(resize) {
             return;
         }
-        let grid_changed = self.snapshot.cols != cols || self.snapshot.rows != rows;
+        // The displayed snapshot can lag an accepted resize. A cell-metric-only
+        // update must not wait for a second reflow event that the backend won't emit.
+        let grid_changed = self.last_pty_resize.map_or(
+            self.snapshot.cols != cols || self.snapshot.rows != rows,
+            |(previous_cols, previous_rows, _, _)| (previous_cols, previous_rows) != (cols, rows),
+        );
 
         let next_snapshot = {
             let mut terminal = self.terminal.lock();
@@ -4491,9 +4763,8 @@ impl TerminalPane {
             self.snapshot = self.stamp_snapshot(snapshot);
             self.mark_terminal_content_changed(cx);
             if grid_changed {
-                // The backend also resets its shell-integration state. Clear
-                // immediately so stale hit regions cannot survive one UI frame.
-                self.reset_command_marks_while_awaiting_backend_reset();
+                // Keep collapse identities while the parser publishes rebased boundaries.
+                self.command_reflow_pending = true;
             }
             cx.notify();
         }
@@ -4518,8 +4789,9 @@ impl TerminalPane {
     }
 
     fn command_mark_gutter_width(&self) -> f32 {
-        if self.settings.command_marks_enabled {
-            TERMINAL_COMMAND_MARK_GUTTER_WIDTH
+        // Only changing the preference resizes the grid, not hover or TUI state.
+        if self.preferences.command_folding_enabled {
+            self.metrics.cell_width_f32()
         } else {
             0.0
         }
@@ -4527,7 +4799,8 @@ impl TerminalPane {
 
     pub fn cursor_anchor(&self) -> Option<TerminalCursorAnchor> {
         let bounds = self.bounds?;
-        let cursor_bounds = ime_cursor_bounds_for_snapshot(&self.snapshot, &self.metrics)?;
+        let cursor_bounds =
+            ime_cursor_bounds_for_snapshot(self.displayed_snapshot(), &self.metrics)?;
         // The app layer owns overlays such as inline AI chat, but only the
         // terminal pane knows the bidi-aware cursor visual column and measured
         // cell metrics. Expose pane-local facts rather than making workspace
@@ -4794,6 +5067,49 @@ mod tests {
             );
             assert_eq!(text.as_str(), "captured");
             assert!(pane.take_plugin_text_request().is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn hidden_render_cache_preserves_output_selection_and_scroll(cx: &mut TestAppContext) {
+        let (_, cx) = cx.add_window_view(|_, _| TerminalTestRoot);
+        let pane = cx.update(|window, cx| {
+            cx.new(|cx| {
+                TerminalPane::new_recording_playback(80, 24, Default::default(), window, cx)
+                    .unwrap()
+            })
+        });
+        pane.update(cx, |pane, cx| {
+            pane.feed_recording_output("kept selection\r\n".repeat(80).as_bytes(), cx);
+            pane.terminal.lock().scroll_lines(20);
+            let snapshot = pane.terminal.lock().snapshot();
+            pane.snapshot = pane.stamp_snapshot(snapshot);
+            pane.set_selection(Some(TerminalSelection {
+                anchor: TerminalGridPoint { line: -20, col: 0 },
+                head: TerminalGridPoint { line: -20, col: 3 },
+                mode: TerminalSelectionMode::Simple,
+            }));
+            pane.set_render_cache_visible(false, cx);
+            pane.feed_recording_output(b"late", cx);
+            assert_eq!(pane.selected_text_snapshot().as_deref(), Some("kept"));
+            let source = pane.terminal.lock().search_source().unwrap();
+            assert_eq!(
+                source
+                    .search_matches("late", &|| false)
+                    .iter()
+                    .map(|hit| (hit.line, hit.start_col, hit.end_col))
+                    .collect::<Vec<_>>(),
+                vec![(23, 0, 4)]
+            );
+            pane.set_render_cache_visible(true, cx);
+        });
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| {
+                let _ = pane.render(window, cx).into_any_element();
+                assert_eq!(pane.snapshot.display_offset, 20);
+                assert_eq!(pane.selected_text_snapshot().as_deref(), Some("kept"));
+                assert!(pane.ai_buffer_snapshot().ends_with("late"));
+            })
         });
     }
 
@@ -5124,7 +5440,10 @@ mod tests {
             TerminalPane::new_recording_playback(
                 DEFAULT_COLS,
                 DEFAULT_ROWS,
-                TerminalUiPreferences::default(),
+                TerminalUiPreferences {
+                    command_folding_enabled: true,
+                    ..Default::default()
+                },
                 window,
                 cx,
             )
@@ -5159,7 +5478,8 @@ mod tests {
                 let line_height = pane.metrics.line_height_f32();
                 // Font advances may round just below an integer cell count.
                 // The resized grid must fit, with less than one cell left over.
-                let available_width = 640.0 - horizontal * 2.0 - SCROLLBAR_RESERVED_WIDTH;
+                let available_width =
+                    640.0 - horizontal * 2.0 - cell_width - SCROLLBAR_RESERVED_WIDTH;
                 let available_height = 320.0 - vertical * 2.0;
                 let remaining_width = available_width - pane.snapshot.cols as f32 * cell_width;
                 let remaining_height = available_height - pane.snapshot.rows as f32 * line_height;
@@ -5167,12 +5487,13 @@ mod tests {
                 assert!(remaining_height >= -0.001 && remaining_height < line_height - 0.001);
 
                 let position =
-                    bounds.origin + gpui::point(px(cell_width * 3.5), px(line_height * 2.5));
+                    bounds.origin + gpui::point(px(cell_width * 4.5), px(line_height * 2.5));
                 assert_eq!(
                     pane.terminal_point_for_position(position),
                     TerminalPoint { row: 2, col: 3 }
                 );
-                // Selection beginning in the left padding must include column zero.
+                // Outer padding clamps to column zero; at zero padding the edge is
+                // the command gutter, which must not begin a text selection.
                 let padding_position = gpui::point(px(0.0), position.y);
                 pane.handle_mouse_down(
                     &gpui::MouseDownEvent {
@@ -5187,14 +5508,18 @@ mod tests {
                     },
                     cx,
                 );
-                assert_eq!(
-                    pane.selection.expect("padding starts selection").anchor.col,
-                    0
-                );
+                if horizontal == 0.0 {
+                    assert!(pane.selection.is_none());
+                } else {
+                    assert_eq!(
+                        pane.selection.expect("padding starts selection").anchor.col,
+                        0
+                    );
+                }
                 let anchor = pane.cursor_anchor().expect("cursor anchor");
                 assert_eq!(
                     anchor.x,
-                    horizontal + pane.snapshot.cursor_col as f32 * cell_width
+                    horizontal + (pane.snapshot.cursor_col + 1) as f32 * cell_width
                 );
                 assert_eq!(
                     anchor.y,
@@ -5341,6 +5666,12 @@ mod tests {
         });
 
         pane.update(cx, |pane, cx| {
+            // Preparation must block all user input before the asynchronous PTY lease arrives.
+            pane.set_shell_ide_preparing(true, cx);
+            pane.commit_text("blocked", cx);
+            pane.send_user_protocol_bytes(b"\x1b[C", cx);
+            pane.paste_text("blocked paste", cx);
+            pane.set_shell_ide_preparing(false, cx);
             pane.commit_text("x", cx);
             pane.send_user_protocol_bytes(b"\x1b[D", cx);
             pane.paste_text("y", cx);
@@ -5894,6 +6225,87 @@ mod tests {
             pane.observe_autosuggest_input_bytes(b"\r", cx);
             assert!(!pane.autosuggest_prompt_active);
             assert!(pane.terminal_autosuggest_candidates().is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn sftp_directory_sync_requires_an_empty_shell_prompt(cx: &mut TestAppContext) {
+        let (_, cx) = cx.add_window_view(|_, _| TerminalTestRoot);
+        let pane = cx.update(|window, cx| {
+            cx.new(|cx| {
+                TerminalPane::new_recording_playback(
+                    DEFAULT_COLS,
+                    DEFAULT_ROWS,
+                    TerminalUiPreferences::default(),
+                    window,
+                    cx,
+                )
+                .unwrap()
+            })
+        });
+        pane.update(cx, |pane, cx| {
+            pane.test_accepts_input = true;
+            assert!(!pane.can_sync_working_directory(), "unknown prompt");
+            pane.handle_terminal_event(
+                TerminalEvent::CwdChanged {
+                    cwd: "/work".into(),
+                    host: None,
+                },
+                cx,
+            );
+            assert!(pane.can_sync_working_directory(), "empty prompt");
+            pane.settings.current_directory_awareness_enabled = false;
+            assert!(
+                pane.can_sync_working_directory(),
+                "sync must not depend on cwd awareness"
+            );
+            for (enter, leave) in [
+                (b"\x1b[?1049h".as_slice(), b"\x1b[?1049l".as_slice()),
+                (b"\x1b[?1000h".as_slice(), b"\x1b[?1000l".as_slice()),
+                (b"\x1b[?1004h".as_slice(), b"\x1b[?1004l".as_slice()),
+            ] {
+                pane.terminal.lock().feed_recording_output(enter);
+                assert!(!pane.can_sync_working_directory(), "application input mode");
+                pane.terminal.lock().feed_recording_output(leave);
+            }
+            pane.observe_autosuggest_input_bytes(b"cat > output", cx);
+            assert!(!pane.can_sync_working_directory(), "unfinished command");
+            pane.observe_autosuggest_input_bytes(b"\r", cx);
+            assert!(
+                !pane.can_sync_working_directory(),
+                "running foreground command"
+            );
+            pane.handle_terminal_event(
+                TerminalEvent::CwdChanged {
+                    cwd: "/work".into(),
+                    host: None,
+                },
+                cx,
+            );
+            pane.observe_autosuggest_input_bytes(b"\x1b[A", cx);
+            assert!(
+                !pane.can_sync_working_directory(),
+                "shell history is untracked"
+            );
+            pane.observe_autosuggest_input_bytes(b"\r", cx);
+            pane.handle_terminal_event(
+                TerminalEvent::CwdChanged {
+                    cwd: "/work".into(),
+                    host: None,
+                },
+                cx,
+            );
+            pane.privilege_prompt_tracker.observe_terminal_prompt_event(
+                oxideterm_terminal::TerminalPrivilegePromptEvent::Visible {
+                    prompt: oxideterm_terminal::detect_terminal_privilege_prompt(
+                        "[sudo] password for deploy:",
+                    )
+                    .unwrap(),
+                    retry: false,
+                },
+                Instant::now(),
+            );
+            assert!(!pane.can_sync_working_directory(), "password prompt");
         });
     }
 

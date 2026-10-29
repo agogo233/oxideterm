@@ -49,6 +49,7 @@ fn readonly_value_trigger_spec() -> SelectTriggerChromeSpec {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum SelectAnchorId {
+    NewConnectionTunnelHost,
     PluginMarketplaceSort,
     NativePluginControl(u64),
     ActiveSessionSort,
@@ -100,8 +101,10 @@ pub enum SelectAnchorId {
     SettingsTerminalSessionLogFileMode,
     SettingsTerminalCursorStyle,
     SettingsRemoteShellIntegrationMode,
+    SettingsXmodemBlockSize,
     SettingsTerminalTriggerMatchMode,
     SettingsTerminalTriggerAction,
+    SettingsTerminalTriggerClickAction,
     SettingsTerminalTriggerProcessMode,
     SettingsTerminalTriggerQuickCommand,
     SettingsTerminalTriggerTiming,
@@ -109,7 +112,9 @@ pub enum SelectAnchorId {
     SettingsIdeAgentMode,
     SettingsLocalShell,
     SettingsLocalShellSemanticScheme(usize),
-    SettingsLocalPrivilegeKind,
+    SettingsLocalPrivilegePromptType,
+    SettingsLocalPrivilegeResponseMode,
+    SettingsLocalPrivilegeTotpCredential,
     SettingsConnectionIdleTimeout,
     SettingsReconnectMaxAttempts,
     SettingsReconnectBaseDelay,
@@ -119,6 +124,7 @@ pub enum SelectAnchorId {
     SettingsNetworkProxyAuth,
     SettingsAiProviderTemplate,
     SettingsAiEmbeddingProvider,
+    SettingsAiWebSearchProvider,
     SettingsKnowledgeCollectionScope,
     SettingsKnowledgeDocumentFormat,
     SettingsAiMcpTransport,
@@ -171,6 +177,8 @@ pub enum SelectAnchorId {
     NewConnectionTerminalEncoding,
     NewConnectionTerminalBackspaceSequence,
     NewConnectionTerminalDeleteSequence,
+    NewConnectionTelnetInputLineEnding,
+    NewConnectionTelnetOutputLineEnding,
     NewConnectionTerminalSemanticScheme,
     NewConnectionTerminalHighlightRuleSet,
     NewConnectionTerminalSessionLogPolicy,
@@ -225,8 +233,10 @@ impl SelectAnchorId {
                 | Self::SettingsTerminalDeleteSequence
                 | Self::SettingsTerminalCursorStyle
                 | Self::SettingsRemoteShellIntegrationMode
+                | Self::SettingsXmodemBlockSize
                 | Self::SettingsTerminalTriggerMatchMode
                 | Self::SettingsTerminalTriggerAction
+                | Self::SettingsTerminalTriggerClickAction
                 | Self::SettingsTerminalTriggerProcessMode
                 | Self::SettingsTerminalTriggerQuickCommand
                 | Self::SettingsTerminalTriggerTiming
@@ -234,7 +244,8 @@ impl SelectAnchorId {
                 | Self::SettingsIdeAgentMode
                 | Self::SettingsLocalShell
                 | Self::SettingsLocalShellSemanticScheme(_)
-                | Self::SettingsLocalPrivilegeKind
+                | Self::SettingsLocalPrivilegePromptType
+                | Self::SettingsLocalPrivilegeResponseMode
                 | Self::SettingsConnectionIdleTimeout
                 | Self::SettingsReconnectMaxAttempts
                 | Self::SettingsReconnectBaseDelay
@@ -244,6 +255,7 @@ impl SelectAnchorId {
                 | Self::SettingsNetworkProxyAuth
                 | Self::SettingsAiProviderTemplate
                 | Self::SettingsAiEmbeddingProvider
+                | Self::SettingsAiWebSearchProvider
                 | Self::SettingsKnowledgeCollectionScope
                 | Self::SettingsKnowledgeDocumentFormat
                 | Self::SettingsAiMcpTransport
@@ -297,6 +309,8 @@ impl SelectAnchorId {
                 | Self::NewConnectionTerminalEncoding
                 | Self::NewConnectionTerminalBackspaceSequence
                 | Self::NewConnectionTerminalDeleteSequence
+                | Self::NewConnectionTelnetInputLineEnding
+                | Self::NewConnectionTelnetOutputLineEnding
                 | Self::NewConnectionTerminalSemanticScheme
                 | Self::NewConnectionTerminalHighlightRuleSet
         )

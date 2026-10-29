@@ -1,7 +1,5 @@
 use super::*;
 
-pub(in crate::workspace) const CONNECTION_IDLE_TIMEOUT_CONTROL_WIDTH: f32 = 320.0; // Keep the standalone idle-timeout select from expanding into side panels.
-pub(in crate::workspace) const CONNECTION_RESPONSIVE_FIELD_BASIS: f32 = 240.0; // Preferred field width before a settings row redistributes space.
 pub(in crate::workspace) const CONNECTION_IMPORT_SOURCE_BASIS: f32 = 220.0; // Match the desktop source column while allowing narrow panes to wrap.
 pub(in crate::workspace) const CONNECTION_IMPORT_PATH_BASIS: f32 = 420.0; // Give localized path actions room before they move below the source picker.
 pub(in crate::workspace) const CONNECTION_IMPORT_PREVIEW_ACTIONS_BASIS: f32 = 420.0; // Keep preview controls together until the toolbar wraps.
@@ -702,8 +700,8 @@ impl WorkspaceApp {
             .w_full()
             .min_w_0()
             .flex()
-            .flex_wrap()
-            .gap(px(32.0))
+            .flex_col()
+            .gap(px(self.tokens.metrics.settings_card_gap))
             .child(self.connection_labeled_input(
                 "settings_view.connections.default_username",
                 SettingsInput::ConnectionDefaultUsername,
@@ -729,23 +727,17 @@ impl WorkspaceApp {
         placeholder: String,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        div()
-            .min_w_0()
-            .max_w_full()
-            .flex_1()
-            .flex_basis(px(CONNECTION_RESPONSIVE_FIELD_BASIS))
-            .flex()
-            .flex_col()
-            .gap(px(8.0))
-            .child(
-                div()
-                    .text_size(px(self.tokens.metrics.ui_text_sm))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(rgb(self.tokens.ui.text))
-                    .child(self.i18n.t(label_key)),
-            )
-            .child(self.settings_text_input_control_fill(input, value, placeholder, cx))
-            .into_any_element()
+        let width = if input == SettingsInput::ConnectionDefaultPort {
+            self.tokens.metrics.settings_number_input_width
+        } else {
+            self.tokens.metrics.settings_select_width
+        };
+        self.setting_row(
+            label_key,
+            "",
+            self.settings_text_input_control(input, value, placeholder, width, cx),
+            cx,
+        )
     }
 
     pub(in crate::workspace) fn connection_idle_timeout_control(
@@ -760,7 +752,7 @@ impl WorkspaceApp {
             select_id,
             value,
             false,
-            Some(CONNECTION_IDLE_TIMEOUT_CONTROL_WIDTH),
+            Some(self.tokens.metrics.settings_select_width),
             cx,
         );
 
@@ -795,63 +787,78 @@ impl WorkspaceApp {
                 self.setting_row(
                     "settings_view.connections.ssh_config.auto_load",
                     "settings_view.connections.ssh_config.auto_load_hint",
-                    checkbox(&self.tokens, String::new(), auto_load_hosts)
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, _event, _window, cx| {
-                                this.edit_settings(
-                                    |settings| {
-                                        set_ssh_config_auto_load_hosts(settings, !auto_load_hosts)
-                                    },
-                                    cx,
-                                );
-                                this.refresh_session_manager_ssh_config_hosts(cx);
-                                if this.command_palette.read(cx).is_open() {
-                                    this.load_command_palette_ssh_config_hosts(cx);
-                                }
-                            }),
-                        )
-                        .into_any_element(),
+                    checkbox(
+                        &self.tokens,
+                        "ssh-config-auto-load",
+                        String::new(),
+                        auto_load_hosts,
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.edit_settings(
+                                |settings| {
+                                    set_ssh_config_auto_load_hosts(settings, !auto_load_hosts)
+                                },
+                                cx,
+                            );
+                            this.refresh_session_manager_ssh_config_hosts(cx);
+                            if this.command_palette.read(cx).is_open() {
+                                this.load_command_palette_ssh_config_hosts(cx);
+                            }
+                        }),
+                    )
+                    .into_any_element(),
                     cx,
                 ),
                 self.setting_row(
                     "settings_view.connections.ssh_config.auto_sync",
                     "settings_view.connections.ssh_config.auto_sync_hint",
-                    checkbox(&self.tokens, String::new(), auto_sync_hosts)
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, _event, _window, cx| {
-                                this.edit_settings(
-                                    |settings| {
-                                        set_ssh_config_auto_sync_hosts(settings, !auto_sync_hosts)
-                                    },
-                                    cx,
-                                );
-                                this.sync_ssh_config_sync_service();
-                            }),
-                        )
-                        .into_any_element(),
+                    checkbox(
+                        &self.tokens,
+                        "ssh-config-auto-sync",
+                        String::new(),
+                        auto_sync_hosts,
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.edit_settings(
+                                |settings| {
+                                    set_ssh_config_auto_sync_hosts(settings, !auto_sync_hosts)
+                                },
+                                cx,
+                            );
+                            this.sync_ssh_config_sync_service();
+                        }),
+                    )
+                    .into_any_element(),
                     cx,
                 ),
                 self.setting_row(
                     "settings_view.connections.ssh_config.allow_proxy_command",
                     "settings_view.connections.ssh_config.allow_proxy_command_hint",
-                    checkbox(&self.tokens, String::new(), allow_proxy_command)
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, _event, _window, cx| {
-                                this.edit_settings(
-                                    |settings| {
-                                        set_ssh_config_allow_proxy_command(
-                                            settings,
-                                            !allow_proxy_command,
-                                        )
-                                    },
-                                    cx,
-                                );
-                            }),
-                        )
-                        .into_any_element(),
+                    checkbox(
+                        &self.tokens,
+                        "ssh-config-allow-proxy-command",
+                        String::new(),
+                        allow_proxy_command,
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.edit_settings(
+                                |settings| {
+                                    set_ssh_config_allow_proxy_command(
+                                        settings,
+                                        !allow_proxy_command,
+                                    )
+                                },
+                                cx,
+                            );
+                        }),
+                    )
+                    .into_any_element(),
                     cx,
                 ),
                 div()

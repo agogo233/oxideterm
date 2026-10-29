@@ -12,13 +12,14 @@ struct SftpPaneRenderSnapshot {
 }
 
 struct SftpSurfaceRenderSnapshot {
-    init_error: Option<String>,
+    init_error: Option<SftpViewError>,
     pane_split_ratio: f32,
     active_pane: SftpPane,
     drag_over_pane: Option<SftpPane>,
     focused_input: Option<SftpInput>,
     dialog_open: bool,
     context_menu: Option<SftpContextMenu>,
+    bookmark_menu: Option<SftpBookmarkMenu>,
     local: SftpPaneRenderSnapshot,
     remote: SftpPaneRenderSnapshot,
 }
@@ -33,6 +34,7 @@ impl SftpWorkspaceEntity {
             focused_input: self.focused_input,
             dialog_open: self.dialog.is_some(),
             context_menu: self.context_menu.clone(),
+            bookmark_menu: self.bookmark_menu,
             local: SftpPaneRenderSnapshot {
                 path: self.local_path.clone(),
                 filter: self.local_filter.clone(),
@@ -319,7 +321,11 @@ impl WorkspaceApp {
                                 "sftp.toolbar.go_up",
                                 cx,
                             ))
+                            .child(self.render_sftp_tree_mode_button(cx))
                             .child(self.render_sftp_refresh_button(SftpPane::Remote, cx))
+                            .child(self.render_sftp_terminal_directory_button(cx))
+                            .child(self.render_sftp_sync_terminal_directory_button(cx))
+                            .child(self.render_sftp_bookmarks_button(cx))
                             .child(self.render_sftp_icon_button(
                                 LucideIcon::Upload,
                                 self.i18n.t("sftp.context.upload"),
@@ -409,6 +415,9 @@ impl WorkspaceApp {
             // The menu is window-anchored so it can extend beyond the narrow
             // sidebar without being clipped by the sidebar scroll region.
             root = root.child(self.render_sftp_context_menu(menu, window, false, cx));
+        }
+        if !dialog_open && let Some(menu) = snapshot.bookmark_menu {
+            root = root.child(self.render_sftp_bookmark_menu(menu, window, false, cx));
         }
         if !dialog_open
             && snapshot.focused_input == Some(SftpInput::RemotePath)
@@ -559,6 +568,7 @@ impl WorkspaceApp {
             focused_input,
             dialog_open,
             context_menu,
+            bookmark_menu,
             local,
             remote,
         } = self.sftp_view().read(cx).surface_render_snapshot();
@@ -758,6 +768,9 @@ impl WorkspaceApp {
 
         if !dialog_open && let Some(menu) = context_menu {
             root = root.child(self.render_sftp_context_menu(menu, window, has_background, cx));
+        }
+        if !dialog_open && let Some(menu) = bookmark_menu {
+            root = root.child(self.render_sftp_bookmark_menu(menu, window, has_background, cx));
         }
         if !dialog_open {
             let completion_owner = match focused_input {
@@ -1006,6 +1019,21 @@ impl WorkspaceApp {
                 cx,
             ))
             .child(self.render_sftp_refresh_button(pane, cx));
+
+        if pane == SftpPane::Remote
+            && matches!(
+                self.sftp_view().read(cx).current_remote_id,
+                Some(SftpRemoteId::Node(_))
+            )
+        {
+            header = header
+                .child(self.render_sftp_terminal_directory_button(cx))
+                .child(self.render_sftp_sync_terminal_directory_button(cx));
+        }
+
+        if pane == SftpPane::Remote {
+            header = header.child(self.render_sftp_bookmarks_button(cx));
+        }
 
         if selected_count > 0 {
             let label = match transfer_direction {
@@ -1497,26 +1525,27 @@ impl WorkspaceApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let target = WorkspaceImeTarget::Sftp(self.sftp_surface_id(), input);
-        let control = text_input(
-            &self.tokens,
-            TextInputView {
-                value,
-                placeholder: self.i18n.t(placeholder_key),
-                focused,
-                caret_visible: self.input_caret.visible(),
-                secret: false,
-                selected_all: false,
-                selected_range: self.ime_selected_range_for_target(target, cx),
-                marked_text: self.marked_text_for_target(target, cx),
-            },
-        )
-        .flex_1()
-        .min_w(px(0.0))
-        .h_full()
-        .px(px(0.0))
-        .border_0()
-        .bg(rgba(0x00000000))
-        .text_size(px(SFTP_TEXT_XS));
+        let control = self
+            .workspace_text_input(
+                target,
+                TextInputView {
+                    value,
+                    placeholder: self.i18n.t(placeholder_key),
+                    focused,
+                    caret_visible: self.input_caret.visible(),
+                    secret: false,
+                    selected_all: false,
+                    selected_range: self.ime_selected_range_for_target(target, cx),
+                    marked_text: self.marked_text_for_target(target, cx),
+                },
+            )
+            .flex_1()
+            .min_w(px(0.0))
+            .h_full()
+            .px(px(0.0))
+            .border_0()
+            .bg(rgba(0x00000000))
+            .text_size(px(SFTP_TEXT_XS));
 
         // Path completion reads the same frame-local anchor stored by the shared IME primitive.
         self.text_input_with_workspace_ime(
