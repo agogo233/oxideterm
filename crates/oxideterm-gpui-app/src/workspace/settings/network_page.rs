@@ -791,6 +791,7 @@ impl WorkspaceApp {
                     let required_group = tool_group == oxideterm_public_mcp::ToolGroup::Basic;
                     let mut control = checkbox_with_state(
                         &self.tokens,
+                        label_key,
                         String::new(),
                         if checked {
                             CheckboxState::Checked
@@ -1510,8 +1511,8 @@ impl WorkspaceApp {
         on_toggle: fn(&mut WorkspaceApp, &mut Context<Self>),
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let mut control =
-            checkbox(&self.tokens, String::new(), checked).opacity(if enabled { 1.0 } else { 0.5 });
+        let mut control = checkbox(&self.tokens, label_key, String::new(), checked)
+            .opacity(if enabled { 1.0 } else { 0.5 });
         if enabled {
             control = control.on_mouse_down(
                 MouseButton::Left,
