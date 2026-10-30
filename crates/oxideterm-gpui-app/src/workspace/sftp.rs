@@ -182,7 +182,6 @@ pub(super) enum SftpInput {
     LocalFilter,
     RemoteFilter,
     DialogValue,
-    PreviewFind,
 }
 
 impl SftpInput {
@@ -193,7 +192,6 @@ impl SftpInput {
             Self::LocalFilter => 3,
             Self::RemoteFilter => 4,
             Self::DialogValue => 5,
-            Self::PreviewFind => 6,
         }
     }
 }
@@ -1160,10 +1158,6 @@ pub(super) struct SftpWorkspaceEntity {
     // Right-click "Edit" arms the preview load; the render pass consumes the
     // request only after settled content is text so focus can move into the editor.
     preview_edit_pending: bool,
-    // Editor find bar state mirrors IdeSurface's find panel for the preview editor.
-    preview_find_open: bool,
-    preview_find_query: String,
-    preview_find_case: bool,
     transfers: Vec<SftpTransferItem>,
     transfer_queue_list_state: ListState,
     transfer_queue_list_cache: RefCell<VirtualListSignatureCache>,
@@ -1295,9 +1289,6 @@ impl Default for SftpWorkspaceEntity {
             preview_editor_last_atomic_write: None,
             preview_editor_retry_task: None,
             preview_edit_pending: false,
-            preview_find_open: false,
-            preview_find_query: String::new(),
-            preview_find_case: false,
             transfers: Vec::new(),
             // Transfer queues are fixed-height browser scroll regions; use the
             // shared variable list state so large transfer batches do not build
@@ -1428,7 +1419,6 @@ impl SftpWorkspaceEntity {
             SftpInput::LocalFilter => &self.local_filter,
             SftpInput::RemoteFilter => &self.remote_filter,
             SftpInput::DialogValue => &self.dialog_value,
-            SftpInput::PreviewFind => &self.preview_find_query,
         }
     }
 
@@ -1439,7 +1429,6 @@ impl SftpWorkspaceEntity {
             SftpInput::LocalFilter => &mut self.local_filter,
             SftpInput::RemoteFilter => &mut self.remote_filter,
             SftpInput::DialogValue => &mut self.dialog_value,
-            SftpInput::PreviewFind => &mut self.preview_find_query,
         }
     }
 
@@ -1590,25 +1579,7 @@ impl SftpWorkspaceEntity {
         self.preview_editor_last_saved_mtime = None;
         self.preview_editor_last_atomic_write = None;
         self.preview_editor_retry_task = None;
-        self.close_preview_find();
         self.preview_edit_pending = false;
-    }
-
-    // The find bar only exists inside the editor shell, so both shell exits clear
-    // it before the next preview or editor session reuses the same fields.
-    fn close_preview_find(&mut self) {
-        self.preview_find_query.clear();
-        self.preview_find_open = false;
-        self.preview_find_case = false;
-    }
-
-    // Releases keyboard ownership and the query state. Callers clear the editor
-    // highlight outside this entity borrow so observer callbacks cannot re-enter.
-    pub(in crate::workspace::sftp) fn release_preview_find(&mut self) {
-        if matches!(self.focused_input, Some(SftpInput::PreviewFind)) {
-            self.focused_input = None;
-        }
-        self.close_preview_find();
     }
 
     pub(in crate::workspace::sftp) fn arm_preview_edit(&mut self) {
@@ -2141,18 +2112,12 @@ mod entity_delivery_tests {
     }
 
     #[test]
-    fn preview_reset_clears_find_bar_and_pending_edit() {
+    fn preview_reset_clears_pending_edit() {
         let mut sftp = SftpWorkspaceEntity::default();
-        sftp.preview_find_open = true;
-        sftp.preview_find_query = "needle".to_string();
-        sftp.preview_find_case = true;
         sftp.arm_preview_edit();
 
         sftp.reset_preview_editor();
 
-        assert!(!sftp.preview_find_open);
-        assert!(sftp.preview_find_query.is_empty());
-        assert!(!sftp.preview_find_case);
         assert!(!sftp.preview_edit_request_pending());
     }
 }

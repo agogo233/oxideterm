@@ -352,13 +352,7 @@ impl WorkspaceApp {
             );
             self.overlay.update(cx, |overlay, cx| {
                 overlay.set_control_exit_duration(control_exit_duration, cx);
-                overlay.render_layers(
-                    &tokens,
-                    i18n,
-                    mono_font_family,
-                    show_connection_cards,
-                    cx,
-                )
+                overlay.render_layers(&tokens, i18n, mono_font_family, show_connection_cards, cx)
             })
         };
         let zen_mode = self.settings_store.settings().sidebar_ui.zen_mode;
@@ -479,16 +473,6 @@ impl WorkspaceApp {
                 }
                 if this.active_window_modal_owner(cx).is_some() {
                     // Yield only to the modal's own input or editor, never background routing.
-                    return;
-                }
-                // The find bar is a workspace text input rather than editor
-                // content, so its printable and composition keys must enter the
-                // shared platform-text pipeline before the editor owns the key.
-                if this.normalize_sftp_preview_find_ownership(
-                    &event.keystroke,
-                    window,
-                    cx,
-                ) {
                     return;
                 }
                 if this.search_editor_focused(window, cx) {

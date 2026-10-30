@@ -96,7 +96,7 @@ impl WorkspaceApp {
         .when_some(menu.file.clone(), |menu_el, file| {
             if menu.pane != SftpPane::Remote || file.file_type == SftpFileType::Directory {
                 menu_el
-} else {
+            } else {
                 let can_extract = selected_count == 1
                     && sftp_extract_archive_kind(&file.name).is_some()
                     && !matches!(self.visible_sftp_remote_id(cx), Some(SftpRemoteId::Ftp(_)));
