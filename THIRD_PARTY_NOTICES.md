@@ -552,7 +552,6 @@ This section is a review prompt for binary distribution; it does not replace leg
 | mime | 0.3.17 | MIT, Apache-2.0 | https://crates.io/crates/mime |
 | mime_guess | 2.0.5 | MIT | https://crates.io/crates/mime_guess |
 | minimal-lexical | 0.2.1 | MIT, Apache-2.0 | https://crates.io/crates/minimal-lexical |
-| minisign-verify | 0.2.5 | MIT | https://crates.io/crates/minisign-verify |
 | miniz_oxide | 0.8.9 | MIT, Zlib, Apache-2.0 | https://crates.io/crates/miniz_oxide |
 | mio | 1.2.0 | MIT | https://crates.io/crates/mio |
 | miow | 0.6.1 | MIT, Apache-2.0 | https://crates.io/crates/miow |
