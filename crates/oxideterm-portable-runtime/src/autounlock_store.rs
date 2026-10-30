@@ -16,6 +16,9 @@ use oxideterm_secret_store::NativeSecretStore;
 use zeroize::Zeroizing;
 
 #[cfg(target_os = "windows")]
+use zeroize::Zeroize;
+
+#[cfg(target_os = "windows")]
 use oxideterm_atomic_file::{durable_remove, durable_write};
 
 use super::keystore::PortableKeystoreError;
@@ -37,8 +40,8 @@ fn legacy_store() -> NativeSecretStore {
 
 /// Persists the auto-unlock token. On Windows the token is encrypted with
 /// DPAPI (user scope + application entropy) and written next to the vault;
-/// the legacy keychain entry is left alone because the file write is the only
-/// signal that a migration completed.
+/// the legacy keychain entry is removed afterwards so later launches never
+/// read the credential manager.
 pub fn store_auto_unlock_token(
     vault_path: &Path,
     account: &str,
@@ -46,11 +49,11 @@ pub fn store_auto_unlock_token(
 ) -> Result<(), PortableKeystoreError> {
     #[cfg(target_os = "windows")]
     {
-        // The account name only identifies the legacy keychain entry.
-        let _ = account;
         let blob = protect_token(token)?;
         durable_write(&token_file_path(vault_path), blob.as_slice())
-            .map_err(PortableKeystoreError::Io)
+            .map_err(PortableKeystoreError::Io)?;
+        remove_legacy_entry(account);
+        Ok(())
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -59,6 +62,14 @@ pub fn store_auto_unlock_token(
             .store(account, token)
             .map_err(|_| PortableKeystoreError::CredentialStore)
     }
+}
+
+/// Removes the legacy credential manager entry. The deletion is best effort:
+/// a leftover entry cannot unlock the vault on its own, and `delete_auto_unlock_token`
+/// retries the cleanup when the portable keystore is removed.
+#[cfg(target_os = "windows")]
+fn remove_legacy_entry(account: &str) {
+    let _ = legacy_store().delete(account);
 }
 
 /// Loads the auto-unlock token, returning `None` when automatic unlock is not
@@ -72,8 +83,14 @@ pub fn take_auto_unlock_token(
     #[cfg(target_os = "windows")]
     {
         let path = token_file_path(vault_path);
-        if path.exists() {
-            return read_protected_token(&path);
+        match read_protected_token(&path) {
+            // A readable file is the single source of truth; it is also the
+            // only case that returns without touching the credential manager.
+            Ok(Some(token)) => return Ok(Some(token)),
+            // An absent file is the only case that still consults the legacy
+            // entry; a read or decryption failure is a real error.
+            Ok(None) => {}
+            Err(error) => return Err(error),
         }
         let Some(token) = legacy_store()
             .get(account)
@@ -85,7 +102,7 @@ pub fn take_auto_unlock_token(
         durable_write(&path, blob.as_slice()).map_err(PortableKeystoreError::Io)?;
         // The file is now authoritative; dropping the legacy entry removes the
         // startup Credential Manager read from all subsequent launches.
-        let _ = legacy_store().delete(account);
+        remove_legacy_entry(account);
         Ok(Some(token))
     }
     #[cfg(not(target_os = "windows"))]
@@ -143,11 +160,11 @@ fn token_file_path(vault_path: &Path) -> std::path::PathBuf {
 
 #[cfg(target_os = "windows")]
 fn protect_token(token: &str) -> Result<Zeroizing<Vec<u8>>, PortableKeystoreError> {
-    use windows::core::PCWSTR;
     use windows::Win32::Foundation::{HLOCAL, LocalFree};
     use windows::Win32::Security::Cryptography::{
-        CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB, CryptProtectData,
+        CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptProtectData,
     };
+    use windows::core::PCWSTR;
 
     let mut input = Zeroizing::new(token.as_bytes().to_vec());
     let mut entropy = AUTO_UNLOCK_DPAPI_ENTROPY.to_vec();
@@ -186,17 +203,66 @@ fn protect_token(token: &str) -> Result<Zeroizing<Vec<u8>>, PortableKeystoreErro
 #[cfg(target_os = "windows")]
 fn read_protected_token(path: &Path) -> Result<Option<Zeroizing<String>>, PortableKeystoreError> {
     use windows::Win32::Foundation::{HLOCAL, LocalFree};
-    use windows::Win32::Security::Cryptography::{
-        CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB, CryptUnprotectData,
-    };
 
     let mut blob = match std::fs::read(path) {
         Ok(blob) => blob,
-        // A missing or unreadable file is equivalent to "not configured": the
-        // password unlock stays available.
-        Err(_) => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        // An unreadable file is an I/O problem rather than a missing
+        // credential, so the stored blob stays untouched for a later retry.
+        Err(error) => return Err(PortableKeystoreError::Io(error)),
     };
     let mut entropy = AUTO_UNLOCK_DPAPI_ENTROPY.to_vec();
+    let output_blob = match unprotect_blob(&mut blob, &mut entropy) {
+        Some(output_blob) => output_blob,
+        // A single failure can come from a temporarily unavailable user
+        // profile, so the decryption is retried before the blob is dropped.
+        None => match unprotect_blob(&mut blob, &mut entropy) {
+            Some(output_blob) => output_blob,
+            None => {
+                // The blob does not decrypt on this machine or user (for
+                // example the portable directory was moved). Delete it so later
+                // launches do not repeat the failure, and report the removal.
+                match durable_remove(path) {
+                    Ok(()) => {
+                        return Err(PortableKeystoreError::InvalidAutoUnlockCredential);
+                    }
+                    // If the cleanup fails, surface the I/O error instead of
+                    // claiming a stale blob that still exists was removed.
+                    Err(error) => return Err(PortableKeystoreError::Io(error)),
+                }
+            }
+        },
+    };
+    let plaintext =
+        unsafe { std::slice::from_raw_parts_mut(output_blob.pbData, output_blob.cbData as usize) };
+    let token = match std::str::from_utf8(plaintext) {
+        Ok(text) => Zeroizing::new(text.to_owned()),
+        Err(_) => {
+            plaintext.zeroize();
+            unsafe {
+                let _ = LocalFree(Some(HLOCAL(output_blob.pbData.cast())));
+            }
+            return Err(PortableKeystoreError::InvalidAutoUnlockCredential);
+        }
+    };
+    // The plaintext buffer belongs to DPAPI, so it is wiped before the handle
+    // is released back to the allocator.
+    plaintext.zeroize();
+    unsafe {
+        let _ = LocalFree(Some(HLOCAL(output_blob.pbData.cast())));
+    }
+    Ok(Some(token))
+}
+
+#[cfg(target_os = "windows")]
+fn unprotect_blob(
+    blob: &mut [u8],
+    entropy: &mut [u8],
+) -> Option<windows::Win32::Security::Cryptography::CRYPT_INTEGER_BLOB> {
+    use windows::Win32::Security::Cryptography::{
+        CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptUnprotectData,
+    };
+
     let input_blob = CRYPT_INTEGER_BLOB {
         cbData: blob.len() as u32,
         pbData: blob.as_mut_ptr(),
@@ -217,22 +283,32 @@ fn read_protected_token(path: &Path) -> Result<Option<Zeroizing<String>>, Portab
             &mut output_blob,
         )
     };
-    if unprotected.is_err() {
-        // The blob does not decrypt on this machine or user (for example the
-        // portable directory was moved). Delete it so later launches do not
-        // repeat the failure, and fall back to the password prompt.
-        let _ = durable_remove(path);
-        return Ok(None);
+    unprotected.is_ok().then_some(output_blob)
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod tests {
+    use super::*;
+    use crate::PORTABLE_KEYSTORE_FILENAME;
+
+    #[test]
+    fn auto_unlock_entropy_is_versioned_and_stable() {
+        // The entropy is part of the stored blob format, so changing it would
+        // invalidate every already-migrated portable vault.
+        assert_eq!(
+            AUTO_UNLOCK_DPAPI_ENTROPY,
+            b"OxideTerm.PortableAutoUnlock.v1"
+        );
     }
-    let token = Zeroizing::new(unsafe {
-        String::from_utf8_lossy(std::slice::from_raw_parts(
-            output_blob.pbData,
-            output_blob.cbData as usize,
-        ))
-        .into_owned()
-    });
-    unsafe {
-        let _ = LocalFree(Some(HLOCAL(output_blob.pbData.cast())));
+
+    #[test]
+    fn token_file_replaces_the_vault_extension() {
+        let vault = std::path::Path::new("C:\\OxideTerm").join(PORTABLE_KEYSTORE_FILENAME);
+        let path = token_file_path(&vault);
+        // The directory is preserved and only the extension is swapped.
+        assert_eq!(
+            path,
+            std::path::Path::new("C:\\OxideTerm\\keystore.autounlock")
+        );
     }
-    Ok(Some(token))
 }

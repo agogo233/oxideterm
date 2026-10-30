@@ -141,11 +141,26 @@ fn main() {
     if matches!(
         oxideterm_portable_runtime::portable_bootstrap_status(),
         Ok(oxideterm_portable_runtime::PortableBootstrapStatus::Locked)
-    ) && oxideterm_portable_runtime::keystore::try_portable_auto_unlock().is_err()
-    {
-        // Automatic-unlock failures must retain the normal password fallback.
-        // Avoid including backend details that may identify credential entries.
-        eprintln!("portable automatic unlock is unavailable; password unlock is required");
+    ) {
+        match oxideterm_portable_runtime::keystore::try_portable_auto_unlock() {
+            Ok(oxideterm_portable_runtime::keystore::PortableAutoUnlockOutcome::Unlocked)
+            | Ok(oxideterm_portable_runtime::keystore::PortableAutoUnlockOutcome::NotConfigured) => {
+            }
+            Ok(oxideterm_portable_runtime::keystore::PortableAutoUnlockOutcome::InvalidCredentialRemoved) => {
+                // The stored device credential was unusable and has been
+                // removed, so the portable password is required again.
+                eprintln!(
+                    "portable automatic unlock credential was removed; password unlock is required"
+                );
+            }
+            Err(_) => {
+                // Automatic-unlock failures must retain the normal password fallback.
+                // Avoid including backend details that may identify credential entries.
+                eprintln!(
+                    "portable automatic unlock is unavailable; password unlock is required"
+                );
+            }
+        }
     }
     // Only the primary process may snapshot mutable stores. This still runs
     // before SettingsStore or ConnectionStore can perform migrations.
@@ -465,7 +480,9 @@ fn extract_restart_wait(mut args: Vec<OsString>) -> Option<(u32, Vec<OsString>)>
 #[cfg(target_os = "windows")]
 fn wait_for_process_exit(pid: u32) {
     use windows::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
-    use windows::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject};
+    use windows::Win32::System::Threading::{
+        OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+    };
 
     // Cap the wait so a wedged old instance cannot strand the waiter forever;
     // on timeout the relaunch still happens and the single-instance guard

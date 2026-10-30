@@ -79,7 +79,7 @@ pub enum PortableKeystoreError {
     #[error("Portable automatic unlock credential is invalid")]
     InvalidAutoUnlockCredential,
 
-    #[error("Failed to access the system credential manager")]
+    #[error("Portable automatic unlock storage is unavailable")]
     CredentialStore,
 }
 
@@ -340,14 +340,21 @@ pub fn try_portable_auto_unlock() -> Result<PortableAutoUnlockOutcome, PortableK
         return Ok(PortableAutoUnlockOutcome::NotConfigured);
     }
     let account = portable_auto_unlock_account(&path);
-    let Some(token) = autounlock_store::take_auto_unlock_token(&path, &account)? else {
-        return Ok(PortableAutoUnlockOutcome::NotConfigured);
+    let token = match autounlock_store::take_auto_unlock_token(&path, &account) {
+        Ok(Some(token)) => token,
+        Ok(None) => return Ok(PortableAutoUnlockOutcome::NotConfigured),
+        Err(PortableKeystoreError::InvalidAutoUnlockCredential) => {
+            // The stored credential cannot be decrypted on this machine and was
+            // already removed, so the password prompt stays the fallback.
+            return Ok(PortableAutoUnlockOutcome::InvalidCredentialRemoved);
+        }
+        Err(error) => return Err(error),
     };
     let key = match decode_auto_unlock_key(token.as_str()) {
         Ok(key) => key,
         Err(PortableKeystoreError::InvalidAutoUnlockCredential) => {
             // A stale token must not block the password fallback.
-            let _ = autounlock_store::delete_auto_unlock_token(&path, &account);
+            autounlock_store::delete_auto_unlock_token(&path, &account)?;
             return Ok(PortableAutoUnlockOutcome::InvalidCredentialRemoved);
         }
         Err(error) => return Err(error),
@@ -362,7 +369,7 @@ pub fn try_portable_auto_unlock() -> Result<PortableAutoUnlockOutcome, PortableK
         Err(PortableKeystoreError::DecryptionFailed) => {
             // A stale device credential must not block the password fallback or
             // be retried on every subsequent launch.
-            let _ = autounlock_store::delete_auto_unlock_token(&path, &account);
+            autounlock_store::delete_auto_unlock_token(&path, &account)?;
             Ok(PortableAutoUnlockOutcome::InvalidCredentialRemoved)
         }
         Err(error) => Err(error),
@@ -739,6 +746,27 @@ mod tests {
             key: derive_key(password, &salt, PORTABLE_KEYSTORE_CURRENT_KDF).unwrap(),
             payload: PortableKeystorePayload::default(),
         }
+    }
+
+    #[test]
+    fn auto_unlock_account_is_bound_to_the_vault_location() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = temp.path().join(PORTABLE_KEYSTORE_FILENAME);
+        let second = temp.path().join("other").join(PORTABLE_KEYSTORE_FILENAME);
+
+        // The account identifies one vault, so the same path keeps the same
+        // entry while a different vault never shares it. The joined keystore
+        // does not exist, so `canonicalize` falls back to the path itself and
+        // the expected value is a stable, independently computed form.
+        assert_eq!(
+            portable_auto_unlock_account(&first),
+            format!("v1:{}", first.display())
+        );
+        assert_ne!(
+            portable_auto_unlock_account(&first),
+            portable_auto_unlock_account(&second)
+        );
+        assert!(portable_auto_unlock_account(&first).starts_with("v1:"));
     }
 
     #[test]

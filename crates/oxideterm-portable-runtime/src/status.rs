@@ -95,8 +95,8 @@ pub fn portable_status_snapshot() -> Result<PortableStatusSnapshot, PortableErro
         can_launch_app: status.can_launch_full_app(),
         has_keystore: status.has_keystore(),
         is_unlocked: crate::keystore::is_portable_keystore_unlocked(),
-        // Status inspection remains usable when the desktop credential manager
-        // is temporarily unavailable; the toggle action will surface failure.
+        // Status inspection remains usable when the auto-unlock storage is
+        // temporarily unavailable; the toggle action will surface failure.
         auto_unlock_enabled: info.is_portable
             && status.has_keystore()
             && crate::keystore::portable_auto_unlock_enabled().unwrap_or(false),
