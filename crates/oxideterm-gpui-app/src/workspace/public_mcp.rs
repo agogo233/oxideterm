@@ -70,7 +70,9 @@ pub(in crate::workspace) struct PublicMcpWorkspaceBridge {
     startup_error: Option<String>,
     server: Option<PublicMcpHttpServer>,
     port_draft: String,
-    client_registry_ready: bool,
+    // The registry failure is immutable for the bridge lifetime, so it stays
+    // the root cause even when later actions overwrite the shared error slot.
+    registry_error: Option<String>,
     state: Arc<PublicMcpState>,
     settings_path: PathBuf,
     receiver: Option<DomainRequestReceiver>,
@@ -338,7 +340,6 @@ impl PublicMcpWorkspaceBridge {
             Ok(clients) => (Arc::new(clients), None),
             Err(error) => (Arc::new(ClientRegistry::default()), Some(error.to_string())),
         };
-        let client_registry_ready = registry_error.is_none();
         let (broker, receiver) = DomainBroker::channel(PUBLIC_MCP_BROKER_CAPACITY);
         let state = Arc::new(PublicMcpState {
             clients,
@@ -352,10 +353,10 @@ impl PublicMcpWorkspaceBridge {
             .unwrap_or(0);
         let mut bridge = Self {
             endpoint_url: None,
-            startup_error: registry_error,
+            startup_error: registry_error.clone(),
             server: None,
             port_draft: preferred_port.to_string(),
-            client_registry_ready,
+            registry_error,
             state,
             settings_path: settings_path.to_path_buf(),
             receiver: Some(receiver),
@@ -378,12 +379,9 @@ impl PublicMcpWorkspaceBridge {
         // The endpoint only listens while at least one enabled client can use
         // it; with no registered clients the workspace starts without a
         // loopback listener at all.
-        if client_registry_ready && bridge.has_enabled_clients() {
+        if bridge.registry_error.is_none() && bridge.has_enabled_clients() {
             if let Err(error) = bridge.start_listener(runtime) {
-                // A registry failure takes precedence over a listener failure.
-                if bridge.startup_error.is_none() {
-                    bridge.startup_error = Some(error.to_string());
-                }
+                bridge.startup_error = Some(error.to_string());
             }
         }
         bridge
@@ -394,15 +392,34 @@ impl PublicMcpWorkspaceBridge {
     }
 
     fn has_enabled_clients(&self) -> bool {
-        self.state.clients.list().iter().any(|client| client.enabled)
+        self.state
+            .clients
+            .list()
+            .iter()
+            .any(|client| client.enabled)
     }
 
     /// Binds the loopback endpoint when it is not running yet. The preferred
     /// port comes from the endpoint state file; automatic mode falls back to an
     /// ephemeral port when the previous discovery port is still unavailable.
     fn start_listener(&mut self, runtime: &tokio::runtime::Handle) -> std::io::Result<()> {
-        if self.server.is_some() || !self.client_registry_ready {
+        if let Some(registry_error) = self.registry_error.clone() {
+            // Without a readable registry no client can be authorized, so the
+            // endpoint stays offline and the root cause reaches the settings page.
+            return Err(std::io::Error::other(registry_error));
+        }
+        if self
+            .server
+            .as_ref()
+            .is_some_and(PublicMcpHttpServer::is_running)
+        {
             return Ok(());
+        }
+        if self.server.is_some() {
+            // The worker can end on its own; release the stale handle so the
+            // endpoint can bind again.
+            self.server = None;
+            self.endpoint_url = None;
         }
         let endpoint_state_path = public_mcp_endpoint_state_path(&self.settings_path);
         let endpoint_state = read_endpoint_state(&endpoint_state_path);
@@ -415,15 +432,16 @@ impl PublicMcpWorkspaceBridge {
         } else {
             preferred_port
         };
-        let started =
-            start_http_server(runtime, self.state.clone(), initial_port).or_else(|first_error| {
+        let started = bind_loopback_endpoint(runtime, self.state.clone(), initial_port).or_else(
+            |first_error| {
                 // Only automatic mode may move away from the previous discovery port.
                 if preferred_port != 0 || initial_port == 0 {
                     Err(first_error)
                 } else {
-                    start_http_server(runtime, self.state.clone(), 0)
+                    bind_loopback_endpoint(runtime, self.state.clone(), 0)
                 }
-            })?;
+            },
+        )?;
         let endpoint_url = started.endpoint_url();
         // A persistence failure must not hide a healthy live endpoint.
         let _ = persist_endpoint_state(&endpoint_state_path, started.port(), preferred_port);
@@ -465,10 +483,8 @@ impl PublicMcpWorkspaceBridge {
         runtime: &tokio::runtime::Handle,
         preferred_port: u16,
     ) -> std::io::Result<()> {
-        if !self.client_registry_ready {
-            return Err(std::io::Error::other(
-                "The Public MCP client registry is unavailable",
-            ));
+        if let Some(registry_error) = self.registry_error.clone() {
+            return Err(std::io::Error::other(registry_error));
         }
         let endpoint_state_path = public_mcp_endpoint_state_path(&self.settings_path);
         if !self.has_enabled_clients() {
@@ -529,6 +545,11 @@ impl PublicMcpWorkspaceBridge {
         label: String,
         approval_mode: ClientApprovalMode,
     ) -> Result<(), String> {
+        if let Some(registry_error) = self.registry_error.clone() {
+            // A client that cannot be persisted would vanish on the next start
+            // and could never reach the endpoint, so the action is refused.
+            return Err(registry_error);
+        }
         let registered = self
             .state
             .clients
@@ -562,7 +583,11 @@ impl PublicMcpWorkspaceBridge {
             true,
         );
         self.revealed_credential = Some(registered.credential);
-        self.startup_error = None;
+        // The registry failure is the root cause of an offline endpoint, so it
+        // must survive a client creation that cannot start the listener.
+        if self.registry_error.is_none() {
+            self.startup_error = None;
+        }
         // A registration failure keeps the endpoint offline; a listener failure
         // only surfaces as startup_error while the client stays registered.
         if let Err(error) = self.start_listener(runtime) {
@@ -581,6 +606,11 @@ impl PublicMcpWorkspaceBridge {
         client_ref: &ClientRef,
         enabled: bool,
     ) -> Result<(), String> {
+        if let Some(registry_error) = self.registry_error.clone() {
+            // Without a persisted registry the authorization state cannot be
+            // restored, so the change is refused instead of silently lost.
+            return Err(registry_error);
+        }
         let result = self
             .state
             .clients
@@ -1141,7 +1171,8 @@ impl WorkspaceApp {
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
         let runtime = self.forwarding_runtime.handle().clone();
-        self.public_mcp.set_client_enabled(&runtime, client_ref, enabled)?;
+        self.public_mcp
+            .set_client_enabled(&runtime, client_ref, enabled)?;
         if !enabled {
             self.revoke_public_mcp_client_runtime(client_ref, cx);
             self.public_mcp.remove_client_connection_refs(client_ref);
@@ -3064,4 +3095,31 @@ fn persist_endpoint_state(path: &Path, port: u16, preferred_port: u16) -> std::i
     })
     .map_err(std::io::Error::other)?;
     oxideterm_atomic_file::durable_write(path, &bytes)
+}
+
+// A stopped endpoint releases its listening socket asynchronously, so a rebind
+// on the same fixed port can briefly collide with the retired worker. The
+// retry budget stays small because it runs on the UI thread.
+const LISTENER_BIND_ATTEMPTS: usize = 5;
+const LISTENER_BIND_RETRY_DELAY: Duration = Duration::from_millis(20);
+
+fn bind_loopback_endpoint(
+    runtime: &tokio::runtime::Handle,
+    state: Arc<PublicMcpState>,
+    port: u16,
+) -> std::io::Result<PublicMcpHttpServer> {
+    let mut attempt = 0;
+    loop {
+        match start_http_server(runtime, state.clone(), port) {
+            Ok(server) => return Ok(server),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::AddrInUse
+                    && attempt < LISTENER_BIND_ATTEMPTS =>
+            {
+                attempt += 1;
+                std::thread::sleep(LISTENER_BIND_RETRY_DELAY);
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }

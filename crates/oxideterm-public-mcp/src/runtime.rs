@@ -39,6 +39,11 @@ impl PublicMcpHttpServer {
         self.address.port()
     }
 
+    /// Reports whether the accept loop is still serving requests.
+    pub fn is_running(&self) -> bool {
+        !self.worker.is_finished()
+    }
+
     pub async fn shutdown(mut self) {
         self.cancellation.cancel();
         let _ = (&mut self.worker).await;
