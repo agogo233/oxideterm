@@ -1206,11 +1206,7 @@ impl WorkspaceOverlayEntity {
         layers
     }
 
-    fn render_toasts(
-        &self,
-        tokens: &ThemeTokens,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
+    fn render_toasts(&self, tokens: &ThemeTokens, cx: &mut Context<Self>) -> Option<AnyElement> {
         if self.standard_toasts.is_empty() && self.plugin_progress_toasts.is_empty() {
             return None;
         }

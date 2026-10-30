@@ -337,7 +337,11 @@ impl WorkspaceApp {
     ) -> AnyElement {
         self.workspace_toolbar_action_button(
             label,
-            Some(Self::render_lucide_icon(icon, 14.0, rgb(self.tokens.ui.text))),
+            Some(Self::render_lucide_icon(
+                icon,
+                14.0,
+                rgb(self.tokens.ui.text),
+            )),
             ToolbarButtonOptions {
                 button: ButtonOptions {
                     variant: ButtonVariant::Outline,

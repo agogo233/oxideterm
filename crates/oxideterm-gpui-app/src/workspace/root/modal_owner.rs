@@ -729,7 +729,7 @@ impl WorkspaceApp {
             version_migration_open: self.version_migration.open,
             onboarding_open: self.onboarding.open,
             shortcuts_open: self.shortcuts_modal.open,
-app_lock_dialog_open: self.app_lock.dialog.is_some(),
+            app_lock_dialog_open: self.app_lock.dialog.is_some(),
             mermaid_zoom_open: self.mermaid_zoom.as_ref().is_some_and(|state| {
                 self.window_registry
                     .handle_for_role(window_registry::WindowRole::Main)

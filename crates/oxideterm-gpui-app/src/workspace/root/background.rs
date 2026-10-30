@@ -597,7 +597,7 @@ pub(in crate::workspace) fn workspace_background_image_layer(
     background: TerminalBackgroundPreferences,
     image: Option<Arc<RenderImage>>,
 ) -> AnyElement {
-let image = if background.fit == TerminalBackgroundFit::Tile && background.blur <= 0.01 {
+    let image = if background.fit == TerminalBackgroundFit::Tile && background.blur <= 0.01 {
         gpui::img(background.path.clone()).with_fallback(|| div().size_full().into_any_element())
     } else if let Some(image) = image {
         gpui::img(image)
@@ -619,7 +619,7 @@ let image = if background.fit == TerminalBackgroundFit::Tile && background.blur 
         .bottom_0()
         .overflow_hidden()
         .child(
-image
+            image
                 .size_full()
                 .object_fit(workspace_background_object_fit(background.fit))
                 .opacity(background.opacity.clamp(0.0, 1.0)),

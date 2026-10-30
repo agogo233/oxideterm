@@ -748,12 +748,7 @@ fn settings_search_specs() -> Vec<SettingsSearchEntrySpec> {
                 "settings_view.keybindings.search_placeholder",
             ],
         ),
-        settings_search_entry(
-            SettingsTab::Help,
-            0,
-            "settings_view.help.version_info",
-            &[],
-        ),
+        settings_search_entry(SettingsTab::Help, 0, "settings_view.help.version_info", &[]),
         settings_search_entry(
             SettingsTab::Help,
             1,
