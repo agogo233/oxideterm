@@ -1,6 +1,6 @@
 ---
 name: oxideterm-release
-description: Prepare, publish, or recover canceled OxideTerm stable, beta, or GPUI preview releases by deriving changelog content from the previous tag, selecting the requested release-note detail level, running the repository version-bump script, validating channel-specific notes and fork ownership, committing, pushing, creating the correct annotated tag, and dispatching the main-scoped native package workflow. Use when the user asks to upgrade the OxideTerm version, prepare a release, write a release changelog, commit and push a release, create a release tag, republish the same version after its release workflow was canceled, or repair release assets from a completed Native Package run.
+description: Prepare, publish, or recover canceled OxideTerm stable, beta, or GPUI preview releases by deriving changelog content from the previous tag, selecting the requested release-note detail level, running the repository version-bump script, validating channel-specific notes and fork ownership, committing, pushing, creating the correct annotated tag, building the Windows portable package, and publishing the release assets. Use when the user asks to upgrade the OxideTerm version, prepare a release, write a release changelog, commit and push a release, create a release tag, republish the same version after its release workflow was canceled, or repair release assets.
 ---
 
 # OxideTerm Release
@@ -26,7 +26,7 @@ Infer the channel only when the version is unambiguous. Ask before publishing if
 | Beta | `X.Y.Z-beta.N` | `vX.Y.Z-beta.N` | `.github/release-notes/beta-changelog.md` | `.github/release-notes/beta.md` |
 | GPUI preview | `X.Y.Z-gpui-preview.N` | `gpui-vX.Y.Z-gpui-preview.N` | `.github/release-notes/gpui-preview-changelog.md` | `.github/release-notes/gpui-preview.md` |
 
-Do not invent another tag prefix. The native package workflow receives the existing tag through its `release_tag` dispatch input and selects release notes from that tag.
+Do not invent another tag prefix. Release notes are selected from the existing tag, and the packaging workflow builds the commit that the tag points to.
 
 ## Workflow
 
@@ -261,51 +261,60 @@ git tag -a <tag> -m "OxideTerm <version>"
 git push origin <tag>
 ```
 
-Afterward, verify both refs, then dispatch `native-package.yml` from `main`. Passing the existing release tag explicitly keeps all release caches in the default-branch scope while the workflow checks out and packages the tagged commit:
+Afterward, verify both refs, then build the release artifacts. This fork publishes the Windows x64 portable package through `.github/workflows/windows-x64-portable.yml`, which packages and verifies the selected commit and uploads the portable directory as a workflow artifact:
 
 ```bash
 git rev-parse HEAD
 git rev-list -n 1 <tag>
 git ls-remote --heads origin <branch>
 git ls-remote --tags origin refs/tags/<tag> refs/tags/<tag>^{}
-gh workflow run native-package.yml \
+gh workflow run windows-x64-portable.yml \
   --repo <owner/repo> \
-  --ref main \
-  -f release_tag=<tag> \
-  -f upload_release=true
+  --ref main
 git status --short --branch
 ```
 
-Find the new `workflow_dispatch` run and verify that its `headSha` is the dispatched branch commit and its display title names the intended tag:
+Find the new `workflow_dispatch` run and verify that its `headSha` matches the release commit:
 
 ```bash
 gh run list \
   --repo <owner/repo> \
-  --workflow native-package.yml \
+  --workflow windows-x64-portable.yml \
   --branch main \
   --event workflow_dispatch \
   --limit 10 \
   --json databaseId,status,conclusion,headSha,displayTitle,url
 ```
 
-The tag does not trigger packaging by itself. Do not manually create a GitHub Release; the explicitly dispatched workflow publishes it after validating that the tag exists in the selected main-branch history and that its version matches the tagged workspace.
+The tag does not trigger packaging by itself, and the workflow does not create a GitHub Release. After the run succeeds, download the artifact, generate the checksum list with the platform checksum tool (`sha256sum` on Linux, `Get-FileHash` on Windows), and publish the release explicitly:
 
-The first release dispatched after this migration seeds the main-scoped cache for each target. Later releases can restore compatible dependency artifacts from those keys even though their release tags and lockfile hashes differ.
+```bash
+gh run download <run-id> \
+  --repo <owner/repo> \
+  --name OxideTerm-windows-x64-portable \
+  --dir dist/portable
+gh release create <tag> dist/portable/* sha256sums.txt \
+  --repo <owner/repo> \
+  --title "OxideTerm <version>" \
+  --notes-file <composed-release-notes>
+```
 
-## Recover a canceled release dispatch
+Confirm the published assets with `gh release view <tag> --repo <owner/repo>`.
 
-Use this procedure only when the maintainer explicitly requests republishing the same version. The earlier main-scoped Native Package dispatch must have been canceled before it created a published GitHub Release. If `gh release view <tag>` finds a published release or release assets may already have reached users, keep the tag immutable and publish the next patch version instead.
+## Recover an interrupted publish
+
+Use this procedure only when the maintainer explicitly requests republishing the same version. The earlier packaging run must have been canceled or failed before the GitHub Release was created. If `gh release view <tag>` finds a published release or release assets may already have reached users, keep the tag immutable and publish the next patch version instead.
 
 1. Fetch and record both the remote annotated tag object and its peeled commit before changing anything:
 
 ```bash
 git fetch origin --tags
 git ls-remote --tags origin refs/tags/<tag> refs/tags/<tag>^{}
-gh run list --repo <owner/repo> --workflow native-package.yml --branch main --event workflow_dispatch --limit 10
+gh run list --repo <owner/repo> --workflow windows-x64-portable.yml --limit 10
 gh release view <tag> --repo <owner/repo>
 ```
 
-Treat a missing GitHub Release as expected only when the packaging run was canceled. When the existing tag already peels to the intended release commit, leave it unchanged and dispatch `native-package.yml` again from `main` with the same `release_tag`. Do not use **Re-run jobs** after correcting release code or moving a tag: GitHub retains the canceled run's original workflow revision and inputs.
+Treat a missing GitHub Release as expected only when the packaging run was canceled or failed. When the existing tag already peels to the intended release commit, leave it unchanged and dispatch `windows-x64-portable.yml` again from `main`.
 
 2. If the tag must move because the release commit itself changed, obtain explicit authorization to move it. Prepare and validate the corrected release normally, commit and push the branch, then re-fetch and verify that the remote tag object still equals the value recorded in step 1.
 
@@ -318,44 +327,46 @@ git push --force-with-lease=refs/tags/<tag>:<old-tag-object> origin refs/tags/<t
 
 Never delete the remote tag before recreating it; deletion creates an unprotected interval and loses the comparison guard. If the lease fails, fetch and stop to inspect who changed the tag.
 
-4. Verify that the peeled tag resolves to the intended release commit, then dispatch a new main-scoped packaging run and confirm its display title contains the expected tag and its `headSha` matches the selected publishing branch revision:
+4. Verify that the peeled tag resolves to the intended release commit, then dispatch a new packaging run and confirm its `headSha` matches the selected publishing branch revision:
 
 ```bash
 git rev-parse <release-commit>
 git rev-list -n 1 <tag>
 git ls-remote --heads origin <branch>
 git ls-remote --tags origin refs/tags/<tag> refs/tags/<tag>^{}
-gh workflow run native-package.yml \
+gh workflow run windows-x64-portable.yml \
   --repo <owner/repo> \
-  --ref main \
-  -f release_tag=<tag> \
-  -f upload_release=true
-gh run list --repo <owner/repo> --workflow native-package.yml --branch main --event workflow_dispatch --limit 10
+  --ref main
+gh run list --repo <owner/repo> --workflow windows-x64-portable.yml --branch main --event workflow_dispatch --limit 10
 ```
 
-Report the new run URL and status. Do not keep monitoring it unless the user explicitly asks.
+Report the new run URL and status, then publish the release from the fresh artifact as described above. Do not keep monitoring it unless the user explicitly asks.
 
-## Repair release assets from a completed build
+## Rebuild release assets
 
-Use this procedure when packaging failed on one or more platforms **after** a prior `Native Package` run already built the successful platforms, or when release assets uploaded incompletely and the GitHub Release exists. It reuses the finished run's artifacts without rebuilding anything.
+Use this procedure when the release exists but its assets are incomplete or wrong. This fork has no repair workflow, so the package is rebuilt and the assets are replaced explicitly.
 
-Prerequisites:
-
-- The target release exists (`gh release view <tag>` succeeds).
-- A `Native Package` workflow run produced `OxideTerm-*` artifacts for at least the platforms you want to repair. Main-scoped dispatches are the normal source.
-
-1. Find the completed run id for the artifacts to republish:
+1. Confirm the published release and its current assets:
 
 ```bash
-gh run list --repo <owner/repo> --workflow native-package.yml --limit 10
+gh release view <tag> --repo <owner/repo>
 ```
 
-2. Open **Actions → Repair Release Assets → Run workflow** and enter:
+2. Dispatch `windows-x64-portable.yml` from `main`, wait for the successful run, and download its artifact:
 
-- `tag`: the release tag to repair, for example `v2.0.15`.
-- `run_id`: the run id from step 1.
+```bash
+gh workflow run windows-x64-portable.yml --repo <owner/repo> --ref main
+gh run download <run-id> \
+  --repo <owner/repo> \
+  --name OxideTerm-windows-x64-portable \
+  --dir dist/portable
+```
 
-3. The workflow validates the tag format, confirms the release exists, downloads `OxideTerm-*` artifacts from that run, re-signs every asset with the minisign key, regenerates `sha256sums.txt`, and uploads with `update_release: true` (overwrite in place).
+3. Replace the assets and regenerate the checksum list:
+
+```bash
+gh release upload <tag> dist/portable/* sha256sums.txt --repo <owner/repo> --clobber
+```
 
 4. Verify the repaired assets on the release page or with:
 
@@ -363,13 +374,13 @@ gh run list --repo <owner/repo> --workflow native-package.yml --limit 10
 gh release view <tag> --repo <owner/repo>
 ```
 
-If the release does not exist yet, do not use this workflow — dispatch `native-package.yml` from `main` with the existing `release_tag` instead. If a platform failed during the build itself (no artifact was produced), the repair workflow cannot conjure it: re-run only the failed matrix job from the `Native Package` run, or dispatch the workflow again. The `native-package.yml` release job is idempotent (`update_release: true`) and caches survive failures (`cache-on-failure: true`), so a single-platform retry resumes incrementally.
+If the packaging run failed before producing an artifact, no asset exists for that build: fix the build and dispatch the workflow again.
 
 ## Failure handling
 
 - If the branch push fails, do not create or push the tag.
 - If the branch push succeeds but tag creation or push fails, do not dispatch packaging and report that partial state precisely.
-- If the tag push succeeds but the Native Package dispatch fails, leave the immutable tag in place, report the partial state, and retry the same explicit dispatch after resolving the workflow problem.
+- If the tag push succeeds but the packaging dispatch fails, leave the immutable tag in place, report the partial state, and retry the same explicit dispatch after resolving the workflow problem.
 - If the tag already exists unexpectedly, compare its target with the intended commit and stop. Never retag without the maintainer's explicit same-version recovery authorization.
 - If new commits or worktree changes appear during preparation, re-read status and regenerate the release range before publishing.
 - If channel detection, previous-tag selection, or release scope is ambiguous, ask rather than guessing.

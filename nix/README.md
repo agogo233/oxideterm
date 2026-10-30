@@ -58,12 +58,11 @@ Whenever modifying, bumping, or adding a Git dependency in `Cargo.toml`:
 
 ## Package Verification
 
-The independent [Nix Package workflow](../.github/workflows/nix-package.yml) runs the package build and flake checks with a 90-minute timeout.
+The Nix package build is not automated in this fork. Verify it locally before a release or when a Nix expression, the flake lock, a crate manifest, or the Cargo lock changes:
 
-It runs automatically for non-draft pull requests targeting `main` or `experiment/rust-native-v2` when any of these files change:
+```sh
+nix build .#oxideterm -L --show-trace
+nix flake check -L
+```
 
-- Nix expressions under `nix/`, `flake.nix`, or `flake.lock`.
-- The root `Cargo.toml`, `Cargo.lock`, or any crate's `Cargo.toml` under `crates/`.
-- `.github/workflows/nix-package.yml`.
-
-Before a release, or when direct pushes or other source or build changes need Nix verification, run **Nix Package** manually from GitHub Actions and select the branch to check. Pushes do not trigger this workflow. The workflow validates the build and Git dependency hashes.
+Both commands must complete cleanly. The Nix expression builds with the repository `Cargo.lock`, so a stale lock file fails the build; keep the lock file in sync with the manifests.

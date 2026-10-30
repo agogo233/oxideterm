@@ -47,11 +47,9 @@ STABLE_APP_IDENTIFIER = "com.oxideterm.app"
 APP_BIN = "oxideterm-native"
 CLI_BIN = "oxideterm"
 CONNECTION_URI_SCHEMES = ("ssh", "telnet", "mosh", "rdp", "vnc")
-HELPER_BINS = ("oxideterm-rdp-helper", "oxideterm-vnc-helper")
 AGENT_RESOURCE_DIR = "agents"
 AGENT_BINARY_PREFIX = "oxideterm-agent-"
 ENCODED_AGENT_SUFFIX = ".b64"
-HELPER_RESOURCE_DIR = "helpers"
 PORTABLE_MARKER_FILENAME = "portable"
 PORTABLE_DATA_DIR = "data"
 PORTABLE_PLUGINS_DIR = "plugins"
@@ -485,30 +483,6 @@ def build_cli(target: str, target_was_explicit: bool) -> Path:
     make_executable(dest)
     print(f"CLI artifact written to {dest}")
     return dest
-
-
-def build_helper(package: str, target: str, target_was_explicit: bool) -> Path:
-    args = ["cargo", "build", "-p", package, "--release"]
-    if target_was_explicit:
-        args.extend(["--target", target])
-    run(args, env=native_cargo_build_env(target))
-
-    source = release_binary(target, target_was_explicit, package)
-    if not source.exists():
-        raise FileNotFoundError(f"helper binary not found: {source}")
-
-    out_dir = RESOURCE_DIR / HELPER_RESOURCE_DIR / target
-    out_dir.mkdir(parents=True, exist_ok=True)
-    dest = out_dir / source.name
-    shutil.copy2(source, dest)
-    make_executable(dest)
-    print(f"Remote desktop helper artifact written to {dest}")
-    return dest
-
-
-def build_remote_desktop_helpers(target: str, target_was_explicit: bool) -> None:
-    for package in HELPER_BINS:
-        build_helper(package, target, target_was_explicit)
 
 
 def build_app(target: str, target_was_explicit: bool) -> Path:

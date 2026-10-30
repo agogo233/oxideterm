@@ -149,6 +149,10 @@ rustPlatform.buildRustPackage {
     "--bins"
   ];
 
+  # The derivation only ships binaries, and the workspace test suite needs a
+  # desktop session that the sandbox does not provide. Run the tests locally.
+  doCheck = false;
+
   strictDeps = true;
   LIBCLANG_PATH = "${libclang.lib}/lib";
 

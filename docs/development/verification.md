@@ -1,6 +1,6 @@
 # Verification Matrix
 
-Run the smallest checks that prove the changed contract, then expand only when the change crosses a repository boundary. CI is the source of truth for the full matrix in [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) and [`.github/workflows/platform-checks.yml`](../../.github/workflows/platform-checks.yml).
+Run the smallest checks that prove the changed contract, then expand only when the change crosses a repository boundary. The lightweight [`.github/workflows/checks.yml`](../../.github/workflows/checks.yml) workflow is the source of truth for the automated gate: Rust formatting, locale completeness, and the repository script tests. The Windows portable package is built by [`.github/workflows/windows-x64-portable.yml`](../../.github/workflows/windows-x64-portable.yml).
 
 ## Baseline
 
@@ -80,16 +80,13 @@ Do not add tests merely to increase coverage. Add a focused regression test when
 
 ## CI Mapping
 
-The primary CI workflow runs workspace check, formatting, workspace tests, locale auditing, packaging-helper tests, and repository-policy tests. Its Ubuntu job also compiles the Linux GPUI backend and application; there is no second Linux-only compile job. Native platform CI separately checks Windows and macOS GPUI backends and the application, including the Windows shader, message, text and ConPTY tests. A green Linux workspace job therefore does not establish Windows or macOS native behavior.
+The automated gate is deliberately lightweight. [`.github/workflows/checks.yml`](../../.github/workflows/checks.yml) runs Rust formatting, locale auditing, packaging-helper tests, and repository-policy tests. It does not compile the workspace, so a green run does not establish that the application builds on any platform.
 
 CI uses the following execution policy:
 
-- Ready code PRs retain the full Linux workspace checks and the path-selected Windows/macOS, Nix, background-media and remote-agent checks.
-- Documentation-only changes skip Rust setup, caches, system dependencies, compilation and tests in triggered PR and push runs. Locale and repository-policy checks still run. `scripts/ci/rust-scope.cjs` recognizes `docs/`, root Markdown, `.github/` Markdown and conventional README/CHANGELOG/CONTRIBUTING/AGENTS Markdown files. Other files, including Markdown fixtures under crates, conservatively retain Rust checks.
-- Draft PRs skip heavy jobs. `ready_for_review` starts them; `converted_to_draft` cancels superseded work through the existing concurrency groups. Lightweight locale and policy checks continue to run.
-- Pushes to `main` and `experiment/rust-native-v2` retain the primary CI workflow's path triggers, Linux workspace validation and lightweight checks. Scope compares the push event's `before` commit with the checkout, fetching that commit when shallow history omits it. New branches receive full validation.
-- Windows/macOS, Nix, background-media and remote-agent workflows run on relevant ready PRs or manual dispatch, not again on push. For direct pushes that need these checks, manually dispatch the relevant workflow on the pushed branch. Run the applicable full checks before release. Manual runs always retain full validation.
+- Pull requests to `main` and pushes to `main` run the same lightweight gate; pushes are additionally limited to Rust sources, scripts, manifests, and the workflow itself.
+- The gate is skipped for draft pull requests only through the `pull_request` activity types; `ready_for_review` starts it and `converted_to_draft` cancels superseded work through the concurrency group.
+- Newer commits replace stale checks for the same ref, so a force-push cancels the previous run of that ref.
+- The Windows portable package is built by [`.github/workflows/windows-x64-portable.yml`](../../.github/workflows/windows-x64-portable.yml) on pushes to `main` and on manual dispatch. It compiles the application and verifies the package contents, so it is the only automated build in this fork.
 
-The required checks keep the names `Rust workspace (check + fmt + test)` and `i18n completeness`. The Rust workflow still starts for documentation PRs and completes its scope step instead of omitting a required status through a workflow-level path filter. PR scope is determined from the checked-out merge commit against its first parent, with both parents fetched. Deleted paths and both sides of renames participate; a failed diff fails the job rather than skipping validation.
-
-The independent [Nix Package workflow](../../.github/workflows/nix-package.yml) runs `nix build .#oxideterm -L --show-trace` and `nix flake check -L` with a 90-minute timeout. It runs automatically on ready PRs when Nix expressions, the flake lock, Cargo manifests, the Cargo lock, or the workflow itself change. Run it manually before a release or when direct pushes or other changes need Nix verification. See the [Nix packaging guide](../../nix/README.md#package-verification) for the trigger paths and manual workflow.
+Compilation, workspace tests, Nix builds, and native platform checks are not automated here. Run them locally before a release, and state plainly which of them were executed.

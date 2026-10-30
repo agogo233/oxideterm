@@ -34,37 +34,42 @@ This page is for maintainers preparing native releases. Contributors should not 
 
 ## Publish
 
-The `Native Package` workflow is the publishing authority. Dispatch it from `main` with the existing release tag and enable release upload. The workflow validates that the tag belongs to `main`, that its version matches the tagged workspace manifest, builds the native platform matrix, composes notes from the selected channel template and changelog, uploads artifacts, and verifies the final asset set.
+The Windows x64 portable package is built by `.github/workflows/windows-x64-portable.yml`. It packages the selected commit, verifies the package contents, and uploads the portable directory as a workflow artifact. It does not create a GitHub Release.
 
-The tag does not publish by itself. After pushing the annotated tag, dispatch the workflow explicitly:
+The tag does not publish by itself. After pushing the annotated tag, dispatch the packaging workflow explicitly:
 
 ```sh
-gh workflow run native-package.yml \
-  --repo AnalyseDeCircuit/oxideterm \
-  --ref main \
-  -f release_tag=<tag> \
-  -f upload_release=true
+gh workflow run windows-x64-portable.yml \
+  --repo <owner/repo> \
+  --ref main
 ```
 
-Do not manually create a GitHub Release. The workflow checks out the tagged commit and publishes the release only after its validation steps pass.
+After the run succeeds, download the artifact, generate the checksum list, and publish the release explicitly:
+
+```sh
+gh run download <run-id> --repo <owner/repo> --name OxideTerm-windows-x64-portable --dir dist/portable
+gh release create <tag> dist/portable/* sha256sums.txt \
+  --repo <owner/repo> \
+  --title "OxideTerm <version>" \
+  --notes-file <composed-release-notes>
+```
 
 ## Failure Boundaries
 
 - Distinguish compilation, packaging, binary verification, and upload failures before changing code. macOS packages use SDK 26.2 from Xcode 26.3 with a 13.0 deployment target for both architectures. Keep the Mach-O deployment target and `LSMinimumSystemVersion` aligned through `scripts/release/package_native.py`; changing only the plist does not change the executable.
-- A packaging fix must be present in the tagged source used by a new dispatch. Re-running a job against an old commit does not pick up a later fix.
+- A packaging fix must be present in the commit used by a new dispatch. Re-running a job against an old commit does not pick up a later fix.
 - If a tag exists unexpectedly, compare its annotated object and peeled commit with the intended release commit, then stop.
-- If a packaging dispatch was canceled before a GitHub Release exists and the tag still points at the intended commit, leave the tag unchanged and dispatch a new `Native Package` run with the same tag.
+- If a packaging dispatch was canceled before a GitHub Release exists and the tag still points at the intended commit, leave the tag unchanged and dispatch a new packaging run.
 - Moving an existing tag requires explicit authorization and a force-with-lease update against the recorded annotated tag object. Never delete the remote tag as a shortcut.
 - If a GitHub Release already exists or release assets may have reached users, keep the tag immutable and publish the next patch version.
-- If a completed packaging run produced artifacts but uploaded them incompletely, use the repair workflow with its original run identifier. It can republish existing artifacts; it cannot build a platform that never produced one.
+- If a completed packaging run produced artifacts but the release upload was incomplete, rebuild the package and replace the assets with `gh release upload --clobber`. A failed build produces no artifact, so fix the build and dispatch the workflow again.
 
 ## Verify And Recover
 
-- Confirm the published tag, release notes, checksums, signatures when configured, and all expected platform assets.
-- Use [`.github/workflows/repair-release-assets.yml`](../../.github/workflows/repair-release-assets.yml) only for artifacts produced by a completed Native Package run.
+- Confirm the published tag, release notes, checksums, and all expected assets.
 - Keep stable, beta, and GPUI preview channel notes separate. Do not publish a preview as a stable release.
 - If a release must be rebuilt, inspect the existing tag and release assets before making any destructive GitHub change.
 
 For a release that has already reached users, prefer a new patch release to retagging. The recovery path exists only for explicitly authorized, unpublished same-version repairs.
 
-The detailed packaging implementation lives in `scripts/release/` and [`.github/workflows/native-package.yml`](../../.github/workflows/native-package.yml). Treat those files as the executable source of truth when this guide and workflow behavior differ.
+The detailed packaging implementation lives in `scripts/release/` and [`.github/workflows/windows-x64-portable.yml`](../../.github/workflows/windows-x64-portable.yml). Treat those files as the executable source of truth when this guide and workflow behavior differ.

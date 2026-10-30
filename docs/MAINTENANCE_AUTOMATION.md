@@ -72,20 +72,19 @@ the App can see only the intended repository. Shadow triage does not request an 
 
 ### Maintenance Automation
 
-`.github/workflows/maintenance-automation.yml` runs on issue creation, edits, reopen events, and
-label changes. Manual dispatch supports:
+The maintenance automation workflow is not enabled in this fork. The policy scripts it would call
+remain in `scripts/automation/` and are covered by `scripts/automation/tests/`, so the behavior can
+be replayed locally:
 
-- an `issue_number` to replay shadow analysis;
-- `verify_app` to validate the App installation without writing repository state.
-
-Every issue has its own concurrency group. Runs are serialized rather than cancelled so an edit
-cannot interrupt cleanup of a previous raw issue context.
+```sh
+node --test scripts/automation/tests/*.test.cjs
+```
 
 ### Native Platform Checks
 
-`.github/workflows/platform-checks.yml` checks the native application and GPUI platform crate on
-Windows and macOS whenever application code or workspace dependencies change. Linux continues to
-use the full workspace CI job.
+Native platform compilation is not automated in this fork. The Windows portable package is built by
+`.github/workflows/windows-x64-portable.yml`, which compiles the application on Windows and verifies
+the package contents. macOS and Linux builds are verified locally before a release.
 
 ## Shadow evaluation
 
