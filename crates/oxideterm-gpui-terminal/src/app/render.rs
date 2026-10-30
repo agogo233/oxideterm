@@ -3,7 +3,7 @@ use std::{path::PathBuf, sync::Arc, time::Instant};
 use gpui::{
     Anchor, AnchoredPositionMode, AnyElement, App, ClipboardItem, Context, ExternalPaths,
     FocusHandle, Focusable, FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ObjectFit, Render, RenderImage, SharedString, Window, anchored, deferred, div, point, prelude::*, px, rgb, rgba,
+    Render, SharedString, Window, anchored, deferred, div, point, prelude::*, px, rgb, rgba,
 };
 use oxideterm_gpui_ui::button::{
     ButtonRadius, ContextChipOptions, IconButtonOptions, context_chip, icon_button,
@@ -382,7 +382,7 @@ impl Render for TerminalPane {
                 background_display_target(window.bounds().size, window.scale_factor())
             });
         let background_layer = background.as_ref().map(|background| {
-            terminal_background_layer(
+            oxideterm_gpui_background::background_layer(
                 background.clone(),
                 if oxideterm_gpui_background::is_streaming_source(&background.path) {
                     None
@@ -390,6 +390,8 @@ impl Render for TerminalPane {
                     self.background_image_cache
                         .render_background_image(background, background_display)
                 },
+                window,
+                cx,
             )
         });
         self.ensure_background_image_completion_poll(cx);
@@ -2927,53 +2929,6 @@ impl TerminalPane {
                 cx.stop_propagation();
             }),
         )
-    }
-}
-
-fn label_with_count(template: &str, count: usize) -> String {
-    template.replace("{{count}}", &count.to_string())
-}
-
-fn terminal_background_layer(
-    background: TerminalBackgroundPreferences,
-    image: Option<Arc<RenderImage>>,
-) -> AnyElement {
-let image = if background.fit == TerminalBackgroundFit::Tile && background.blur <= 0.01 {
-        gpui::img(background.path.clone()).with_fallback(|| div().size_full().into_any_element())
-    } else if let Some(image) = image {
-        gpui::img(image)
-    } else {
-        return div()
-            .absolute()
-            .top_0()
-            .left_0()
-            .right_0()
-            .bottom_0()
-            .into_any_element();
-    };
-
-    div()
-        .absolute()
-        .top_0()
-        .left_0()
-        .right_0()
-        .bottom_0()
-        .overflow_hidden()
-        .child(
-image
-                .size_full()
-                .object_fit(terminal_background_object_fit(background.fit))
-                .opacity(background.opacity.clamp(0.0, 1.0)),
-        )
-        .into_any_element()
-}
-
-fn terminal_background_object_fit(fit: TerminalBackgroundFit) -> ObjectFit {
-    match fit {
-        TerminalBackgroundFit::Cover => ObjectFit::Cover,
-        TerminalBackgroundFit::Contain => ObjectFit::Contain,
-        TerminalBackgroundFit::Fill => ObjectFit::Fill,
-        TerminalBackgroundFit::Tile => ObjectFit::None,
     }
 }
 
